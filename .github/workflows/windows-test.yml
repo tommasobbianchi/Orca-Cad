@@ -1,0 +1,39 @@
+name: Windows tester build
+
+# Manual-only Windows x64 build, for handing a test package to collaborators.
+# Lives off the PR branch on purpose: it produces an artifact, it does not change
+# what is under review. The code built is the tip of whatever ref this is
+# dispatched from, so dispatch it from a ref that carries the CAD work.
+#
+# Artifacts (per run page):
+#   OrcaSlicer_Windows_<ver>            -> the NSIS installer .exe
+#   OrcaSlicer_Windows_<ver>_portable   -> the unpacked app folder
+#   OrcaSlicer_profile_validator_Windows_<ver> -> CLI profile validator
+#   PDB                                 -> debug symbols (developers only)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check_build_script:
+    name: Windows build script tests
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          lfs: 'false'
+      - name: Run the build script test suite
+        shell: powershell
+        run: .\scripts\test_build_win.ps1
+
+  build_windows:
+    name: Build Windows x64
+    needs: check_build_script
+    if: ${{ !cancelled() && needs.check_build_script.result == 'success' }}
+    uses: ./.github/workflows/build_check_cache.yml
+    with:
+      os: windows-latest
+      arch: x64
+      compiler: clang
+    secrets: inherit
