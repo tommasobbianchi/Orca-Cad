@@ -870,6 +870,7 @@ private:
     void on_move_body();                  // start the move gizmo on the selected body
     void arm_transform_gizmo();           // arm the move gizmo on the Transform card's body (add mode only)
     void on_set_body_color();             // Color tool: pick a per-body display colour override
+    void on_boolean_tool();               // Boolean (combine bodies): needs two solids, then opens the tool
     int  tree_selection() const;          // selected feature row, or wxNOT_FOUND
     int  tree_body_selection() const;     // selected Parts-list body index, or -1
     void refresh_parts();                 // rebuild the Bodies list under the feature tree

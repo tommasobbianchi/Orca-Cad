@@ -997,17 +997,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
         });
 
         auto* b_boolean = icon_btn("design_boolean", _L("Boolean (combine bodies)"));
-        std::function<void()> act_boolean = [this] {
-            // A body-body boolean needs at least two solids to combine.
-            if (m_doc.bodies.size() < 2) {
-                m_status->SetForegroundColour(wxColour(235, 110, 110));
-                set_status(_L("Boolean needs two bodies — create or import a second solid"));
-                m_status->Refresh();
-                return;
-            }
-            populate_body_choices();
-            open_tool(Tool::Boolean);
-        };
+        std::function<void()> act_boolean = [this] { on_boolean_tool(); };
         b_boolean->Bind(wxEVT_BUTTON, [act_boolean](wxCommandEvent&) { act_boolean(); });
         m_keys_feature[SHIFT('B')] = act_boolean;
         fadd("boolean", b_boolean);
@@ -1820,7 +1810,11 @@ DesignPanel::DesignPanel(wxWindow* parent)
     {
         auto* eform = two_col_form();
 
-        m_distance = make_spin(m_cards, 10);
+        // A negative distance extrudes the other way — Onshape behaviour, where a negative
+        // depth IS the flip. The default 0.1 floor made that impossible to type, so the only
+        // way inward was the Flip box, and a user who typed "-5" silently got +0.1 instead.
+        // Flip and a negative distance double-negate, which is what setting both asked for.
+        m_distance = make_spin(m_cards, 10, -1000.0, 1000.0);
         eform->Add(new wxStaticText(m_cards, wxID_ANY, _L("Extrude dist")), 0, wxALIGN_CENTER_VERTICAL);
         eform->Add(spin_frame(m_distance), 0, wxEXPAND);
 
@@ -3288,7 +3282,8 @@ DesignPanel::DesignPanel(wxWindow* parent)
     // header, where it had to guess whether its subject was a body or a feature; Show/hide,
     // Delete and Colour are deliberate COPIES of feature-tree actions, because a body row is a
     // different subject and a user working in this list should not have to travel to another
-    // card to hide or recolour what they have selected. Each one already resolves the body row
+    // card to hide or recolour what they have selected. Boolean is not a copy — it is the one
+    // body-body operation, gated through on_boolean_tool. Each one already resolves the body row
     // itself (on_toggle_visibility, on_delete_body, on_set_body_color), so nothing here decides
     // policy — the card only gives them a home next to the rows they act on.
     {
@@ -3308,6 +3303,10 @@ DesignPanel::DesignPanel(wxWindow* parent)
                 m_status->Refresh();
             }
         });
+        // Boolean lives here as well as on the toolbar: combining two bodies is a body action,
+        // and a user working in the body list should not have to leave it to find this.
+        auto* bbool = body_btn("design_boolean", _L("Boolean — join, subtract or intersect with another body"));
+        bbool->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_boolean_tool(); });
         auto* bvis  = body_btn("design_eye",    _L("Show / hide"));
         bvis->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_toggle_visibility(); });
         auto* bdel  = body_btn("design_delete", _L("Delete"));
@@ -3317,6 +3316,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
         const int bgap = FromDIP(SidebarProps::ElementSpacing());
         m_parts_hdr->AddStretchSpacer(1);
         m_parts_hdr->Add(bmove, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, bgap);
+        m_parts_hdr->Add(bbool, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, bgap);
         m_parts_hdr->Add(bvis,  0, wxALIGN_CENTER_VERTICAL | wxRIGHT, bgap);
         m_parts_hdr->Add(bdel,  0, wxALIGN_CENTER_VERTICAL | wxRIGHT, bgap);
         m_parts_hdr->Add(bcol,  0, wxALIGN_CENTER_VERTICAL);
@@ -7338,6 +7338,21 @@ void DesignPanel::feed_bodies()
     if (m_viewport == nullptr) return;
     rebuild_disp_meshes();
     m_viewport->set_bodies(m_disp_body_meshes, m_body_visible);
+}
+
+// Boolean (combine bodies) — one gate for every door onto the tool. A body-body operation
+// needs two solids, and saying so in one place means the toolbar button, its Shift+B binding
+// and the Bodies card cannot drift apart on what "available" means.
+void DesignPanel::on_boolean_tool()
+{
+    if (m_doc.bodies.size() < 2) {
+        m_status->SetForegroundColour(wxColour(235, 110, 110));
+        set_status(_L("Boolean needs two bodies — create or import a second solid"));
+        m_status->Refresh();
+        return;
+    }
+    populate_body_choices();
+    open_tool(Tool::Boolean);
 }
 
 void DesignPanel::on_move_body()
