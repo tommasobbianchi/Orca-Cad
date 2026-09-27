@@ -1,0 +1,19 @@
+name: Linux tester build
+
+# Manual-only Linux x86_64 build (AppImage), for a desktop machine or for
+# handing a test package to collaborators. Self-contained: the AppImage bundles
+# its libraries, so it needs no build tree on the target.
+#
+# Artifact (per run page): OrcaSlicer_Linux_ubuntu_2404_<ver>
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build_linux:
+    name: Build Linux x86_64
+    uses: ./.github/workflows/build_check_cache.yml
+    with:
+      os: ubuntu-24.04
+      arch: ""
+    secrets: inherit

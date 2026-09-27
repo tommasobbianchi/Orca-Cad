@@ -1,0 +1,42 @@
+name: macOS tester build
+
+# Manual-only macOS build, for handing a test package to collaborators.
+# Runs on GitHub's macOS runners independently of the Windows tester build, so
+# the two compile in parallel and share neither CPU nor cache.
+#
+# The DMG is UNSIGNED: signing/notarization is gated to OrcaSlicer/OrcaSlicer on
+# main/release branches, so a fork takes the "Create DMG without notary" path.
+# Testers open it via right-click -> Open, or Privacy & Security -> Open Anyway.
+#
+# Artifacts (per run page):
+#   OrcaSlicer_Mac_universal_<ver>                   -> the .dmg
+#   OrcaSlicer_profile_validator_Mac_universal_DMG_<ver> -> CLI validator .dmg
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build_macos_arch:
+    name: Build macOS ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - arm64
+          - x86_64
+    uses: ./.github/workflows/build_check_cache.yml
+    with:
+      os: macos-14
+      arch: ${{ matrix.arch }}
+    secrets: inherit
+
+  build_macos_universal:
+    name: Build macOS Universal
+    needs: build_macos_arch
+    if: ${{ !cancelled() && needs.build_macos_arch.result == 'success' }}
+    uses: ./.github/workflows/build_orca.yml
+    with:
+      os: macos-14
+      arch: universal
+      macos-combine-only: true
+    secrets: inherit
