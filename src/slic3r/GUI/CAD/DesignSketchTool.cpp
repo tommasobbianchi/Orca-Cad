@@ -235,6 +235,10 @@ void DesignSketchTool::set_tool(Mode mode)
     // m_mode, so after the assignment they would test the tool being switched TO. That read
     // op_ready()==0 with a=0 b=3 val=28.205 sitting right there — picked, valued, and dropped.
     if (op_ready()) confirm_op();
+    // And the same rule for the transform gizmo: a ready edit-op committed here while a pending
+    // transform was silently dropped, which is the same "the value was set, the ghost was drawn,
+    // and nothing was written" failure the comment above records for Fillet.
+    if (tf_ready()) confirm_transform();
 
     // An OPEN inline value field freezes the canvas (on_mouse_impl returns early while
     // m_awaiting_length) and blocks every keyboard shortcut (in_text includes inline_busy()).
@@ -603,6 +607,21 @@ void DesignSketchTool::apply_angle_between(int ia, int ib, double deg)
 
 void DesignSketchTool::apply_dimension(double v)
 {
+    // Refuse BEFORE moving or recording. Each case below has its own threshold (positive for
+    // length / radius / diameter, non-negative for a distance) and the constraint used to be
+    // recorded UNCONDITIONALLY after them — so a value that moved nothing was still handed to
+    // the solver, which then had to satisfy something it never could. The socket guarded against
+    // this and said so; now the tool does too, and it says why.
+    const DimType kind = dimension_kind();
+    const bool needs_positive = (kind == DimType::Length || kind == DimType::Radius ||
+                                 kind == DimType::Diameter);
+    if (!std::isfinite(v) || (needs_positive && v <= 0.0) ||
+        (!needs_positive && kind != DimType::Angle && kind != DimType::None && v < 0.0)) {
+        if (on_readout)
+            on_readout(needs_positive ? "the value must be greater than zero"
+                                      : "the value must not be negative (zero means coincident)");
+        return;
+    }
     switch (dimension_kind()) {
     case DimType::Length: {
         SketchEntity& e = m_entities[m_selection[0]];
@@ -651,6 +670,8 @@ void DesignSketchTool::apply_dimension(double v)
     }
     record_dimension_constraint(v);          // store a driving constraint for this dimension
     resolve_live();                          // live-solve so the viewport shows the solved sketch
+    if (!m_solve_ok && on_readout)           // the number on screen is not the geometry's number
+        on_readout("that dimension cannot be satisfied — the sketch is over-constrained");
     m_selection.clear();
     if (on_selection_changed) on_selection_changed(0);
 }
@@ -671,23 +692,23 @@ void DesignSketchTool::record_dimension_constraint(double v)
         c.type = SketchConstraintType::Distance;
         c.ea = m_selection[0]; c.ra = SketchPointRole::P0;
         c.eb = m_selection[0]; c.rb = SketchPointRole::P1;
-        c.value = v; m_constraints.push_back(c); break;
+        c.value = v; upsert_dimension_constraint(c); break;
     case DimType::Diameter:
         c.type = SketchConstraintType::Diameter; c.ea = m_selection[0]; c.value = v;
-        m_constraints.push_back(c); break;
+        upsert_dimension_constraint(c); break;
     case DimType::Radius:
         c.type = SketchConstraintType::Radius; c.ea = m_selection[0]; c.value = v;
-        m_constraints.push_back(c); break;
+        upsert_dimension_constraint(c); break;
     case DimType::Angle:
         c.type = SketchConstraintType::Angle;
         c.ea = m_selection[0]; c.eb = m_selection[1]; c.value = v;
-        m_constraints.push_back(c); break;
+        upsert_dimension_constraint(c); break;
     case DimType::Distance: {
         const int ia = m_selection[0], ib = m_selection[1];
         if (v < 1e-9) c.type = SketchConstraintType::Coincident;
         else        { c.type = SketchConstraintType::Distance; c.value = v; }
         c.ea = ia; c.ra = role(ia); c.eb = ib; c.rb = role(ib);
-        m_constraints.push_back(c); break;
+        upsert_dimension_constraint(c); break;
     }
     case DimType::DistanceToLine: {
         // Point-on-line driving constraint: hold the point-like entity at unsigned
@@ -697,7 +718,7 @@ void DesignSketchTool::record_dimension_constraint(double v)
         const int il = m_selection[aLine ? 0 : 1];   // line
         c.type = SketchConstraintType::PointOnLine;
         c.ea = ip; c.ra = role(ip); c.eb = il; c.value = v;
-        m_constraints.push_back(c); break;
+        upsert_dimension_constraint(c); break;
     }
     default: break;   // None: no driving constraint recorded
     }
@@ -741,15 +762,21 @@ void DesignSketchTool::resolve_live_drag(int dragged_ei, SketchPointRole dragged
         m_dof      = r.dof;
         m_solve_ok = r.ok;
         // Flag every entity referenced by a conflicting constraint so render() can
-        // tint it red (Onshape/SolveSpace over-constrained feedback).
+        // tint it red (Onshape/SolveSpace over-constrained feedback), and remember which
+        // DIMENSIONS those constraints drive: a label showing a value the geometry does not have
+        // is the one thing the user must be able to see, and r.bad names it.
+        m_bad_dims.clear();
         for (int bi : r.bad) {
             if (bi < 0 || bi >= int(m_constraints.size())) continue;
             const SketchEntityConstraintDef& c = m_constraints[bi];
             for (int e : {c.ea, c.eb, c.ec})
                 if (e >= 0 && e < int(m_entity_conflict.size())) m_entity_conflict[e] = 1;
+            for (int di = 0; di < int(m_dimensions.size()); ++di)
+                if (m_dimensions[di].con == bi) m_bad_dims.push_back(di);
         }
     } else {
         m_dof = -1; m_solve_ok = true;
+        m_bad_dims.clear();
     }
     if (on_solve_state) on_solve_state(m_dof, m_solve_ok, has);
 }
@@ -1113,6 +1140,24 @@ int DesignSketchTool::upsert_constraint(const SketchEntityConstraintDef& c)
     return int(m_constraints.size()) - 1;
 }
 
+// A Distance and its zero case are ONE dimension slot: typing 0 records a Coincident, and typing
+// 5 after that used to record a second constraint beside it — over-constrained by construction,
+// which reads as the edit being ignored. Replace across that pair, then upsert normally.
+int DesignSketchTool::upsert_dimension_constraint(const SketchEntityConstraintDef& c)
+{
+    const bool zero_case = (c.type == SketchConstraintType::Coincident);
+    const bool dist_case = (c.type == SketchConstraintType::Distance);
+    if (zero_case || dist_case) {
+        erase_constraints([&](int, const SketchEntityConstraintDef& d) {
+            const bool same = (d.ea == c.ea && d.eb == c.eb) || (d.ea == c.eb && d.eb == c.ea);
+            if (!same) return false;
+            return zero_case ? (d.type == SketchConstraintType::Distance)
+                             : (d.type == SketchConstraintType::Coincident);
+        });
+    }
+    return upsert_constraint(c);
+}
+
 // The same rule for the visible annotation: one quote per (kind, operands), so repeated edits
 // do not stack labels on top of each other reading different values.
 int DesignSketchTool::upsert_dimension(const DimAnnot& a)
@@ -1160,7 +1205,7 @@ SketchEntityConstraintDef DesignSketchTool::constraint_for(const DimAnnot& a) co
 int DesignSketchTool::place_dimension(DimAnnot a)
 {
     a.value = measure_dim(a);
-    a.con   = upsert_constraint(constraint_for(a));
+    a.con   = upsert_dimension_constraint(constraint_for(a));
     const int di = upsert_dimension(a);
     resolve_live();
     open_value_editor(di);
@@ -1424,7 +1469,7 @@ void DesignSketchTool::open_primary_autoedit()
         m_autoedit_dims.push_back({ a.label_pos, a.value,
             [this, a](double v) mutable {
                 a.value = v;
-                a.con   = upsert_constraint(constraint_for(a));
+                a.con   = upsert_dimension_constraint(constraint_for(a));
                 upsert_dimension(a);
                 resolve_live();
             }, { a.ea, a.eb }, dimtype_title(a.kind) });
@@ -1556,6 +1601,25 @@ void DesignSketchTool::set_polygon_side(int fi, double side)
 // Remove orientation constraints touching [begin,end). A pure rotation makes inferred
 // per-edge Horizontal/Vertical (and Parallel/Perp/Angle/Lock) inconsistent, so leaving
 // them in would make resolve_live collapse the shape to satisfy them.
+int DesignSketchTool::erase_constraints(
+    const std::function<bool(int, const SketchEntityConstraintDef&)>& drop)
+{
+    std::vector<int> remap(m_constraints.size(), -1);
+    std::vector<SketchEntityConstraintDef> kept;
+    kept.reserve(m_constraints.size());
+    for (int i = 0; i < int(m_constraints.size()); ++i) {
+        if (drop(i, m_constraints[i])) continue;                 // remove
+        remap[i] = int(kept.size());
+        kept.push_back(m_constraints[i]);
+    }
+    if (kept.size() == m_constraints.size()) return 0;           // nothing dropped
+    const int dropped = int(m_constraints.size() - kept.size());
+    m_constraints.swap(kept);
+    for (DimAnnot& a : m_dimensions)                              // repair the cached indices
+        if (a.con >= 0) a.con = (a.con < int(remap.size())) ? remap[a.con] : -1;
+    return dropped;
+}
+
 void DesignSketchTool::drop_orientation_constraints(int begin, int end)
 {
     using CT = SketchConstraintType;
@@ -1564,36 +1628,16 @@ void DesignSketchTool::drop_orientation_constraints(int begin, int end)
                t == CT::Perpendicular || t == CT::Angle || t == CT::LockX || t == CT::LockY;
     };
     auto in = [&](int e) { return e >= begin && e < end; };
-    std::vector<int> remap(m_constraints.size(), -1);
-    std::vector<SketchEntityConstraintDef> kept;
-    kept.reserve(m_constraints.size());
-    for (int i = 0; i < int(m_constraints.size()); ++i) {
-        const SketchEntityConstraintDef& c = m_constraints[i];
-        if (orient(c.type) && (in(c.ea) || in(c.eb))) continue;   // drop
-        remap[i] = int(kept.size());
-        kept.push_back(c);
-    }
-    if (kept.size() == m_constraints.size()) return;             // nothing dropped
-    m_constraints.swap(kept);
-    for (DimAnnot& a : m_dimensions)                              // fix cached con indices
-        if (a.con >= 0) a.con = (a.con < int(remap.size())) ? remap[a.con] : -1;
+    erase_constraints([&](int, const SketchEntityConstraintDef& c) {
+        return orient(c.type) && (in(c.ea) || in(c.eb));
+    });
 }
 
 void DesignSketchTool::drop_constraints_referencing(int ei)
 {
-    std::vector<int> remap(m_constraints.size(), -1);
-    std::vector<SketchEntityConstraintDef> kept;
-    kept.reserve(m_constraints.size());
-    for (int i = 0; i < int(m_constraints.size()); ++i) {
-        const SketchEntityConstraintDef& c = m_constraints[i];
-        if (c.ea == ei || c.eb == ei || c.ec == ei) continue;    // drop refs to the cut entity
-        remap[i] = int(kept.size());
-        kept.push_back(c);
-    }
-    if (kept.size() == m_constraints.size()) return;
-    m_constraints.swap(kept);
-    for (DimAnnot& a : m_dimensions)
-        if (a.con >= 0) a.con = (a.con < int(remap.size())) ? remap[a.con] : -1;
+    erase_constraints([&](int, const SketchEntityConstraintDef& c) {
+        return c.ea == ei || c.eb == ei || c.ec == ei;            // refs to the cut entity
+    });
 }
 
 // Onshape scissors on the live sketch: cut the picked entity at its nearest intersection.
@@ -2168,6 +2212,8 @@ void DesignSketchTool::set_dimension_value(double v)
     if (a.con >= 0 && a.con < int(m_constraints.size()))
         m_constraints[a.con] = constraint_for(a);
     resolve_live();
+    if (!m_solve_ok && on_readout)
+        on_readout(dimtype_title(a.kind) + " cannot be satisfied — the sketch is over-constrained");
     m_pending_dim = -1;
 }
 
@@ -2431,7 +2477,9 @@ bool DesignSketchTool::remove_constraint_near(const Vec2d& p)
 bool DesignSketchTool::remove_constraint(int idx)
 {
     if (idx < 0 || idx >= int(m_constraints.size())) return false;
-    m_constraints.erase(m_constraints.begin() + idx);
+    const size_t before = m_constraints.size();
+    erase_constraints([idx](int i, const SketchEntityConstraintDef&) { return i == idx; });
+    if (m_constraints.size() == before) return false;
     // resolve_live(), not a bare solve: it is the path that recomputes the DoF, clears the
     // per-entity conflict flags and fires on_solve_state. Solving directly would relax the
     // geometry while leaving the DoF readout and any red over-constrained tint stale — the
@@ -2442,39 +2490,41 @@ bool DesignSketchTool::remove_constraint(int idx)
     return true;
 }
 
+// The endpoint roles an entity exposes to coincidence matching. ONE copy, deliberately: the two
+// file-local lambdas that used to hold this had already diverged (an ellipse arc could be welded
+// by the healer but never auto-inferred coincident at draw time, so the same gesture behaved
+// differently depending on which path ran).
+static int sketch_endpoint_roles(const SketchEntity& e, SketchPointRole out[2])
+{
+    switch (e.type) {
+    case SketchEntity::Type::Line:
+    case SketchEntity::Type::Arc:
+    case SketchEntity::Type::BSpline:
+    case SketchEntity::Type::EllipseArc:
+        out[0] = SketchPointRole::P0; out[1] = SketchPointRole::P1; return 2;
+    case SketchEntity::Type::Point:
+        out[0] = SketchPointRole::P0; return 1;
+    default: return 0;   // circle: centre coincidence is Concentric's job, not this one's
+    }
+}
+
 void DesignSketchTool::infer_auto_constraints(int base, double ang_tol_rad, double weld_tol)
 {
     const int n = int(m_entities.size());
     if (base < 0 || base >= n) return;
 
-    // Endpoint roles an entity exposes for coincidence matching.
-    auto roles_of = [](const SketchEntity& e, SketchPointRole out[2]) -> int {
-        switch (e.type) {
-        case SketchEntity::Type::Line:   out[0] = SketchPointRole::P0; out[1] = SketchPointRole::P1; return 2;
-        case SketchEntity::Type::Arc:    out[0] = SketchPointRole::P0; out[1] = SketchPointRole::P1; return 2;
-        // EllipseArc was missing here while the otherwise identical roles_of in
-        // heal_coincidences (below) has it, so an ellipse arc's endpoints could be WELDED by the
-        // healer but never auto-inferred coincident at draw time -- the same gesture behaved
-        // differently depending on which path ran. Two copies of one rule is how that happens.
-        case SketchEntity::Type::EllipseArc:
-                                         out[0] = SketchPointRole::P0; out[1] = SketchPointRole::P1; return 2;
-        case SketchEntity::Type::BSpline:out[0] = SketchPointRole::P0; out[1] = SketchPointRole::P1; return 2;
-        case SketchEntity::Type::Point:  out[0] = SketchPointRole::P0; return 1;
-        default: return 0;   // circle: centre coincidence handled by Concentric, not here
-        }
-    };
 
     // 1) Coincident between a new endpoint and any (co-located) endpoint of another
     //    entity. snap_vertex already drove the coordinates together; this records it
     //    so a re-solve keeps the loop closed.
     std::vector<SketchEntityConstraintDef> coincs;
     for (int i = base; i < n; ++i) {
-        SketchPointRole ir[2]; const int ni = roles_of(m_entities[i], ir);
+        SketchPointRole ir[2]; const int ni = sketch_endpoint_roles(m_entities[i], ir);
         for (int a = 0; a < ni; ++a) {
             Vec2d pa; if (!point_at(i, ir[a], pa)) continue;
             for (int j = 0; j < n; ++j) {
                 if (j == i) continue;
-                SketchPointRole jr[2]; const int nj = roles_of(m_entities[j], jr);
+                SketchPointRole jr[2]; const int nj = sketch_endpoint_roles(m_entities[j], jr);
                 for (int b = 0; b < nj; ++b) {
                     if (j >= base && j < i) continue;          // avoid duplicate (i,j)/(j,i)
                     Vec2d pb; if (!point_at(j, jr[b], pb)) continue;
@@ -6972,8 +7022,25 @@ void DesignSketchTool::draw_dim_label(const std::string& txt, const Vec2d& plane
     ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
     ImGui::AlignTextToFramePadding();
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const ImVec2 pos = ImGui::GetCursorScreenPos();
     const ImVec2 ts  = ImGui::CalcTextSize(txt.c_str());
+    // Push this label clear of any already drawn this frame (see m_label_rects).
+    {
+        ImVec2 wp = ImGui::GetWindowPos();
+        const ImVec2 ws = ImGui::GetWindowSize();
+        for (int guard = 0; guard < 8; ++guard) {
+            bool hit = false;
+            for (const LabelRect& r : m_label_rects) {
+                const double ix = std::min(double(wp.x) + ws.x, r.x + r.w) - std::max(double(wp.x), r.x);
+                const double iy = std::min(double(wp.y) + ws.y, r.y + r.h) - std::max(double(wp.y), r.y);
+                if (ix > 2.0 && iy > 2.0) { hit = true; break; }
+            }
+            if (!hit) break;
+            wp.y += ws.y + 2.0f;                       // straight down, one label per step
+            ImGui::SetWindowPos(wp, ImGuiCond_Always);
+        }
+        m_label_rects.push_back({double(wp.x), double(wp.y), double(ws.x), double(ws.y)});
+    }
+    const ImVec2 pos = ImGui::GetCursorScreenPos();
     const ImGuiStyle& st = ImGui::GetStyle();
     dl->AddRectFilled(ImVec2(pos.x - st.FramePadding.x, pos.y + st.FramePadding.y),
                       ImVec2(pos.x + ts.x + 2.0f * st.FramePadding.x,
@@ -7110,7 +7177,12 @@ void DesignSketchTool::render_dimensions(double unit_per_px)
     const double th = std::max(15.0 * unit_per_px, 1e-4);
     for (size_t di = 0; di < m_dimensions.size(); ++di) {
         Vec2d label;
-        if (draw_dim_quote(m_dimensions[di], th, dimcol, label))
+        // A dimension whose driving constraint the solver rejected is drawn in the refusal
+        // colour: its label is showing a value the geometry does not have, and this is the only
+        // thing on screen that points at WHICH number is the lie.
+        const bool bad = std::find(m_bad_dims.begin(), m_bad_dims.end(), int(di)) != m_bad_dims.end();
+        const ColorRGBA col = bad ? ColorRGBA(0.92f, 0.35f, 0.35f, 1.0f) : dimcol;
+        if (draw_dim_quote(m_dimensions[di], th, col, label))
             m_dimensions[di].label_pos = label;
     }
 }
@@ -7805,6 +7877,11 @@ void DesignSketchTool::op_pick(int ei)
         if (t != SketchEntity::Type::Line) return;            // corner ops need two lines
         if (m_op_a < 0) m_op_a = ei;
         else if (ei != m_op_a) {
+            Vec2d cC, cBis; double cTh = 0.0;
+            if (!op_corner(m_op_a, ei, cC, cBis, cTh)) {   // parallel or straight: no corner
+                if (on_readout) on_readout("those two lines do not meet at a corner — pick two lines that do");
+                return;
+            }
             m_op_b = ei;
             const double la = (m_entities[m_op_a].p1 - m_entities[m_op_a].p0).norm();
             const double lb = (m_entities[m_op_b].p1 - m_entities[m_op_b].p0).norm();
@@ -7941,7 +8018,13 @@ void DesignSketchTool::confirm_op()
         const bool ok = fillet
             ? SketchEngine::fillet_lines(m_entities[m_op_a], m_entities[m_op_b], m_op_value, a_out, b_out, extra)
             : SketchEngine::chamfer_lines(m_entities[m_op_a], m_entities[m_op_b], m_op_value, a_out, b_out, extra);
-        if (!ok) { reset_op(); return; }
+        if (!ok) {
+            if (on_readout) on_readout(fillet
+                ? "Fillet: the radius overruns a leg, or the two lines do not meet at a corner"
+                : "Chamfer: the distance overruns a leg, or the two lines do not meet at a corner");
+            reset_op();
+            return;
+        }
         const int a = m_op_a, b = m_op_b;
         m_entities[a] = a_out; m_entities[b] = b_out;
         const int xi = int(m_entities.size());
@@ -7956,11 +8039,12 @@ void DesignSketchTool::confirm_op()
             return (d.ea == e && d.ra == r) || (d.eb == e && d.rb == r); };
         auto self_len = [](const SketchEntityConstraintDef& d, int e) {
             return d.type == CT::Distance && d.ea == e && d.eb == e; };
-        auto& cs = m_constraints;
-        cs.erase(std::remove_if(cs.begin(), cs.end(), [&](const SketchEntityConstraintDef& d) {
+        const int released = erase_constraints([&](int, const SketchEntityConstraintDef& d) {
             return (d.type == CT::Coincident && refs(d, a, ra) && refs(d, b, rb))
                 || self_len(d, a) || self_len(d, b);
-        }), cs.end());
+        });
+        if (released > 0 && on_readout)
+            on_readout(std::to_string(released) + " constraint(s) the fillet/chamfer invalidated were removed");
         auto coin = [&](R xr, int ln, R lr) {
             SketchEntityConstraintDef d; d.type = CT::Coincident; d.ea = xi; d.ra = xr; d.eb = ln; d.rb = lr; return d; };
         if (fillet) {
@@ -7978,7 +8062,11 @@ void DesignSketchTool::confirm_op()
     } else if (m_mode == Mode::Offset) {
         const int a = m_op_a;
         auto out = SketchEngine::offset_entities({ m_entities[a] }, m_op_value);
-        if (out.empty()) { reset_op(); return; }
+        if (out.empty()) {
+            if (on_readout) on_readout("Offset: an ellipse or a spline has no parallel of its own kind — pick lines, arcs or circles");
+            reset_op();
+            return;
+        }
         const int ni = int(m_entities.size());
         for (auto& o : out) m_entities.push_back(o);
         const SketchEntity::Type st = m_entities[a].type;
@@ -8364,8 +8452,7 @@ void DesignSketchTool::confirm_transform()
                 out = SketchEngine::transform_entities({ m_entities[ti] }, Vec2d(0, 0), 0.0, m_tf_scale, m_tf_pivot);
             if (!out.empty()) m_entities[ti] = out[0];
         }
-        auto& cs = m_constraints;
-        cs.erase(std::remove_if(cs.begin(), cs.end(), [&](const SketchEntityConstraintDef& d) {
+        const int released = erase_constraints([&](int, const SketchEntityConstraintDef& d) {
             if (!(is_target(d.ea) || is_target(d.eb) || is_target(d.ec))) return false;
             const bool self = (d.ea == d.eb);   // self-length Distance survives translate/rotate
             if (mode == Mode::Move) {
@@ -8389,7 +8476,9 @@ void DesignSketchTool::confirm_transform()
                 default:                                return true;   // size + position broken
                 }
             }
-        }), cs.end());
+        });
+        if (released > 0 && on_readout)
+            on_readout(std::to_string(released) + " constraint(s) released by the transform");
     } else if (m_mode == Mode::Array || m_mode == Mode::PolarArray) {
         // ADDITIVE: append copies of each subject, then bind each copy to its source. Lines
         // get Parallel+EqualLength (linear) or EqualLength only (polar — rotation breaks
@@ -8441,7 +8530,10 @@ void DesignSketchTool::confirm_transform()
                 ladder = can_conc ? std::vector<std::vector<SketchEntityConstraintDef>>{ mk(true), mk(false) }
                                   : std::vector<std::vector<SketchEntityConstraintDef>>{ mk(false) };
             }
-            for (auto& w : ladder) if (!w.empty() && try_add_constraints(w)) break;
+            bool bound = false;
+            for (auto& w : ladder) if (!w.empty() && try_add_constraints(w)) { bound = true; break; }
+            if (!bound && on_readout)
+                on_readout("the array copies are unconstrained — the solver refused every binding");
         }
     }
     reset_tf();
@@ -8485,6 +8577,7 @@ void DesignSketchTool::emit_step_hint()
 void DesignSketchTool::render(GLCanvas3D& canvas)
 {
     m_dim_label_seq = 0;
+    m_label_rects.clear();
     m_render_scale  = canvas.get_scale();
     // The open value field is anchored OVER the label it edits, and the label draws on top of
     // it — the same number twice at the same spot. Record which label that is so draw_text can
@@ -9528,31 +9621,18 @@ DesignSketchTool::LoopReport DesignSketchTool::loop_report() const
 int DesignSketchTool::heal_coincidences(double tol, bool ignore_construction)
 {
     if (tol <= 0.0) tol = 1e-3;
-    // Endpoint roles an entity exposes, same set infer_auto_constraints matches on.
-    auto roles_of = [](const SketchEntity& e, SketchPointRole out[2]) -> int {
-        switch (e.type) {
-        case SketchEntity::Type::Line:
-        case SketchEntity::Type::Arc:
-        case SketchEntity::Type::BSpline:
-        case SketchEntity::Type::EllipseArc:
-            out[0] = SketchPointRole::P0; out[1] = SketchPointRole::P1; return 2;
-        case SketchEntity::Type::Point:
-            out[0] = SketchPointRole::P0; return 1;
-        default: return 0;
-        }
-    };
 
     const int n = int(m_entities.size());
     int welded = 0;
     std::vector<SketchEntityConstraintDef> cands;
     for (int i = 0; i < n; ++i) {
         if (ignore_construction && m_entities[i].construction) continue;
-        SketchPointRole ir[2]; const int ni = roles_of(m_entities[i], ir);
+        SketchPointRole ir[2]; const int ni = sketch_endpoint_roles(m_entities[i], ir);
         for (int a = 0; a < ni; ++a) {
             Vec2d pa; if (!point_at(i, ir[a], pa)) continue;
             for (int j = i + 1; j < n; ++j) {
                 if (ignore_construction && m_entities[j].construction) continue;
-                SketchPointRole jr[2]; const int nj = roles_of(m_entities[j], jr);
+                SketchPointRole jr[2]; const int nj = sketch_endpoint_roles(m_entities[j], jr);
                 for (int b = 0; b < nj; ++b) {
                     Vec2d pb; if (!point_at(j, jr[b], pb)) continue;
                     const double d = (pa - pb).norm();
@@ -10679,6 +10759,8 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
                     if (t == SketchEntity::Type::Line)        { a.kind = DimType::Length;   place_dimension(a); }
                     else if (t == SketchEntity::Type::Circle) { a.kind = DimType::Diameter; place_dimension(a); }
                     else if (t == SketchEntity::Type::Arc)    { a.kind = DimType::Radius;   place_dimension(a); }
+                    else if (on_readout)
+                        on_readout("no dimension for that entity yet — click a line, a circle, an arc, or two points");
                 }
             } else {
                 if (got_pt && !(pe == m_dim_e0 && pr == m_dim_r0)) {
@@ -10689,6 +10771,8 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
                     DimAnnot a; a.kind = DimType::DistanceToLine;
                     a.ea = m_dim_e0; a.ra = m_dim_r0; a.eb = he;
                     place_dimension(a);
+                } else if (he >= 0 && on_readout) {
+                    on_readout("click a second point, or a line to measure the distance to");
                 }
                 m_dim_has0 = false;                    // reset after the second pick
             }
