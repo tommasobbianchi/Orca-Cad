@@ -2,6 +2,7 @@
 
 #include "slic3r/GUI/ImGuiWrapper.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
+#include "slic3r/GUI/GUI.hpp"   // into_u8 — the upstream sync dropped the transitive path
 #include "slic3r/GUI/I18N.hpp"
 #include "libslic3r/Color.hpp"
 
