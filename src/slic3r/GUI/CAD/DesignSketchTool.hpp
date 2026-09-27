@@ -808,12 +808,19 @@ private:
     // EllipseArc endpoint drag: Center translates; P0/P1 move the sweep start/end to the
     // parametric angle of the cursor on the ellipse frame (radius/shape preserved).
     void drag_ellipsearc_handle(int ei, SketchPointRole role, const Vec2d& target);
+    // The ONE way to remove constraints. m_dimensions[i].con caches a POSITIONAL index into
+    // m_constraints, so an erase that does not repair those links leaves a dimension pointing
+    // at whatever slid into the hole — and set_dimension_value then writes a def into that
+    // slot, silently overwriting an unrelated constraint. `drop(idx, def)` returns true to
+    // remove. Every removal in this file routes through here.
+    // Returns how many were removed.
+    int  erase_constraints(const std::function<bool(int, const SketchEntityConstraintDef&)>& drop);
     // Drop orientation constraints (H/V/Parallel/Perp/Angle/LockX/LockY) on entities in
     // [begin,end). A ROTATION makes inferred per-edge H/V inconsistent, so re-solving
-    // against them collapses the shape — drop them first (fixes up DimAnnot.con indices).
+    // against them collapses the shape — drop them first.
     void drop_orientation_constraints(int begin, int end);
     // Drop every live constraint that references entity `ei` (Trim/Extend slide an endpoint,
-    // invalidating its constraints) and fix the dimensions' cached constraint indices.
+    // invalidating its constraints).
     void drop_constraints_referencing(int ei);
     // Standalone Trim/Extend scissors on the LIVE sketch: pick the entity nearest `p` (within
     // `tol` plane units) and cut it back to / out to its nearest intersection with the others.
@@ -836,6 +843,9 @@ private:
     // UPDATE it, not append a rival asking for something else. Both return the index.
     int upsert_constraint(const SketchEntityConstraintDef& c);
     int upsert_dimension(const DimAnnot& a);
+    // The same slot rule for the DRIVING constraint: a Distance and its zero case (recorded as
+    // a Coincident) are one dimension, so they replace each other instead of stacking.
+    int upsert_dimension_constraint(const SketchEntityConstraintDef& c);
     int  place_dimension(DimAnnot a);                                       // create+drive+notify
     std::string dim_text(const DimAnnot& a) const;                          // rendered label string
     void render_dimensions(double unit_per_px);                            // quote lines + labels
@@ -1113,6 +1123,7 @@ private:
     bool              m_solve_ok{true};   // solver consistent (no conflicting constraints)
     std::vector<char> m_entity_conflict;  // per-entity flag: touched by a conflicting constraint
     std::vector<DimAnnot> m_dimensions;           // placed dimension quotes (Mode::Dimension)
+    std::vector<int>      m_bad_dims;             // dims whose driving constraint the solver rejected
     int                 m_dim_e0{-1};             // first picked point's entity (Dimension)
     SketchPointRole     m_dim_r0{SketchPointRole::P0};
     bool                m_dim_has0{false};        // a first point is pending
@@ -1136,6 +1147,13 @@ private:
     GLModel             m_vertex_model;
     GLModel             m_highlight_model;
     int                 m_dim_label_seq{0};
+    // Screen rects of the labels already drawn this frame (cleared with m_dim_label_seq). Two
+    // labels on a SMALL feature collide: every anchor offset in this file is a multiple of the
+    // text height, so once the feature's on-screen size drops below one, a line's Length and
+    // Angle labels land on the same spot. Each label is its own centred window and nothing
+    // detects proximity, so the later one is pushed clear before it is drawn.
+    struct LabelRect { double x{0}, y{0}, w{0}, h{0}; };
+    std::vector<LabelRect> m_label_rects;
     float               m_render_scale{1.0f};   // canvas scale for Measure-style dim labels
     GLModel             m_fill_model;       // translucent face fill for closed regions
     std::vector<DisplaySketch> m_display_sketches;  // committed sketches drawn persistently
