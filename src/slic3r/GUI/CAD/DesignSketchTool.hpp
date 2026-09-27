@@ -988,6 +988,12 @@ private:
     };
     std::vector<AutoEditStep> m_autoedit_dims;    // queued steps to edit in sequence
     int                 m_autoedit_dim_idx{-1};   // index into m_autoedit_dims (-1 = idle)
+    // Plane coords of the label the OPEN value field sits on. The field is anchored OVER its
+    // label (open_next_autoedit_dim) and the label is drawn after it, on top — the same number
+    // twice at the same spot. draw_text skips exactly this position while a step is open; the
+    // shape's other values stay legible as the chain walks them. Far-off sentinel = suppress
+    // nothing.
+    Vec2d               m_autoedit_label_pos{1e18, 1e18};
     std::vector<int>    m_selection;              // selected entity indices (Mode::Select)
     std::vector<std::pair<int, SketchPointRole>> m_point_sel;  // selected individual points
     int                 m_last_mouse_x{0};        // last cursor pos (canvas client px), for

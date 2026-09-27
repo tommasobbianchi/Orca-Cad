@@ -6992,6 +6992,13 @@ void DesignSketchTool::draw_text(GLModel& /*model*/, const std::string& s, const
     // ponytail: all sketch labels now render as Measure-gizmo-style ImGui labels for visual
     // parity with the Prepare/Preview tabs; the old vector-font path (glyph_strokes/draw_strokes
     // for text) is retired. Leader lines/arrows still draw via draw_strokes at the call sites.
+    //
+    // The one label we do NOT draw is the one under an OPEN value field: the field is anchored
+    // over it and carries the same number plus its title, so leaving the label in place shows
+    // every value twice while the auto-edit chain runs (confirmed for rounded rect W/H/R, and
+    // the chain is shared, so Rect/Circle/Slot/Polygon/ArcSlot behave identically). Position
+    // compare is exact — the chain stores the very same Vec2d the label draws from.
+    if ((center - m_autoedit_label_pos).squaredNorm() < 1e-9) return;
     draw_dim_label(s, center);
 }
 
@@ -8479,6 +8486,13 @@ void DesignSketchTool::render(GLCanvas3D& canvas)
 {
     m_dim_label_seq = 0;
     m_render_scale  = canvas.get_scale();
+    // The open value field is anchored OVER the label it edits, and the label draws on top of
+    // it — the same number twice at the same spot. Record which label that is so draw_text can
+    // skip exactly it; the shape's other values must stay legible as the chain walks them.
+    m_autoedit_label_pos = Vec2d(1e18, 1e18);
+    if (inline_editor != nullptr && m_autoedit_dim_idx >= 0
+        && m_autoedit_dim_idx < int(m_autoedit_dims.size()))
+        m_autoedit_label_pos = m_autoedit_dims[m_autoedit_dim_idx].label;
     emit_step_hint();   // before the early returns: an armed tool on an empty sketch still guides
     // The value field, BEFORE every early return below. It can be up in Constrain mode on a
     // committed feature and on an empty sketch, and a field that is not drawn is a field that is
