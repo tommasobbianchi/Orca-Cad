@@ -2463,15 +2463,19 @@ int CadDocument::body_touching_sketch(int sketch_ref) const
     if (sketch_ref < 0 || sketch_ref >= int(features.size())
         || features[sketch_ref].type != CadFeatureType::Sketch)
         return -1;
-    TopoDS_Face face;
-    try { face = build_sketch_face(features[sketch_ref]); } catch (const std::exception&) { return -1; }
-    if (face.IsNull()) return -1;
-    for (int i = int(bodies.size()) - 1; i >= 0; --i) {   // newest first: the likeliest target
-        const TopoDS_Shape& b = bodies[i].shape;
-        if (b.IsNull() || is_sheet_shape(b)) continue;
-        BRepExtrema_DistShapeShape d(face, b);
-        if (d.IsDone() && d.Value() <= 1e-4)
-            return i;
+    // A query that only picks a default: any failure answers "touches nothing".
+    try {
+        const TopoDS_Face face = build_sketch_face(features[sketch_ref]);
+        if (face.IsNull()) return -1;
+        for (int i = int(bodies.size()) - 1; i >= 0; --i) {   // newest first: the likeliest target
+            const TopoDS_Shape& b = bodies[i].shape;
+            if (b.IsNull() || is_sheet_shape(b)) continue;
+            BRepExtrema_DistShapeShape d(face, b);
+            if (d.IsDone() && d.Value() <= 1e-4)
+                return i;
+        }
+    } catch (const Standard_Failure&) {   // before std::exception: on OCCT >= 8 it derives from it
+    } catch (const std::exception&) {
     }
     return -1;
 }
@@ -2984,8 +2988,8 @@ void CadDocument::apply_feature(TopoDS_Shape& result, bool& have_body,
                 pipe.Add(prof);
                 pipe.Build();
                 if (pipe.IsDone() && pipe.MakeSolid()) out = pipe.Shape();
+            } catch (const Standard_Failure&) {   // on OCCT >= 8 it derives from std::exception: first
             } catch (const std::exception&) {
-            } catch (const Standard_Failure&) {   // OCCT failure (not a std::exception)
             }
             return !out.IsNull();
         };
