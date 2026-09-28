@@ -8657,12 +8657,13 @@ TEST_CASE("Hole standards: inch sizes by either name, with their 82° countersin
     CHECK(doc.features[m].hole_cbore_diameter == 11.0);
 }
 
-TEST_CASE("Body colours and names survive a save and a load", "[CadDocument][recipe]")
+TEST_CASE("Body colours, the modeling origin and the weld rule survive a save and a load", "[CadDocument][recipe]")
 {
     CadDocument doc;
     const int sk = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(), 10, 10, 0, "S");
     doc.add_extrude(sk, 5, false, BooleanMode::New, "E");
     doc.modeling_origin = Vec3d(110, 120, 0);
+    doc.auto_close_loops = false;   // the design's weld rule travels with it
     REQUIRE(doc.recompute());
     doc.bodies[0].has_color = true;
     doc.bodies[0].color = ColorRGBA(0.1f, 0.2f, 0.3f, 1.0f);
@@ -8675,6 +8676,9 @@ TEST_CASE("Body colours and names survive a save and a load", "[CadDocument][rec
     CHECK(std::abs(back.bodies[0].color.g() - 0.2f) < 1e-6);
     CHECK((back.modeling_origin - Vec3d(110, 120, 0)).norm() < 1e-9);   // the project's own
     CHECK(back.origin_from_recipe);
+    CHECK_FALSE(back.auto_close_loops);
+    back.auto_close_loops = true;   // leave the kernel's global as the other tests expect it
+    back.recompute();
 }
 
 TEST_CASE("A new thread reads its radius as the nominal (major) radius", "[CadDocument][thread]")
@@ -8691,4 +8695,27 @@ TEST_CASE("A new thread reads its radius as the nominal (major) radius", "[CadDo
     doc.features[t].thread_depth = 0.9 * P;
     CHECK_FALSE(doc.recompute());
     CHECK(doc.error.find("thread") != std::string::npos);
+}
+
+TEST_CASE("CadDocument: a profile on a body face touches it, one in free space does not", "[CadDocument]")
+{
+    // The Extrude default reads this: a profile drawn on a body joins it (charter L6).
+    CadDocument doc;
+    const int base = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(), 20, 20, 10, "Base");
+    doc.add_extrude(base, 5.0, false, BooleanMode::New, "Block");
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.bodies.size() == 1);
+
+    SketchPlane top = SketchPlane::XY();
+    top.origin = Vec3d(0, 0, 5);                           // the block's top face
+    const int on_face = doc.add_sketch(SketchShape::Rectangle, top, 6, 6, 3, "Boss");
+    SketchPlane above = SketchPlane::XY();
+    above.origin = Vec3d(0, 0, 30);                        // well clear of the block
+    const int in_air = doc.add_sketch(SketchShape::Rectangle, above, 6, 6, 3, "Floating");
+    REQUIRE(doc.recompute());
+
+    CHECK(doc.body_touching_sketch(on_face) == 0);
+    CHECK(doc.body_touching_sketch(in_air) == -1);
+    CHECK(doc.body_touching_sketch(-1) == -1);
+    CHECK(doc.body_touching_sketch(base + 1) == -1);       // the extrude: not a sketch
 }

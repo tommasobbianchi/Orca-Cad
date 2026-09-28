@@ -65,19 +65,9 @@ static double ray_segment_dist3(const Vec3d& ro, const Vec3d& rd, const Vec3d& a
     return wxPoint(int(sx + 0.5), int(sy + 0.5));
 }
 
-// The kernel's weld tolerance follows the app preference, and it must be pushed at EVERY
-// point that starts a sketch session: a Constrain session never passes through begin(), and
-// it uses region_loops()/connected_loop(), which read the same tolerance. Pushing in one
-// place only would leave those sessions on whatever the previous session set.
-static void push_auto_close_pref()
-{
-    Slic3r::set_sketch_auto_close(wxGetApp().is_auto_close_sketch_loops());
-}
-
 void DesignSketchTool::begin(const SketchPlane& plane, Mode mode)
 {
     m_sketch_redo.clear();
-    push_auto_close_pref();
 
     m_plane = plane;
     m_mode = mode;
@@ -2451,7 +2441,6 @@ void DesignSketchTool::finish()
 
 void DesignSketchTool::begin_constrain(const SketchProfile& prof, const SketchPlane& plane)
 {
-    push_auto_close_pref();
     m_plane = plane;
     m_mode = Mode::Constrain;
     m_points = prof.points;
@@ -2466,7 +2455,6 @@ void DesignSketchTool::begin_constrain(const SketchProfile& prof, const SketchPl
 void DesignSketchTool::begin_constrain_entities(const std::vector<SketchEntity>& ents,
                                                 const SketchPlane& plane)
 {
-    push_auto_close_pref();
     m_plane = plane;
     m_mode = Mode::Constrain;
     m_constrain_entities = true;
@@ -10422,7 +10410,7 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
 
     // In-canvas edit-op tools (Fillet/Chamfer/Offset/Mirror): pick entities, then a
     // draggable arrow + editable value label (Mirror: a two-phase pick) drives a live
-    // ghost. A click on empty space confirms; right-click/Esc cancels the gesture.
+    // ghost. Enter or ✓ applies, Esc or right-click discards (charter 4.2).
     // Standalone Trim / Extend scissors: click a segment to cut it back to (Trim) or out to
     // (Extend) its nearest intersection with the other live entities. One cut per click; the
     // tool stays active for more cuts; right-click exits. Drag falls through so the camera can
@@ -10502,7 +10490,7 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
 
     // In-canvas transform tools (Move/Rotate/Scale/Array/PolarArray): pick subject
     // entities, then a single draggable handle + editable value label(s) drive a live
-    // ghost. A click on empty space confirms; right-click drops the gesture / exits.
+    // ghost. Enter or ✓ applies, Esc or right-click discards the pending transform.
     if (is_transform_mode()) {
         if (evt.Moving()) {
             screen_to_plane(canvas, evt, m_cursor);

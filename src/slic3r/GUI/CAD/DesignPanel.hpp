@@ -127,6 +127,7 @@ private:
 
     void on_shape_changed();
     void on_add_sketch();
+    std::string feature_name(const wxString& kind) const;
     void on_add_extrude();
     void on_add_dressup();
     void on_add_hole();
@@ -527,6 +528,7 @@ private:
 
     wxStaticText*     m_extrude_sketch_label{nullptr};
     int               m_extrude_sketch_ref{-1};
+    int               m_extrude_auto_body{-1};   // body the profile touches: the inferred Join target
 
     // Revolve controls (sweep a sketch profile about an in-plane axis).
     wxStaticText*     m_revolve_sketch_label{nullptr};

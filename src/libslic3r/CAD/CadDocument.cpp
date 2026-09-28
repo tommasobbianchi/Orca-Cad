@@ -7,6 +7,7 @@
 
 #include <Standard_Failure.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
@@ -1975,6 +1976,7 @@ void CadDocument::clear()
     display_tri_face.clear();
     display_tri_body.clear();
     origin_from_recipe = false;
+    auto_close_loops   = true;
     // Variables are document state like the features: left behind, the previous project's
     // variables were written into the next project's recipe.
     variables.clear();
@@ -2454,6 +2456,24 @@ TopoDS_Wire CadDocument::build_sketch_wire(const CadFeature& sketch, bool closed
     prof.points.push_back(Vec2d(-hw,  hh));
     prof.closed = true;
     return prof.to_occt_wire(sketch.plane);
+}
+
+int CadDocument::body_touching_sketch(int sketch_ref) const
+{
+    if (sketch_ref < 0 || sketch_ref >= int(features.size())
+        || features[sketch_ref].type != CadFeatureType::Sketch)
+        return -1;
+    TopoDS_Face face;
+    try { face = build_sketch_face(features[sketch_ref]); } catch (const std::exception&) { return -1; }
+    if (face.IsNull()) return -1;
+    for (int i = int(bodies.size()) - 1; i >= 0; --i) {   // newest first: the likeliest target
+        const TopoDS_Shape& b = bodies[i].shape;
+        if (b.IsNull() || is_sheet_shape(b)) continue;
+        BRepExtrema_DistShapeShape d(face, b);
+        if (d.IsDone() && d.Value() <= 1e-4)
+            return i;
+    }
+    return -1;
 }
 
 TopoDS_Face CadDocument::build_sketch_face(const CadFeature& sketch) const
@@ -3932,6 +3952,7 @@ void CadDocument::route_feature(std::vector<CadBody>& bodies, const CadFeature& 
 bool CadDocument::recompute()
 {
     error.clear();
+    set_sketch_auto_close(auto_close_loops);   // this document's weld rule, not the last one's
     detect_mate_conflicts();
     std::vector<CadBody> built;
     // Did any feature in this document even ASK for a solid? A document made only of sketches
@@ -4210,7 +4231,7 @@ std::string CadDocument::serialize_recipe() const
         std::ostringstream xos;
         {
             cereal::BinaryOutputArchive xa(xos);
-            xa(modeling_origin.x(), modeling_origin.y(), modeling_origin.z(), colours);
+            xa(modeling_origin.x(), modeling_origin.y(), modeling_origin.z(), colours, auto_close_loops);
         }
         std::string xb = xos.str();
         uint32_t xlen = static_cast<uint32_t>(xb.size());
@@ -4309,9 +4330,11 @@ bool CadDocument::deserialize_recipe(const std::string& blob)
                 std::istringstream xs(xbuf);
                 cereal::BinaryInputArchive xa(xs);
                 double ox = 0, oy = 0, oz = 0;
-                xa(ox, oy, oz, colours);
+                bool   weld = true;
+                xa(ox, oy, oz, colours, weld);
                 modeling_origin    = Vec3d(ox, oy, oz);
                 origin_from_recipe = true;
+                auto_close_loops   = weld;
             } catch (...) {
                 colours.clear();   // older project: the caller's origin stands
             }

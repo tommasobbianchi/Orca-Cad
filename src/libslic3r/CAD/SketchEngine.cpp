@@ -47,18 +47,21 @@
 #include <TopoDS_Wire.hxx>
 #include <GeomAPI_IntCS.hxx>
 #include <map>
+#include <atomic>
 #include <tuple>
 #include <stdexcept>
 
 namespace Slic3r {
 
-// Single source of truth for the weld tolerance the viewport and the kernel share.
-// Defaults ON so headless/kernel-only callers keep welding; the GUI pushes the
-// "auto_close_sketch_loops" preference in via set_sketch_auto_close().
-static bool s_auto_close = true;
+// Single source of truth for the weld tolerance the viewport and the kernel share. Defaults ON
+// so headless/kernel-only callers keep welding. It is the DOCUMENT's setting
+// (CadDocument::auto_close_loops, saved with the recipe), pushed in by CadDocument::recompute:
+// the same project must rebuild into the same solid on every machine. Atomic because the GUI
+// rebuilds on a worker thread while the viewport reads it.
+static std::atomic<bool> s_auto_close{true};
 
-double sketch_join_tol() { return s_auto_close ? kSketchJoinTol : 0.0; }
-void   set_sketch_auto_close(bool on) { s_auto_close = on; }
+double sketch_join_tol() { return s_auto_close.load() ? kSketchJoinTol : 0.0; }
+void   set_sketch_auto_close(bool on) { s_auto_close.store(on); }
 
 // ---- SketchPlane ----
 

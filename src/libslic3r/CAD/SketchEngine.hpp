@@ -90,9 +90,9 @@ inline constexpr double kSketchJoinTol = 1e-3;   // mm
 // Effective sketch joint tolerance. ONE value for the viewport (region_loops /
 // loop_report / connected_loop) and the kernel (entities_to_wires): if these ever
 // disagree again, the viewport shades a region closed that the kernel refuses to
-// build, which is how a sketch got extruded into the wrong solid. The GUI pushes
-// the "auto_close_sketch_loops" preference in via set_sketch_auto_close(); the
-// kernel defaults to ON so headless/kernel-only callers keep welding.
+// build, which is how a sketch got extruded into the wrong solid. The document's
+// own setting (CadDocument::auto_close_loops) is pushed in via set_sketch_auto_close();
+// the kernel defaults to ON so headless/kernel-only callers keep welding.
 double sketch_join_tol();
 void   set_sketch_auto_close(bool on);
 

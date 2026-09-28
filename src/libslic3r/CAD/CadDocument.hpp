@@ -539,6 +539,11 @@ public:
     // printer must keep the origin it was made with or its datums move and its sketches do not.
     Vec3d modeling_origin{Vec3d::Zero()};
     bool  origin_from_recipe{false};   // modeling_origin came from the loaded project
+    // Weld sketch endpoints within kSketchJoinTol (the "Auto-close sketch loops" preference, taken
+    // when the document is started). A property of the DOCUMENT, saved with it: as a machine-wide
+    // preference it made one project rebuild into a closed solid on one computer and an open
+    // loop on another. recompute() pushes it into the kernel.
+    bool  auto_close_loops{true};
 
     // Tessellation quality, matched to Orca's OWN STEP importer (Format/STEP.hpp defaults:
     // linear 0.003, angular 0.5 rad) so a body modelled here reaches the screen at the same
@@ -799,6 +804,9 @@ public:
     // tessellate the result into out_mesh, WITHOUT modifying features/body/
     // display_mesh. Returns false (with err set) if the candidate is invalid.
     // Used by the Design tab to show a translucent ghost before Confirm.
+    // The solid body the closed profile of sketch `sketch_ref` lies on or touches, or -1. Drives
+    // the Extrude default: a profile drawn on a body joins it, one in free space is a new body.
+    int body_touching_sketch(int sketch_ref) const;
     bool preview(const CadFeature& candidate, TriangleMesh& out_mesh, std::string& err) const;
     // Same, but also returns the per-body meshes (in `bodies` order; the candidate may append
     // one), so the GUI can apply its display-only per-body Move transforms to the ghost and keep
