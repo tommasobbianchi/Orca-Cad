@@ -135,6 +135,8 @@ DesignCanvas::DesignCanvas(wxWindow* parent)
             [this, commit](double v) {
                 m_sketch_tool.set_inline_busy(false);
                 if (commit) commit(v);
+                // A refused value re-opens the same field (SketchInlineEditor::refuse).
+                if (m_inline_editor && m_inline_editor->is_open()) m_sketch_tool.set_inline_busy(true);
                 request_repaint();
             },
             [this, cancel]() {
@@ -941,11 +943,6 @@ void DesignCanvas::set_on_solid_selection_changed(std::function<void(int, int, i
     m_sketch_tool.on_solid_selection_changed = std::move(cb);
 }
 
-void DesignCanvas::set_on_place_on_face(std::function<bool()> cb)
-{
-    m_sketch_tool.on_place_on_face = std::move(cb);
-}
-
 void DesignCanvas::select_body(int body)
 {
     m_sketch_tool.select_body(body);
@@ -1058,9 +1055,9 @@ void DesignCanvas::set_on_sketch_exit_refused(std::function<void()> cb)
     m_sketch_tool.on_exit_refused = std::move(cb);
 }
 
-void DesignCanvas::set_on_move_exit(std::function<void()> cb)
+void DesignCanvas::set_on_sketch_notice(std::function<void(const std::string&, bool)> cb)
 {
-    m_sketch_tool.on_move_exit = std::move(cb);
+    m_sketch_tool.on_notice = std::move(cb);
 }
 
 void DesignCanvas::set_on_context_menu(std::function<void(const wxPoint&)> cb)
@@ -1074,25 +1071,26 @@ void DesignCanvas::set_on_context_menu(std::function<void(const wxPoint&)> cb)
     // through to the polyline-chain end and the move gizmo, which were there first.
     // Right-drag pans. Without remembering where the press landed, every pan ended by popping
     // the offer over wherever the camera stopped — the menu appearing as the reward for moving
-    // the view. The offer is the release of a STATIONARY right-click, at the same 8 px budget
-    // the left-click pick uses.
+    // the view. The offer is the release of a STATIONARY right-click (kCadRightClickDriftPx).
     m_canvas_widget->Bind(wxEVT_RIGHT_DOWN, [this](wxMouseEvent& e) {
-        m_ctx_press    = e.GetPosition();
-        m_ctx_press_ms = wxGetLocalTimeMillis().GetValue();
+        m_ctx_press     = e.GetPosition();
+        m_ctx_travelled = false;
         e.Skip();     // the canvas still needs the press to seed the orbit
+    });
+    m_canvas_widget->Bind(wxEVT_MOTION, [this](wxMouseEvent& e) {
+        if (e.RightIsDown()) {
+            const wxPoint d = e.GetPosition() - m_ctx_press;
+            if (std::max(std::abs(d.x), std::abs(d.y)) > kCadRightClickDriftPx) m_ctx_travelled = true;
+        }
+        e.Skip();
     });
     m_canvas_widget->Bind(wxEVT_RIGHT_UP, [this](wxMouseEvent& e) {
         const wxPoint d  = e.GetPosition() - m_ctx_press;
-        const long long dt = wxGetLocalTimeMillis().GetValue() - m_ctx_press_ms;
         // Always read-and-clear, even when another guard already rules the offer out, or a
         // terminator recorded under one condition would still be pending under the next.
         const bool terminated = m_sketch_tool.take_right_consumed();
-        // Click, or navigation? Both budgets must hold: a press that travelled orbited, and a
-        // press that was HELD was aiming to orbit even if the hand never quite moved. Two
-        // independent budgets because the two failure modes are independent — the drift one
-        // alone still popped a menu at the end of a slow, careful orbit.
-        const bool is_click = std::max(std::abs(d.x), std::abs(d.y)) <= kCadRightClickDriftPx
-                              && dt <= kCadRightClickMs;
+        // Click, or navigation? A press that travelled orbited; one that did not, did not.
+        const bool is_click = !m_ctx_travelled && std::max(std::abs(d.x), std::abs(d.y)) <= kCadRightClickDriftPx;
         if (m_on_context_menu && !terminated && !inline_busy() && is_click) {
             // The menu belongs to what you POINTED AT — and pointing happened at the PRESS, not
             // at the release, so the raycast uses the press position. Within a 3 px budget the
@@ -1108,11 +1106,6 @@ void DesignCanvas::set_on_context_menu(std::function<void(const wxPoint&)> cb)
         }
         e.Skip();
     });
-}
-
-void DesignCanvas::set_on_undo_redo(std::function<void(bool)> cb)
-{
-    m_sketch_tool.on_undo_redo = std::move(cb);
 }
 
 void DesignCanvas::set_display_sketches(std::vector<DesignSketchTool::DisplaySketch> ds)
@@ -1352,10 +1345,12 @@ void DesignCanvas::set_body_hidden(bool on)
     reload(true);   // hides/show base bodies + flips the ghost opaque/faint for preview-only mode
 }
 
-void DesignCanvas::delete_selected_sketch_entities()
+bool DesignCanvas::delete_selected_sketch_entities()
 {
+    if (m_sketch_tool.selection().empty()) return false;
     m_sketch_tool.delete_selected();
     request_repaint();
+    return true;
 }
 
 bool DesignCanvas::inline_busy() const
@@ -1394,16 +1389,16 @@ bool DesignCanvas::live_sketch_has_work() const
     return m_sketch_tool.live_sketch_has_work();
 }
 
-bool DesignCanvas::undo_last_sketch_entity()
+bool DesignCanvas::redo_last_sketch_entity()
 {
-    const bool did = m_sketch_tool.undo_last_entity();
+    const bool did = m_sketch_tool.redo_last_entity();
     if (did) request_repaint();
     return did;
 }
 
-bool DesignCanvas::delete_selected_or_last_sketch_entity()
+bool DesignCanvas::undo_last_sketch_entity()
 {
-    const bool did = m_sketch_tool.delete_selected_or_last();
+    const bool did = m_sketch_tool.undo_last_entity();
     if (did) request_repaint();
     return did;
 }
@@ -1450,6 +1445,7 @@ void DesignCanvas::open_inline_value(double current, std::function<void(double)>
         [this, commit](double v) {
             m_sketch_tool.set_inline_busy(false);
             if (commit) commit(v);
+            if (m_inline_editor && m_inline_editor->is_open()) m_sketch_tool.set_inline_busy(true);
             request_repaint();
         },
         [this, cancel]() {
@@ -1560,6 +1556,13 @@ bool DesignCanvas::sketch_abort_gesture()
     return true;
 }
 
+bool DesignCanvas::sketch_confirm_pending()
+{
+    if (!m_sketch_tool.confirm_pending()) return false;
+    request_repaint();
+    return true;
+}
+
 bool DesignCanvas::sketch_disarm_tool()
 {
     if (!m_sketch_tool.disarm_tool()) return false;
@@ -1569,7 +1572,7 @@ bool DesignCanvas::sketch_disarm_tool()
 
 bool DesignCanvas::drawing_in_progress() const
 {
-    return m_sketch_tool.pending_points() > 0;
+    return m_sketch_tool.gesture_pending();
 }
 
 bool DesignCanvas::has_any_selection() const

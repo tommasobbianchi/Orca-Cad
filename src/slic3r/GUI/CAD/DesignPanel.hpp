@@ -86,6 +86,13 @@ public:
     // Defined out of line in DesignPanel.cpp: it needs kOfferVerbs, which this header deliberately
     // does not include (the table is generated and belongs to the offer-menu code).
     bool mcp_run_verb(const char* verb_id);
+    // Would a request from the control socket collide with what the GUI is doing — a rebuild
+    // in progress, an open feature card, a sketch session? `sketch_method` = it drives the live
+    // sketch rather than the feature list. Fills `why` when it would.
+    bool mcp_busy(bool sketch_method, std::string& why) const;
+    // Load the project's recipe into an empty document, as showing the tab does. The control
+    // socket may be the first thing to touch the Design tab after a project was opened.
+    void hydrate_from_model();
 
 private:
     enum class Tool { None, Sketch, Extrude, Dressup, Hole, Thread, Shell, Revolve, Sweep, Pattern, Plane, Loft, Draft, Boolean, Cut, Insert, Axis, CoordSys, SurfaceExtrude, SurfaceRevolve, SurfaceLoft, SurfaceFill, SurfaceOffset, ThickenSurface, Transform, Mirror, Thicken, Rib, Project, DeleteFace, Helix, Mate };
@@ -114,6 +121,7 @@ private:
     // used to be handled in four places that could not see each other, and that is how two
     // presses in a row reached past a tool and discarded the sketch under it.
     CadLevel escape_level() const;
+    bool confirm_enabled() const;   // would the ✓ act right now (and is it not greyed)?
     void     escape();
     void update_action_bar();   // show the ✓/✗ bar iff a tool or mode is active
 
@@ -124,7 +132,7 @@ private:
     void on_add_hole();
     void on_add_thread();
     void apply_thread_standard();   // fill pitch/depth/radius from m_thread_std selection
-    void infer_thread_spec(double diameter);  // nearest M-standard from a picked cylinder diameter
+    void infer_thread_spec(double diameter, bool internal);  // nearest standard from a picked cylinder
     void on_add_revolve();
     void on_add_sweep();
     void on_add_loft();
@@ -274,6 +282,12 @@ private:
     // Ctrl+Z / Ctrl+Shift+Z (Ctrl+Y) from the viewport. With a tool/dialog open it
     // cancels that (Esc-like); otherwise it undoes/redoes the committed feature history.
     void       do_undo_redo(bool redo);
+public:
+    // Edit > Undo / Redo while this tab is shown: the same route and the same gate as the keys
+    // and the toolbar buttons.
+    void menu_undo_redo(bool redo) { do_undo_redo(redo); }
+    bool menu_can_undo_redo(bool redo) const;
+private:
     // The plane the Hole tool drills on: a picked face (inward, centred) or the dropdown.
     SketchPlane hole_plane() const;
     // The plane the Thread tool builds on: a picked cylindrical face (axis) or the dropdown.
@@ -717,8 +731,13 @@ private:
     std::map<std::string, std::function<void()>> m_verb_actions;
     // Append an offer row with its toolbar glyph. The bitmap must be set BEFORE Append —
     // wxGTK builds the GtkMenuItem there and only makes an image item if one is present.
-    // Every status write goes through here so long hints wrap instead of clipping.
-    void        set_status(const wxString& text);
+    // Every status write goes through here so long hints wrap instead of clipping. The kind
+    // sets the colour AND a leading glyph, so a message's meaning never rests on colour alone
+    // (charter 6.2), and every message sets its own kind instead of inheriting the last one's.
+    enum class StatusKind { Info, Ok, Warning, Error };
+    void        set_status(StatusKind kind, const wxString& text);
+    void        set_status(const wxString& text) { set_status(StatusKind::Info, text); }
+    static wxString kernel_error_text(const std::string& err);   // a kernel message, in words a modeller reads
     wxString    idle_hint() const;   // what to say when nothing is selected
     // Reason detect_mate_conflicts() recorded for a feature, or nullptr. Marks the tree row and
     // feeds the status line; a conflict is a diagnostic, not a document error.

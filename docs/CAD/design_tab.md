@@ -47,8 +47,9 @@ tool"*. It is also where a refusal explains itself.
 
 ## The offer
 
-Right-click on the geometry, released without moving the mouse (an 8 px budget — a
-right-drag that orbits the camera does not open it). Left-click still only selects, so
+Right-click on the geometry, released without moving the mouse (a 3 px budget — a
+right-drag that orbits the camera does not open it). How long the button is held does not
+matter. Left-click still only selects, so
 pointing at things stays quiet.
 
 The offer also opens by itself the moment you press Sketch on a face or plane, showing the

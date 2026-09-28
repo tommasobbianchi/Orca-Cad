@@ -4,6 +4,8 @@
 #include "slic3r/GUI/ImGuiWrapper.hpp"
 #include "slic3r/GUI/CAD/SketchInlineEditor.hpp"
 #include "slic3r/GUI/Plater.hpp"
+#include "slic3r/GUI/I18N.hpp"
+#include "libslic3r/format.hpp"
 
 #include <imgui/imgui.h>
 #include <imgui/imgui_internal.h>
@@ -74,6 +76,7 @@ static void push_auto_close_pref()
 
 void DesignSketchTool::begin(const SketchPlane& plane, Mode mode)
 {
+    m_sketch_redo.clear();
     push_auto_close_pref();
 
     m_plane = plane;
@@ -234,6 +237,9 @@ void DesignSketchTool::set_tool(Mode mode)
     // This MUST run before m_mode is reassigned: op_ready() and confirm_op() both switch on
     // m_mode, so after the assignment they would test the tool being switched TO. That read
     // op_ready()==0 with a=0 b=3 val=28.205 sitting right there — picked, valued, and dropped.
+    // Charter 4.2: "starting another operation while a valid feature is pending commits it" —
+    // the ghost is on screen, so switching away keeps it. Esc is the discard (disarm_tool drops
+    // the pending op/transform before it gets here).
     if (op_ready()) confirm_op();
     // And the same rule for the transform gizmo: a ready edit-op committed here while a pending
     // transform was silently dropped, which is the same "the value was set, the ghost was drawn,
@@ -253,6 +259,7 @@ void DesignSketchTool::set_tool(Mode mode)
     m_mode = mode;
     m_points.clear();
     m_has_cursor = false;
+    m_cursor_snap = InferenceSnap{};   // the previous tool's snap marker is not this tool's
     // DRAIN THE QUEUED DIMENSIONS, do not just resync the baseline. on_inline_commit() above
     // commits the field that is open, and the commit callback installed by
     // open_next_autoedit_dim does `++m_autoedit_dim_idx; CallAfter(open_next_autoedit_dim)` —
@@ -312,6 +319,7 @@ void DesignSketchTool::set_tool(Mode mode)
 
 void DesignSketchTool::cancel()
 {
+    m_sketch_redo.clear();
     close_session_chrome();     // same orphaned-field freeze as finish() — see yce
     m_active = false;
     m_step_mode_last = -1;
@@ -339,22 +347,71 @@ void DesignSketchTool::cancel()
     reset_tf();
 }
 
+bool DesignSketchTool::confirm_pending()
+{
+    if (op_ready()) { confirm_op();        return true; }
+    if (tf_ready()) { confirm_transform(); return true; }
+    if (!m_points.empty() && end_chain()) return true;
+    return false;
+}
+
+// End a Polyline / Spline chain as drawn (open), the one rule behind right-click, double-click
+// and Enter. The first click of a double-click lands as an ordinary LeftDown on some platforms,
+// so a final point within a few pixels of the one before it is that click again, not a pole.
+bool DesignSketchTool::end_chain()
+{
+    if (m_mode != Mode::Polyline && m_mode != Mode::BSpline) return false;
+    std::vector<Vec2d> pts;
+    for (const Vec2d& q : m_points)
+        if (pts.empty() || (q - pts.back()).norm() > m_chain_dup_tol) pts.push_back(q);
+    const int base = int(m_entities.size());
+    if (pts.size() >= 2) {
+        if (m_mode == Mode::Polyline) push_open_chain(pts);
+        else                          append_entities(make_bspline(pts));
+        infer_auto_constraints(base);   // end poles auto-Coincident -> loops close
+    }
+    m_points.clear();
+    emit_step_hint();
+    return true;
+}
+
+void DesignSketchTool::show_refusal(const std::string& why)
+{
+    if (inline_editor != nullptr && inline_editor->refuse(why)) return;
+    notify(why);
+}
+
 // CadLevel::Gesture inside a sketch: drop the entity being drawn, keep the tool armed.
 bool DesignSketchTool::abort_gesture()
 {
-    if (m_points.empty()) return false;
+    if (!gesture_pending()) return false;
     m_points.clear();
     m_has_cursor = false;
+    // Picks are a gesture too: drop them, never apply them, and keep the tool armed.
+    if (has_pending_picks()) {
+        reset_op();
+        reset_tf();
+        m_dim_has0 = false;
+        m_dim_e0   = -1;
+        m_dim_r0   = SketchPointRole::P0;
+        m_pick0 = m_pick1 = m_pick2 = -1;
+        m_sel_a = m_sel_b = -1;
+        m_selection.clear();
+        m_point_sel.clear();
+        if (on_selection_changed) on_selection_changed(0);
+    }
+    emit_step_hint();
     return true;
 }
 
 // CadLevel::Tool inside a sketch: an armed draw/edit tool falls back to Select.
-// Drop any pending edit-op BEFORE the downgrade: set_tool commits a ready one, and Esc must
-// cancel it, never apply it. Right-click already discards it through its own branch.
+// Drop any pending edit-op or transform BEFORE the downgrade: set_tool commits a ready one,
+// and Esc must cancel it, never apply it. Right-click already discards it through its own branch.
 bool DesignSketchTool::disarm_tool()
 {
     if (m_mode == Mode::Select) return false;
     reset_op();
+    reset_tf();
     set_tool(Mode::Select);
     return true;
 }
@@ -379,17 +436,55 @@ void DesignSketchTool::request_exit()
     else         cancel();
 }
 
-void DesignSketchTool::request_undo_redo(bool redo)
-{
-    if (on_undo_redo) on_undo_redo(redo);
-}
-
 void DesignSketchTool::clear_selection()
 {
     if (m_selection.empty() && m_point_sel.empty()) return;
     m_selection.clear();
     m_point_sel.clear();
     if (on_selection_changed) on_selection_changed(0);
+}
+
+bool DesignSketchTool::can_redo_entity() const
+{
+    return m_active && !m_sketch_redo.empty()
+        && m_sketch_redo.back().after_entities == m_entities.size()
+        && m_sketch_redo.back().after_constraints == m_constraints.size();
+}
+
+bool DesignSketchTool::redo_last_entity()
+{
+    if (!can_redo_entity()) { m_sketch_redo.clear(); return false; }
+    SketchSnap s = std::move(m_sketch_redo.back());
+    m_sketch_redo.pop_back();
+    m_entities    = std::move(s.entities);
+    m_constraints = std::move(s.constraints);
+    m_features    = std::move(s.features);
+    m_dimensions  = std::move(s.dimensions);
+    m_selection.clear();
+    m_point_sel.clear();
+    reset_autoedit();
+    resolve_live();
+    if (on_selection_changed) on_selection_changed(0);
+    return true;
+}
+
+bool DesignSketchTool::undo_last_entity()
+{
+    if (!m_active || m_entities.empty()) return false;
+    if (!can_redo_entity()) m_sketch_redo.clear();   // the sketch moved on since the last undo
+    SketchSnap snap{ m_entities, m_constraints, m_features, m_dimensions, 0, 0 };
+    const int last = int(m_entities.size()) - 1;
+    int begin = last;
+    for (const Feature& f : m_features)
+        if (f.begin <= last && last < f.end && f.end == last + 1) begin = std::min(begin, f.begin);
+    m_selection.clear();
+    for (int i = begin; i <= last; ++i) m_selection.push_back(i);
+    delete_selected();
+    reset_autoedit();
+    snap.after_entities    = m_entities.size();
+    snap.after_constraints = m_constraints.size();
+    m_sketch_redo.push_back(std::move(snap));
+    return true;
 }
 
 void DesignSketchTool::delete_selected()
@@ -406,21 +501,39 @@ void DesignSketchTool::delete_selected()
         if (!del[i]) remap[i] = next++;
     for (int i = n - 1; i >= 0; --i)
         if (del[i]) m_entities.erase(m_entities.begin() + i);
-    // Drop constraints touching a deleted entity; remap the survivors.
+    // Drop constraints touching a deleted entity; remap the survivors. A negative reference is
+    // not "no entity" but a sentinel (origin, X axis, Y axis — kSketchRef*) and passes through
+    // unchanged: mapping it to -1 silently cut every constraint onto the origin or an axis.
     std::vector<SketchEntityConstraintDef> kept;
+    std::vector<int> con_remap(m_constraints.size(), -1);
     auto live = [&](int e) { return e < 0 || (e < n && remap[e] >= 0); };
-    auto map  = [&](int e) { return e < 0 ? -1 : remap[e]; };
-    for (SketchEntityConstraintDef c : m_constraints) {
+    auto map  = [&](int e) { return e < 0 ? e : remap[e]; };
+    for (int ci = 0; ci < int(m_constraints.size()); ++ci) {
+        SketchEntityConstraintDef c = m_constraints[ci];
         if (!live(c.ea) || !live(c.eb) || !live(c.ec)) continue;
         c.ea = map(c.ea); c.eb = map(c.eb); c.ec = map(c.ec);
+        con_remap[ci] = int(kept.size());
         kept.push_back(c);
     }
     m_constraints.swap(kept);
     m_selection.clear();
     m_point_sel.clear();
-    // v1: placed quotes reference entity indices that have shifted; drop them rather
-    // than risk a dangling reference (the driving constraints survive, reindexed).
-    m_dimensions.clear();
+    // Placed quotes follow their geometry and their driving constraint: a quote whose entity or
+    // constraint went away goes with it, the others are reindexed. Clearing them all made one
+    // Delete hide every label while the constraints they showed kept driving the sketch.
+    {
+        std::vector<DimAnnot> kept_d;
+        for (DimAnnot a : m_dimensions) {
+            if (!live(a.ea) || !live(a.eb)) continue;
+            if (a.con >= 0) {
+                if (a.con >= int(con_remap.size()) || con_remap[a.con] < 0) continue;
+                a.con = con_remap[a.con];
+            }
+            a.ea = map(a.ea); a.eb = map(a.eb);
+            kept_d.push_back(a);
+        }
+        m_dimensions.swap(kept_d);
+    }
     m_dim_has0 = false;
     m_pending_dim = -1;
     // The Dimension tool's pending FIRST pick is the same dangling-reference hazard as the placed
@@ -617,9 +730,8 @@ void DesignSketchTool::apply_dimension(double v)
                                  kind == DimType::Diameter);
     if (!std::isfinite(v) || (needs_positive && v <= 0.0) ||
         (!needs_positive && kind != DimType::Angle && kind != DimType::None && v < 0.0)) {
-        if (on_readout)
-            on_readout(needs_positive ? "the value must be greater than zero"
-                                      : "the value must not be negative (zero means coincident)");
+        show_refusal(needs_positive ? _u8L("The value must be greater than zero")
+                                    : _u8L("The value must not be negative (zero means coincident)"));
         return;
     }
     switch (dimension_kind()) {
@@ -670,8 +782,8 @@ void DesignSketchTool::apply_dimension(double v)
     }
     record_dimension_constraint(v);          // store a driving constraint for this dimension
     resolve_live();                          // live-solve so the viewport shows the solved sketch
-    if (!m_solve_ok && on_readout)           // the number on screen is not the geometry's number
-        on_readout("that dimension cannot be satisfied — the sketch is over-constrained");
+    if (!m_solve_ok)                         // the number on screen is not the geometry's number
+        notify(_u8L("That dimension cannot be satisfied — the sketch is over-constrained"));
     m_selection.clear();
     if (on_selection_changed) on_selection_changed(0);
 }
@@ -761,6 +873,14 @@ void DesignSketchTool::resolve_live_drag(int dragged_ei, SketchPointRole dragged
             : sketch_solve(m_entities, cons);
         m_dof      = r.dof;
         m_solve_ok = r.ok;
+        // Constraints the solver had to leave out (no representation for the part they name)
+        // are said once, when their number changes — resolve_live runs on every drag frame.
+        if (int(r.skipped.size()) != m_skipped_last) {
+            m_skipped_last = int(r.skipped.size());
+            if (m_skipped_last > 0)
+                notify(format(_u8L("%1% constraint(s) cannot act on this geometry (an ellipse or spline curve, "
+                                   "or a zero-size circle) and are ignored"), m_skipped_last), false);
+        }
         // Flag every entity referenced by a conflicting constraint so render() can
         // tint it red (Onshape/SolveSpace over-constrained feedback), and remember which
         // DIMENSIONS those constraints drive: a label showing a value the geometry does not have
@@ -900,8 +1020,8 @@ bool DesignSketchTool::update_hover(GLCanvas3D& canvas, wxMouseEvent& evt)
     Vec2d p;
     screen_to_plane(canvas, evt, p);
     // Zoom-aware pick tolerance: project a point a few px away and measure in plane units.
-    const Linef3 r2 = canvas.mouse_ray(Point(evt.GetX() + 6, evt.GetY()));
-    const double tol = std::max(1e-3, (m_plane.project(r2.a, r2.vector()) - p).norm());
+    // The SAME budget a click grabs with: a handle that looks un-hovered must not be grabbable.
+    const double tol = screen_tol(canvas, evt, p, kPickPx);
     const bool   had  = m_has_hover_handle;
     const Handle prev = m_hover_handle;
     Handle h;
@@ -1288,7 +1408,7 @@ void DesignSketchTool::open_angle_editor(int ei)
     if (!on_inline_edit) return;
     DimAnnot a; a.kind = DimType::Angle; a.ea = ei;
     const wxPoint px(m_last_mouse_x, m_last_mouse_y);
-    on_inline_edit(px, measure_dim(a), "Angle",
+    on_inline_edit(px, measure_dim(a), _u8L("Angle (°)"),
                    [this, ei](double deg) { set_line_angle(ei, deg); },
                    []()                   {});
 }
@@ -1306,16 +1426,7 @@ bool DesignSketchTool::open_selection_dimension_editor()
     if (!on_inline_edit || !selection_valid()) return false;
     const DimType k = dimension_kind();
     if (k == DimType::None) return false;
-    const char* title = "Value";
-    switch (k) {
-    case DimType::Length:         title = "Length";   break;
-    case DimType::Radius:         title = "Radius";   break;
-    case DimType::Diameter:       title = "Diameter"; break;
-    case DimType::Angle:          title = "Angle";    break;
-    case DimType::Distance:       title = "Distance"; break;
-    case DimType::DistanceToLine: title = "Distance"; break;
-    default: break;
-    }
+    const std::string title = dimtype_title(k);
     // Anchor over the geometry it belongs to, not the panel: the value belongs to the element.
     DimAnnot a; a.kind = k;
     a.ea = m_selection.empty() ? -1 : m_selection[0];
@@ -1373,6 +1484,8 @@ void DesignSketchTool::open_next_autoedit_dim()
     on_inline_edit(px, step.value, step.title,
         [this, step](double v) {                 // commit: apply this dimension, then next
             if (step.apply) step.apply(v);
+            // A refused value brought the same field back (show_refusal): stay on this step.
+            if (inline_editor != nullptr && inline_editor->is_open()) return;
             ++m_autoedit_dim_idx;
             wxGetApp().CallAfter([this] { open_next_autoedit_dim(); });
         },
@@ -1399,30 +1512,31 @@ void DesignSketchTool::arm_polyline_segment_edit()
     m_autoedit_dims.clear();
     m_autoedit_dims.push_back({ mid, L, [this, k, a](double len) {     // Length
         if (k < int(m_points.size())) {
+            if (!(len > 0.0)) { show_refusal(_u8L("The value must be greater than zero")); return; }
             Vec2d dd = m_points[k] - a; const double n = dd.norm();
-            if (n > 1e-9 && len > 1e-9) m_points[k] = a + (len / n) * dd;
+            if (n > 1e-9) m_points[k] = a + (len / n) * dd;
         }
-    }, {}, "Length" });
+    }, {}, _u8L("Length") });
     m_autoedit_dims.push_back({ mid, deg, [this, k, a](double dg) {     // Angle
         if (k < int(m_points.size())) {
             const double len = (m_points[k] - a).norm();
             const double r   = dg * M_PI / 180.0;
             m_points[k] = a + len * Vec2d(std::cos(r), std::sin(r));
         }
-    }, {}, "Angle" });
+    }, {}, _u8L("Angle (°)") });
     m_autoedit_dim_idx = 0;
     wxGetApp().CallAfter([this] { open_next_autoedit_dim(); });
 }
 
 std::string DesignSketchTool::dimtype_title(DimType k) const {
     switch (k) {
-        case DimType::Length:         return "Length";
-        case DimType::Diameter:       return "Diameter";
-        case DimType::Radius:         return "Radius";
-        case DimType::Angle:          return "Angle";
-        case DimType::Distance:       return "Distance";
-        case DimType::DistanceToLine: return "Distance";
-        default:                      return "Value";
+        case DimType::Length:         return _u8L("Length");
+        case DimType::Diameter:       return _u8L("Diameter");
+        case DimType::Radius:         return _u8L("Radius");
+        case DimType::Angle:          return _u8L("Angle (°)");
+        case DimType::Distance:       return _u8L("Distance");
+        case DimType::DistanceToLine: return _u8L("Distance");
+        default:                      return _u8L("Value");
     }
 }
 
@@ -1461,13 +1575,19 @@ void DesignSketchTool::open_primary_autoedit()
         if (q.kind == DimType::Angle) {
             const int ei = q.ea;
             m_autoedit_dims.push_back({ q.label_pos, measure_dim(q),
-                [this, ei](double v) { set_line_angle(ei, v); }, { ei }, "Angle" });
+                [this, ei](double v) { set_line_angle(ei, v); }, { ei }, _u8L("Angle (°)") });
             continue;
         }
         DimAnnot a = q;
         a.value = measure_dim(a);
         m_autoedit_dims.push_back({ a.label_pos, a.value,
             [this, a](double v) mutable {
+                const bool positive = a.kind == DimType::Length || a.kind == DimType::Radius || a.kind == DimType::Diameter;
+                if (!std::isfinite(v) || (positive && v <= 0.0) || (!positive && v < 0.0)) {
+                    show_refusal(positive ? _u8L("The value must be greater than zero")
+                                          : _u8L("The value must not be negative (zero means coincident)"));
+                    return;
+                }
                 a.value = v;
                 a.con   = upsert_dimension_constraint(constraint_for(a));
                 upsert_dimension(a);
@@ -1492,8 +1612,8 @@ void DesignSketchTool::open_primary_autoedit()
             const double side = (m_entities[f.begin].p1 - m_entities[f.begin].p0).norm();
             const Vec2d  sp   = m_entities[f.begin].p0 - f.c0;
             double deg = std::atan2(sp.y(), sp.x()) * 180.0 / M_PI; if (deg < 0.0) deg += 360.0;
-            m_autoedit_dims.push_back({ m_live_poly_side_label,  side, [this, fi](double v){ set_polygon_side(fi, v); }, span(fi), "Side" });
-            m_autoedit_dims.push_back({ m_live_poly_angle_label, deg,  [this, fi](double v){ set_polygon_angle(fi, v); }, span(fi), "Angle" });
+            m_autoedit_dims.push_back({ m_live_poly_side_label,  side, [this, fi](double v){ set_polygon_side(fi, v); }, span(fi), _u8L("Side") });
+            m_autoedit_dims.push_back({ m_live_poly_angle_label, deg,  [this, fi](double v){ set_polygon_angle(fi, v); }, span(fi), _u8L("Angle (°)") });
         }
     }
     if (m_live_rrect_fi >= 0) {
@@ -1503,43 +1623,43 @@ void DesignSketchTool::open_primary_autoedit()
         auto rr_w = [this, fi](double v){ const Feature& g = m_features[fi]; set_rounded_rect(fi, v, std::abs(g.c1.y()-g.c0.y()), g.param); };
         auto rr_h = [this, fi](double v){ const Feature& g = m_features[fi]; set_rounded_rect(fi, std::abs(g.c1.x()-g.c0.x()), v, g.param); };
         auto rr_r = [this, fi](double v){ const Feature& g = m_features[fi]; set_rounded_rect(fi, std::abs(g.c1.x()-g.c0.x()), std::abs(g.c1.y()-g.c0.y()), v); };
-        m_autoedit_dims.push_back({ m_live_rrect_w_label, w, rr_w, span(fi), "Width" });
-        m_autoedit_dims.push_back({ m_live_rrect_h_label, h, rr_h, span(fi), "Height" });
-        m_autoedit_dims.push_back({ m_live_rrect_r_label, r, rr_r, span(fi), "Radius" });
+        m_autoedit_dims.push_back({ m_live_rrect_w_label, w, rr_w, span(fi), _u8L("Width") });
+        m_autoedit_dims.push_back({ m_live_rrect_h_label, h, rr_h, span(fi), _u8L("Height") });
+        m_autoedit_dims.push_back({ m_live_rrect_r_label, r, rr_r, span(fi), _u8L("Radius") });
     }
     if (m_live_aslot_fi >= 0) {
         const Feature& f = m_features[m_live_aslot_fi];
         const int fi = m_live_aslot_fi;
         const double Rc = (f.c1 - f.c0).norm(), fw = 2.0 * f.param;
-        m_autoedit_dims.push_back({ m_live_aslot_r_label, Rc, [this, fi](double v){ const Feature& g = m_features[fi]; set_arc_slot(fi, v, g.param); }, span(fi), "Radius" });
-        m_autoedit_dims.push_back({ m_live_aslot_w_label, fw, [this, fi](double v){ const Feature& g = m_features[fi]; set_arc_slot(fi, (g.c1-g.c0).norm(), std::max(1e-3, v*0.5)); }, span(fi), "Width" });
+        m_autoedit_dims.push_back({ m_live_aslot_r_label, Rc, [this, fi](double v){ const Feature& g = m_features[fi]; set_arc_slot(fi, v, g.param); }, span(fi), _u8L("Radius") });
+        m_autoedit_dims.push_back({ m_live_aslot_w_label, fw, [this, fi](double v){ const Feature& g = m_features[fi]; set_arc_slot(fi, (g.c1-g.c0).norm(), v * 0.5); }, span(fi), _u8L("Width") });
     }
     if (m_live_slot_fi >= 0) {
         const Feature& f = m_features[m_live_slot_fi];
         const int fi = m_live_slot_fi;
-        // Slot dims, in order: (1) inter-centre distance, (2) radius (= half-width), (3) angle.
+        // Slot dims, in order: (1) inter-centre distance, (2) full width (as the arc slot), (3) angle.
         const Vec2d  d  = f.c1 - f.c0;
         const double Lc = d.norm();
         double deg = std::atan2(d.y(), d.x()) * 180.0 / M_PI; if (deg < 0.0) deg += 360.0;
-        m_autoedit_dims.push_back({ m_live_slot_len_label, Lc, [this, fi](double v){ const Feature& g = m_features[fi]; set_slot(fi, v, g.param); }, span(fi), "Length" });
-        m_autoedit_dims.push_back({ m_live_slot_w_label, f.param, [this, fi](double v){ const Feature& g = m_features[fi]; set_slot(fi, (g.c1-g.c0).norm(), std::max(1e-3, v)); }, span(fi), "Radius" });
-        m_autoedit_dims.push_back({ m_live_slot_angle_label, deg, [this, fi](double v){ set_slot_angle(fi, v); }, span(fi), "Angle" });
+        m_autoedit_dims.push_back({ m_live_slot_len_label, Lc, [this, fi](double v){ const Feature& g = m_features[fi]; set_slot(fi, v, g.param); }, span(fi), _u8L("Length") });
+        m_autoedit_dims.push_back({ m_live_slot_w_label, 2.0 * f.param, [this, fi](double v){ const Feature& g = m_features[fi]; set_slot(fi, (g.c1-g.c0).norm(), v * 0.5); }, span(fi), _u8L("Width") });
+        m_autoedit_dims.push_back({ m_live_slot_angle_label, deg, [this, fi](double v){ set_slot_angle(fi, v); }, span(fi), _u8L("Angle (°)") });
     }
     if (m_live_arc_ei >= 0) {   // arc Radius is already a scalar step above; add its sweep angle
         const int ei = m_live_arc_ei;
         const SketchEntity& e = m_entities[ei];
         const double swdeg = std::abs(e.end_angle - e.start_angle) * 180.0 / M_PI;
-        m_autoedit_dims.push_back({ m_live_arc_angle_label, swdeg, [this, ei](double v){ set_arc_sweep(ei, v); }, { ei }, "Angle" });
+        m_autoedit_dims.push_back({ m_live_arc_angle_label, swdeg, [this, ei](double v){ set_arc_sweep(ei, v); }, { ei }, _u8L("Angle (°)") });
     }
     if (m_live_ellipse_ei >= 0) {
         const int ei = m_live_ellipse_ei;
         const SketchEntity& e = m_entities[ei];
-        m_autoedit_dims.push_back({ m_live_ellipse_major_label, e.radius, [this, ei](double v){ set_ellipse_axis(ei, true,  v); }, { ei }, "Major" });
-        m_autoedit_dims.push_back({ m_live_ellipse_minor_label, e.rminor, [this, ei](double v){ set_ellipse_axis(ei, false, v); }, { ei }, "Minor" });
+        m_autoedit_dims.push_back({ m_live_ellipse_major_label, e.radius, [this, ei](double v){ set_ellipse_axis(ei, true,  v); }, { ei }, _u8L("Semi-major axis") });
+        m_autoedit_dims.push_back({ m_live_ellipse_minor_label, e.rminor, [this, ei](double v){ set_ellipse_axis(ei, false, v); }, { ei }, _u8L("Semi-minor axis") });
         if (e.type == SketchEntity::Type::EllipseArc) {   // + included sweep
             const double swdeg = std::abs(e.end_angle - e.start_angle) * 180.0 / M_PI;
             m_autoedit_dims.push_back({ m_live_ellipsearc_sweep_label, swdeg,
-                [this, ei](double v){ set_ellipsearc_sweep(ei, v); }, { ei }, "Angle" });
+                [this, ei](double v){ set_ellipsearc_sweep(ei, v); }, { ei }, _u8L("Angle (°)") });
         }
     }
     if (m_live_obrect_fi >= 0) {   // oblique rect: W,H already added as scalars; + orientation
@@ -1549,7 +1669,7 @@ void DesignSketchTool::open_primary_autoedit()
         double adeg = std::atan2(e0.p1.y() - e0.p0.y(), e0.p1.x() - e0.p0.x()) * 180.0 / M_PI;
         if (adeg < 0.0) adeg += 360.0;
         m_autoedit_dims.push_back({ m_live_obrect_angle_label, adeg,
-            [this, fi](double v){ set_rect_angle(fi, v); }, span(fi), "Angle" });
+            [this, fi](double v){ set_rect_angle(fi, v); }, span(fi), _u8L("Angle (°)") });
     }
 
     trace_autoedit(m_autoedit_dims.empty() ? "built NO steps (no live quote matched)" : "opening",
@@ -1569,7 +1689,7 @@ void DesignSketchTool::open_polygon_side_editor(int fi)
     if (f.begin < 0 || f.begin >= int(m_entities.size())) return;
     const double side = (m_entities[f.begin].p1 - m_entities[f.begin].p0).norm();
     const wxPoint px(m_last_mouse_x, m_last_mouse_y);
-    on_inline_edit(px, side, "Side",
+    on_inline_edit(px, side, _u8L("Side"),
                    [this, fi](double v) { set_polygon_side(fi, v); },
                    []()                 {});
 }
@@ -1583,7 +1703,7 @@ void DesignSketchTool::open_polygon_angle_editor(int fi)
     double deg = std::atan2(sp.y(), sp.x()) * 180.0 / M_PI;
     if (deg < 0.0) deg += 360.0;
     const wxPoint px(m_last_mouse_x, m_last_mouse_y);
-    on_inline_edit(px, deg, "Angle",
+    on_inline_edit(px, deg, _u8L("Angle (°)"),
                    [this, fi](double v) { set_polygon_angle(fi, v); },
                    []()                 {});
 }
@@ -1592,7 +1712,8 @@ void DesignSketchTool::open_polygon_angle_editor(int fi)
 // n-gon, circumradius R = side / (2 sin(pi/n)).
 void DesignSketchTool::set_polygon_side(int fi, double side)
 {
-    if (fi < 0 || fi >= int(m_features.size()) || side < 1e-6) return;
+    if (fi < 0 || fi >= int(m_features.size())) return;
+    if (!(side > 0.0)) { show_refusal(_u8L("The value must be greater than zero")); return; }
     const int n = std::max(3, m_features[fi].sides);
     const double R = side / (2.0 * std::sin(M_PI / double(n)));
     set_polygon_radius(fi, R);
@@ -1837,7 +1958,7 @@ void DesignSketchTool::open_arc_angle_editor(int ei)
     if (e.type != SketchEntity::Type::Arc) return;
     double swdeg = std::abs(e.end_angle - e.start_angle) * 180.0 / M_PI;
     const wxPoint px(m_last_mouse_x, m_last_mouse_y);
-    on_inline_edit(px, swdeg, "Angle",
+    on_inline_edit(px, swdeg, _u8L("Angle (°)"),
                    [this, ei](double v) { set_arc_sweep(ei, v); },
                    []()                 {});
 }
@@ -1851,7 +1972,8 @@ void DesignSketchTool::set_arc_sweep(int ei, double deg)
     if (ei < 0 || ei >= int(m_entities.size())) return;
     SketchEntity& e = m_entities[ei];
     if (e.type != SketchEntity::Type::Arc || e.radius < 1e-6) return;
-    double sweep = std::max(1e-3, std::min(deg, 359.999)) * M_PI / 180.0;
+    if (!(deg > 0.0 && deg < 360.0)) { show_refusal(_u8L("The angle must be between 0° and 360°")); return; }
+    double sweep = deg * M_PI / 180.0;
     const double sign = (e.end_angle >= e.start_angle) ? 1.0 : -1.0;
     e.end_angle = e.start_angle + sign * sweep;
     e.p1 = e.center + e.radius * Vec2d(std::cos(e.end_angle), std::sin(e.end_angle));
@@ -1922,7 +2044,7 @@ void DesignSketchTool::open_ellipse_axis_editor(int ei, bool major)
     if (e.type != SketchEntity::Type::Ellipse && e.type != SketchEntity::Type::EllipseArc) return;
     const double v = major ? e.radius : e.rminor;
     const wxPoint px(m_last_mouse_x, m_last_mouse_y);
-    on_inline_edit(px, v, major ? "Major" : "Minor",
+    on_inline_edit(px, v, major ? _u8L("Semi-major axis") : _u8L("Semi-minor axis"),
                    [this, ei, major](double nv) { set_ellipse_axis(ei, major, nv); },
                    []()                         {});
 }
@@ -1930,11 +2052,16 @@ void DesignSketchTool::open_ellipse_axis_editor(int ei, bool major)
 // Set a semi-axis to `v`: major -> e.radius, minor -> e.rminor; keep OCCT a >= b.
 void DesignSketchTool::set_ellipse_axis(int ei, bool major, double v)
 {
-    if (ei < 0 || ei >= int(m_entities.size()) || v < 1e-6) return;
+    if (ei < 0 || ei >= int(m_entities.size())) return;
     SketchEntity& e = m_entities[ei];
     if (e.type != SketchEntity::Type::Ellipse && e.type != SketchEntity::Type::EllipseArc) return;
-    if (major) e.radius = std::max(v, e.rminor);
-    else       e.rminor = std::min(v, e.radius);
+    if (!(v > 0.0)) { show_refusal(_u8L("The value must be greater than zero")); return; }
+    if (major ? v < e.rminor : v > e.radius) {
+        show_refusal(_u8L("The semi-major axis cannot be shorter than the semi-minor axis"));
+        return;
+    }
+    if (major) e.radius = v;
+    else       e.rminor = v;
     if (e.type == SketchEntity::Type::EllipseArc) {   // endpoints ride the reshaped frame
         e.p0 = ellipse_point(e.center, e.radius, e.rminor, e.rotation, e.start_angle);
         e.p1 = ellipse_point(e.center, e.radius, e.rminor, e.rotation, e.end_angle);
@@ -1949,7 +2076,8 @@ void DesignSketchTool::set_ellipsearc_sweep(int ei, double deg)
     if (ei < 0 || ei >= int(m_entities.size())) return;
     SketchEntity& e = m_entities[ei];
     if (e.type != SketchEntity::Type::EllipseArc) return;
-    const double sweep = std::max(1e-3, std::min(deg, 359.999)) * M_PI / 180.0;
+    if (!(deg > 0.0 && deg < 360.0)) { show_refusal(_u8L("The angle must be between 0° and 360°")); return; }
+    const double sweep = deg * M_PI / 180.0;
     const double sign  = (e.end_angle >= e.start_angle) ? 1.0 : -1.0;
     e.end_angle = e.start_angle + sign * sweep;
     e.p1 = ellipse_point(e.center, e.radius, e.rminor, e.rotation, e.end_angle);
@@ -2017,7 +2145,7 @@ void DesignSketchTool::open_rounded_rect_editor(int fi, int which)
     const double r = f.param;
     const double v = (which == 0) ? w : (which == 1) ? h : r;
     const wxPoint px(m_last_mouse_x, m_last_mouse_y);
-    on_inline_edit(px, v, which == 0 ? "Width" : which == 1 ? "Height" : "Radius",
+    on_inline_edit(px, v, which == 0 ? _u8L("Width") : which == 1 ? _u8L("Height") : _u8L("Radius"),
         [this, fi, which](double nv) {
             const Feature& g = m_features[fi];
             double gw = std::abs(g.c1.x() - g.c0.x());
@@ -2037,8 +2165,11 @@ void DesignSketchTool::set_rounded_rect(int fi, double w, double h, double r)
     if (fi < 0 || fi >= int(m_features.size())) return;
     Feature& f = m_features[fi];
     if (f.begin < 0 || f.end > int(m_entities.size()) || f.end <= f.begin) return;
-    w = std::max(w, 1e-3); h = std::max(h, 1e-3);
-    r = std::max(1e-3, std::min(r, std::min(w, h) * 0.5 - 1e-4));
+    if (!(w > 0.0 && h > 0.0 && r > 0.0)) { show_refusal(_u8L("The value must be greater than zero")); return; }
+    if (r >= std::min(w, h) * 0.5) {
+        show_refusal(_u8L("The corner radius must be less than half the shorter side"));
+        return;
+    }
     const double xmin = std::min(f.c0.x(), f.c1.x()), ymin = std::min(f.c0.y(), f.c1.y());
     const double xmax = xmin + w, ymax = ymin + h;
     std::vector<SketchEntity> rebuilt = rounded_rect_entities(xmin, ymin, xmax, ymax, r);
@@ -2058,12 +2189,12 @@ void DesignSketchTool::open_arc_slot_editor(int fi, bool radius)
     const double Rc = (f.c1 - f.c0).norm();
     const double v  = radius ? Rc : (2.0 * f.param);     // width quote shows the FULL width
     const wxPoint px(m_last_mouse_x, m_last_mouse_y);
-    on_inline_edit(px, v, radius ? "Radius" : "Width",
+    on_inline_edit(px, v, radius ? _u8L("Radius") : _u8L("Width"),
         [this, fi, radius](double nv) {
             const Feature& g = m_features[fi];
             const double gRc = (g.c1 - g.c0).norm();
             if (radius) set_arc_slot(fi, nv, g.param);
-            else        set_arc_slot(fi, gRc, std::max(1e-3, nv * 0.5));  // full width -> half
+            else        set_arc_slot(fi, gRc, nv * 0.5);  // full width -> half
         },
         []() {});
 }
@@ -2082,8 +2213,11 @@ void DesignSketchTool::set_arc_slot(int fi, double Rc, double w)
     Vec2d dirE = Ec - center;
     if (dirS.squaredNorm() < 1e-12 || dirE.squaredNorm() < 1e-12) return;
     dirS.normalize(); dirE.normalize();
-    Rc = std::max(Rc, 2e-3);
-    w  = std::max(1e-3, std::min(w, Rc - 1e-3));         // make_arc_slot needs w < Rc
+    if (!(Rc > 0.0 && w > 0.0)) { show_refusal(_u8L("The value must be greater than zero")); return; }
+    if (w >= Rc) {                                        // make_arc_slot needs w < Rc
+        show_refusal(_u8L("The slot is too wide for its radius — the width must be less than twice the radius"));
+        return;
+    }
     std::vector<SketchEntity> rebuilt =
         make_arc_slot(center, center + Rc * dirS, center + Rc * dirE, w);
     if (int(rebuilt.size()) != 4) return;
@@ -2096,20 +2230,20 @@ void DesignSketchTool::set_arc_slot(int fi, double Rc, double w)
 }
 
 // Open the inline editor for a straight slot's dimension: which 0 = inter-centre distance,
-// 1 = radius (half-width), 2 = centreline angle. Drives set_slot / set_slot_angle geometrically.
+// 1 = full width (the arc slot's convention), 2 = centreline angle. Drives set_slot / set_slot_angle geometrically.
 void DesignSketchTool::open_slot_editor(int fi, int which)
 {
     if (fi < 0 || fi >= int(m_features.size()) || !on_inline_edit) return;
     const Feature& f = m_features[fi];
     const Vec2d  d = f.c1 - f.c0;
     double deg = std::atan2(d.y(), d.x()) * 180.0 / M_PI; if (deg < 0.0) deg += 360.0;
-    const double v = (which == 0) ? d.norm() : (which == 1) ? f.param : deg;
+    const double v = (which == 0) ? d.norm() : (which == 1) ? 2.0 * f.param : deg;
     const wxPoint px(m_last_mouse_x, m_last_mouse_y);
-    on_inline_edit(px, v, which == 0 ? "Length" : which == 1 ? "Radius" : "Angle",
+    on_inline_edit(px, v, which == 0 ? _u8L("Length") : which == 1 ? _u8L("Width") : _u8L("Angle (°)"),
         [this, fi, which](double nv) {
             const Feature& g = m_features[fi];
             if      (which == 0) set_slot(fi, nv, g.param);
-            else if (which == 1) set_slot(fi, (g.c1 - g.c0).norm(), std::max(1e-3, nv));
+            else if (which == 1) set_slot(fi, (g.c1 - g.c0).norm(), nv * 0.5);   // full width -> half
             else                 set_slot_angle(fi, nv);
         },
         []() {});
@@ -2126,8 +2260,7 @@ void DesignSketchTool::set_slot(int fi, double length, double w)
     Vec2d dir = f.c1 - f.c0;
     if (dir.squaredNorm() < 1e-12) return;
     dir.normalize();
-    length = std::max(length, 2e-3);
-    w      = std::max(1e-3, w);
+    if (!(length > 0.0 && w > 0.0)) { show_refusal(_u8L("The value must be greater than zero")); return; }
     const Vec2d c0 = f.c0, c1 = f.c0 + length * dir;
     std::vector<SketchEntity> rebuilt = make_slot(c0, c1, w);
     if (int(rebuilt.size()) != 4) return;
@@ -2208,12 +2341,18 @@ void DesignSketchTool::set_dimension_value(double v)
 {
     if (m_pending_dim < 0 || m_pending_dim >= int(m_dimensions.size())) return;
     DimAnnot& a = m_dimensions[m_pending_dim];
+    const bool positive = a.kind == DimType::Length || a.kind == DimType::Radius || a.kind == DimType::Diameter;
+    if (!std::isfinite(v) || (positive && v <= 0.0) || (!positive && a.kind != DimType::Angle && v < 0.0)) {
+        show_refusal(positive ? _u8L("The value must be greater than zero")
+                              : _u8L("The value must not be negative (zero means coincident)"));
+        return;
+    }
     a.value = v;
     if (a.con >= 0 && a.con < int(m_constraints.size()))
         m_constraints[a.con] = constraint_for(a);
     resolve_live();
-    if (!m_solve_ok && on_readout)
-        on_readout(dimtype_title(a.kind) + " cannot be satisfied — the sketch is over-constrained");
+    if (!m_solve_ok)
+        notify(format(_u8L("%1% cannot be satisfied — the sketch is over-constrained"), dimtype_title(a.kind)));
     m_pending_dim = -1;
 }
 
@@ -2227,18 +2366,23 @@ std::string DesignSketchTool::dim_text(const DimAnnot& a) const
     char buf[32];
     const char* prefix = (a.kind == DimType::Diameter) ? "\xC3\x98"   // 'Ø'
                        : (a.kind == DimType::Radius)   ? "R" : "";
-    const char* suffix = (a.kind == DimType::Angle) ? "\xC2\xB0" : ""; // '°'
-    std::snprintf(buf, sizeof(buf), "%s%.1f%s", prefix, a.value, suffix);
+    // Two decimals, trailing zeros dropped: the same precision the HUD readout uses, so a label
+    // and the readout never show the same length two ways.
+    std::snprintf(buf, sizeof(buf), "%.2f", a.value);
     // Force the international (en) decimal point: wx sets LC_NUMERIC to the user
-    // locale at startup, so snprintf("%.1f") can emit a comma. Normalise it.
+    // locale at startup, so snprintf can emit a comma. Normalise it.
     for (char& ch : buf)
         if (ch == ',') ch = '.';
-    std::string out(buf);
-    if (a.kind != DimType::Angle) {
-        const bool use_in = wxGetApp().app_config->get_bool("use_inches");
-        out += use_in ? " in" : " mm";
+    std::string num(buf);
+    if (num.find('.') != std::string::npos) {
+        while (num.back() == '0') num.pop_back();
+        if (num.back() == '.') num.pop_back();
     }
-    return out;
+    if (num == "-0") num = "0";
+    // The Design tab models in millimetres whatever the slicer's inch preference says: the
+    // kernel, the value fields and the readouts are all mm. The suffix used to follow that
+    // preference while the number did not, so an inch user read "25.4 in" for one inch.
+    return std::string(prefix) + num + (a.kind == DimType::Angle ? "\xC2\xB0" : " mm");
 }
 
 void DesignSketchTool::apply_segment_length(double len)
@@ -2418,6 +2562,28 @@ InferenceSnap DesignSketchTool::infer_at(GLCanvas3D& canvas, const wxMouseEvent&
     if (evt.ShiftDown()) { InferenceSnap s; s.point = raw; return s; }   // Shift suppresses
     const double tol = screen_tol(canvas, evt, raw);
     return infer_point_snap(m_entities, raw, tol);
+}
+
+// Which clicks land on a snap target. Definition points (ends, corners, centres, points on a
+// curve) snap; the click that only sets a SIZE (a radius, a width, a sweep direction) is free,
+// so it can be placed anywhere without being dragged onto the nearest endpoint.
+bool DesignSketchTool::click_snaps() const
+{
+    const size_t n = m_points.size();
+    switch (m_mode) {
+    case Mode::Line: case Mode::Polyline: case Mode::TwoPointCircle: case Mode::ThreePointCircle:
+    case Mode::TangentArc: case Mode::BSpline: case Mode::Point:
+    case Mode::CornerRect: case Mode::CenterRect:
+        return true;
+    case Mode::ObliqueRect: case Mode::RoundedRect: case Mode::ThreePointArc: case Mode::Slot:
+        return n < 2;
+    case Mode::CenterArc: case Mode::ArcSlot:
+        return n == 1;
+    case Mode::CenterCircle: case Mode::Polygon: case Mode::Ellipse: case Mode::EllipseArc:
+        return n == 0;
+    default:
+        return false;
+    }
 }
 
 Vec2d DesignSketchTool::snap_vertex(GLCanvas3D& canvas, const wxMouseEvent& evt,
@@ -7295,7 +7461,7 @@ void DesignSketchTool::render_live_quotes(double unit_per_px)
             // Distance-between-arc-centres + Radius quotes never registered as editable, so the
             // labels did nothing on click (nde #6). Draw both labels clear of the fillable face
             // and remember the feature so open_primary_autoedit / click-to-promote drive set_slot.
-            // Slot dims: (1) inter-centre distance, (2) radius (= half-width), (3) centreline angle.
+            // Slot dims: (1) inter-centre distance, (2) full width, (3) centreline angle.
             const ColorRGBA dc(0.30f, 0.88f, 0.66f, 1.0f);
             const double th = std::max(15.0 * unit_per_px, 1e-4);
             Vec2d u = f.c1 - f.c0;
@@ -7307,7 +7473,7 @@ void DesignSketchTool::render_live_quotes(double unit_per_px)
                 DimAnnot len; len.kind = DimType::Length; len.value = Lc;
                 m_live_slot_len_label = 0.5 * (f.c0 + f.c1) + n * (w + th * 2.0);
                 draw_text(m_line_model, dim_text(len), m_live_slot_len_label, th, dc);
-                DimAnnot rd; rd.kind = DimType::Radius; rd.value = w;
+                DimAnnot rd; rd.kind = DimType::Length; rd.value = 2.0 * w;   // full width, as the arc slot
                 m_live_slot_w_label = f.c1 + u * (w + th * 2.0);
                 draw_text(m_line_model, dim_text(rd), m_live_slot_w_label, th, dc);
                 double deg = std::atan2(f.c1.y() - f.c0.y(), f.c1.x() - f.c0.x()) * 180.0 / M_PI;
@@ -7851,8 +8017,12 @@ void DesignSketchTool::recompute_op_ghost()
             Vec2d u = e.p1 - e.p0; if (u.norm() > 1e-12) u.normalize();
             m_op_dir = Vec2d(-u.y(), u.x());                  // left normal = +distance side
         } else if (e.type == SketchEntity::Type::Circle || e.type == SketchEntity::Type::Arc) {
+            // The same "+distance = left of travel" rule the engine uses: inward for a circle
+            // and a CCW arc, outward for a CW arc. The arrow pointed outward for all of them, so
+            // dragging it out shrank a CCW arc.
+            const bool ccw = e.type == SketchEntity::Type::Circle || e.end_angle >= e.start_angle;
             m_op_anchor = e.center + Vec2d(e.radius, 0.0);
-            m_op_dir = Vec2d(1, 0);
+            m_op_dir = Vec2d(ccw ? -1.0 : 1.0, 0.0);
         }
         m_op_ghost = SketchEngine::offset_entities({ e }, m_op_value);
     } else if (m_mode == Mode::Mirror) {
@@ -7879,7 +8049,7 @@ void DesignSketchTool::op_pick(int ei)
         else if (ei != m_op_a) {
             Vec2d cC, cBis; double cTh = 0.0;
             if (!op_corner(m_op_a, ei, cC, cBis, cTh)) {   // parallel or straight: no corner
-                if (on_readout) on_readout("those two lines do not meet at a corner — pick two lines that do");
+                notify(_u8L("Those two lines do not meet at a corner — pick two lines that do"));
                 return;
             }
             m_op_b = ei;
@@ -7937,12 +8107,18 @@ void DesignSketchTool::drag_op_arrow(const Vec2d& target)
 void DesignSketchTool::open_op_editor()
 {
     if (!on_inline_edit || !op_ready() || m_mode == Mode::Mirror) return;
-    const double sign = (m_mode == Mode::Offset && m_op_value < 0) ? -1.0 : 1.0;
     const wxPoint px(m_last_mouse_x, m_last_mouse_y);
-    on_inline_edit(px, std::abs(m_op_value), "",
-        [this, sign](double v) {
-            m_op_value = (m_mode == Mode::Offset) ? sign * std::abs(v) : std::max(0.001, v);
-            // Entering a radius IS the commit. Leaving it as a preview meant the most obvious
+    // Offset is signed the same way the arrow drag is (the sign picks the side), so the field
+    // shows and accepts the sign instead of silently keeping the old one. Fillet/Chamfer sizes
+    // are positive: a non-positive one is refused, not clamped to a hairline.
+    on_inline_edit(px, m_op_value, m_mode == Mode::Offset ? _u8L("Distance") : m_mode == Mode::Fillet ? _u8L("Radius") : _u8L("Size"),
+        [this](double v) {
+            if (m_mode != Mode::Offset && v <= 0.0) {
+                show_refusal(_u8L("The size must be greater than zero"));
+                return;
+            }
+            m_op_value   = v;
+                    // Entering a radius IS the commit. Leaving it as a preview meant the most obvious
             // route of all — click the radius, type it, press Return — ended with the value set,
             // the ghost drawn, and no geometry written; the only paths that ever applied it were
             // finishing the whole sketch or clicking empty space, neither of which is signposted.
@@ -8019,9 +8195,9 @@ void DesignSketchTool::confirm_op()
             ? SketchEngine::fillet_lines(m_entities[m_op_a], m_entities[m_op_b], m_op_value, a_out, b_out, extra)
             : SketchEngine::chamfer_lines(m_entities[m_op_a], m_entities[m_op_b], m_op_value, a_out, b_out, extra);
         if (!ok) {
-            if (on_readout) on_readout(fillet
-                ? "Fillet: the radius overruns a leg, or the two lines do not meet at a corner"
-                : "Chamfer: the distance overruns a leg, or the two lines do not meet at a corner");
+            notify(fillet
+                ? _u8L("Fillet: the radius overruns a leg, or the two lines do not meet at a corner")
+                : _u8L("Chamfer: the distance overruns a leg, or the two lines do not meet at a corner"));
             reset_op();
             return;
         }
@@ -8043,8 +8219,8 @@ void DesignSketchTool::confirm_op()
             return (d.type == CT::Coincident && refs(d, a, ra) && refs(d, b, rb))
                 || self_len(d, a) || self_len(d, b);
         });
-        if (released > 0 && on_readout)
-            on_readout(std::to_string(released) + " constraint(s) the fillet/chamfer invalidated were removed");
+        if (released > 0)
+            notify(format(_u8L("%1% constraint(s) the fillet/chamfer invalidated were removed"), released), false);
         auto coin = [&](R xr, int ln, R lr) {
             SketchEntityConstraintDef d; d.type = CT::Coincident; d.ea = xi; d.ra = xr; d.eb = ln; d.rb = lr; return d; };
         if (fillet) {
@@ -8063,7 +8239,7 @@ void DesignSketchTool::confirm_op()
         const int a = m_op_a;
         auto out = SketchEngine::offset_entities({ m_entities[a] }, m_op_value);
         if (out.empty()) {
-            if (on_readout) on_readout("Offset: an ellipse or a spline has no parallel of its own kind — pick lines, arcs or circles");
+            notify(_u8L("Offset: an ellipse or a spline has no parallel of its own kind — pick lines, arcs or circles"));
             reset_op();
             return;
         }
@@ -8340,20 +8516,25 @@ void DesignSketchTool::open_tf_editor_a()
     if (!on_inline_edit || !tf_ready()) return;
     const wxPoint px(m_last_mouse_x, m_last_mouse_y);
     double cur;
-    if (m_mode == Mode::Rotate || m_mode == Mode::PolarArray) cur = std::abs(m_tf_angle) * 180.0 / M_PI;
+    if (m_mode == Mode::Rotate || m_mode == Mode::PolarArray) cur = m_tf_angle * 180.0 / M_PI;
     else if (m_mode == Mode::Scale)                           cur = m_tf_scale;
     else                                                       cur = m_tf_delta.norm();
     Vec2d dir = m_tf_delta; if (dir.norm() > 1e-9) dir.normalize(); else dir = Vec2d(1, 0);
-    const double sgn = (m_tf_angle < 0) ? -1.0 : 1.0;
-    on_inline_edit(px, cur, "",
-        [this, dir, sgn](double v) {
+    const char* title = (m_mode == Mode::Rotate || m_mode == Mode::PolarArray) ? L("Angle (°)")
+                      : (m_mode == Mode::Scale) ? L("Scale factor") : L("Distance");
+    on_inline_edit(px, cur, _u8L(title),
+        [this, dir](double v) {
             switch (m_mode) {
-            case Mode::Move: case Mode::Array:        m_tf_delta = dir * v; break;
-            case Mode::Rotate: case Mode::PolarArray: m_tf_angle = sgn * std::abs(v) * M_PI / 180.0; break;
-            case Mode::Scale:                         m_tf_scale = std::max(1e-3, v); break;
+            case Mode::Move: case Mode::Array:        m_tf_delta = dir * v; break;          // signed: flips the direction
+            case Mode::Rotate: case Mode::PolarArray: m_tf_angle = v * M_PI / 180.0; break; // signed: CCW positive
+            case Mode::Scale:
+                if (v <= 0.0) { show_refusal(_u8L("The scale factor must be greater than zero")); return; }
+                m_tf_scale = v;
+                break;
             default: break;
             }
-            recompute_tf_ghost();
+            // Enter IS the commit, the same rule the edit-op field follows.
+            confirm_transform();
         },
         []() {});
 }
@@ -8363,8 +8544,15 @@ void DesignSketchTool::open_tf_editor_count()
     if (!on_inline_edit || !tf_ready()) return;
     if (m_mode != Mode::Array && m_mode != Mode::PolarArray) return;
     const wxPoint px(m_last_mouse_x, m_last_mouse_y);
-    on_inline_edit(px, double(std::max(2, m_tf_count)), "",
-        [this](double v) { m_tf_count = std::max(2, int(v + 0.5)); recompute_tf_ghost(); },
+    on_inline_edit(px, double(std::max(2, m_tf_count)), _u8L("Copies"),
+        [this](double v) {
+            if (v < 2.0 || std::abs(v - std::round(v)) > 1e-9) {
+                show_refusal(_u8L("The number of copies must be a whole number, 2 or more"));
+                return;
+            }
+            m_tf_count   = int(std::round(v));
+            confirm_transform();
+        },
         []() {});
 }
 
@@ -8477,8 +8665,8 @@ void DesignSketchTool::confirm_transform()
                 }
             }
         });
-        if (released > 0 && on_readout)
-            on_readout(std::to_string(released) + " constraint(s) released by the transform");
+        if (released > 0)
+            notify(format(_u8L("%1% constraint(s) released by the transform"), released), false);
     } else if (m_mode == Mode::Array || m_mode == Mode::PolarArray) {
         // ADDITIVE: append copies of each subject, then bind each copy to its source. Lines
         // get Parallel+EqualLength (linear) or EqualLength only (polar — rotation breaks
@@ -8532,8 +8720,8 @@ void DesignSketchTool::confirm_transform()
             }
             bool bound = false;
             for (auto& w : ladder) if (!w.empty() && try_add_constraints(w)) { bound = true; break; }
-            if (!bound && on_readout)
-                on_readout("the array copies are unconstrained — the solver refused every binding");
+            if (!bound)
+                notify(_u8L("The array copies are unconstrained — the solver refused every binding"), false);
         }
     }
     reset_tf();
@@ -8563,8 +8751,12 @@ void DesignSketchTool::emit_step_hint()
     } else if (is_transform_mode()) {
         picks = int(m_tf_targets.size());
         step  = m_tf_targets.empty() ? 0 : 1;
+    } else if (m_mode == Mode::Constrain && m_constrain_entities) {
+        picks = int(m_pick0 >= 0) + int(m_pick1 >= 0) + int(m_pick2 >= 0);
     } else if (m_mode == Mode::Select || m_mode == Mode::Constrain) {
         picks = int(m_selection.size());
+    } else if (m_mode == Mode::Dimension) {
+        step = m_dim_has0 ? 1 : 0;     // the Dimension tool keeps its first pick, not m_points
     } else {
         step = int(m_points.size());
     }
@@ -8750,10 +8942,12 @@ void DesignSketchTool::render(GLCanvas3D& canvas)
     const ColorRGBA grey(0.55f, 0.55f, 0.60f, 1.0f);
 
     if (m_mode == Mode::Constrain) {
-        const ColorRGBA cyan(0.30f, 0.80f, 1.0f, 1.0f);
-        const ColorRGBA red(1.0f, 0.25f, 0.25f, 1.0f);
+        // The live session's palette, so a sketch looks the same whether you are drawing it or
+        // constraining it: picks wear THE selection colour, idle geometry orange (construction
+        // grey). It used to draw everything in the old near-selection cyan and the picks RED —
+        // the colour that means "conflicting" everywhere else in the sketch.
+        const ColorRGBA sel_col = design_selection_color();
         if (m_constrain_entities) {
-            // Draw all entities cyan; picked Line entities highlighted red.
             std::vector<Vec2d> markers;
             for (size_t i = 0; i < m_entities.size(); ++i) {
                 const SketchEntity& e = m_entities[i];
@@ -8762,14 +8956,14 @@ void DesignSketchTool::render(GLCanvas3D& canvas)
                 // references glow yellow (picked entities still win as red).
                 const bool hl = !sel && std::find(m_constraint_hl.begin(), m_constraint_hl.end(),
                                                    int(i)) != m_constraint_hl.end();
-                const ColorRGBA col = sel ? red : (hl ? yellow : cyan);
+                const ColorRGBA col = sel ? sel_col : hl ? yellow : e.construction ? grey : orange;
                 if (e.type == SketchEntity::Type::Point) { markers.push_back(e.p0); continue; }
                 bool closed = false;
                 std::vector<Vec2d> poly = entity_polyline(e, closed);
                 draw_quad_strip((sel || hl) ? m_highlight_model : m_line_model, poly, closed, col);
             }
             if (!markers.empty())
-                draw_vertices(m_vertex_model, markers, cyan);
+                draw_vertices(m_vertex_model, markers, orange);
             // Constraint badges (C3.4b): iconic glyphs near each constraint's entity.
             {
                 const double upp = 1.0 / std::max(camera.get_zoom(), 1e-6);
@@ -8785,12 +8979,12 @@ void DesignSketchTool::render(GLCanvas3D& canvas)
             glsafe(::glEnable(GL_DEPTH_TEST));
             return;
         }
-        draw_quad_strip(m_line_model, m_points, true, cyan);
-        draw_vertices(m_vertex_model, m_points, cyan);
+        draw_quad_strip(m_line_model, m_points, true, orange);
+        draw_vertices(m_vertex_model, m_points, orange);
         if (m_sel_a >= 0 && m_sel_b >= 0 &&
             m_sel_a < int(m_points.size()) && m_sel_b < int(m_points.size())) {
             std::vector<Vec2d> seg = { m_points[m_sel_a], m_points[m_sel_b] };
-            draw_quad_strip(m_highlight_model, seg, false, red);
+            draw_quad_strip(m_highlight_model, seg, false, sel_col);
         }
         shader->stop_using();
         glsafe(::glEnable(GL_CULL_FACE));
@@ -8954,7 +9148,7 @@ void DesignSketchTool::render(GLCanvas3D& canvas)
             }
         }
         if (!mids.empty())
-            draw_vertices(m_vertex_model, mids, ColorRGBA(0.35f, 0.75f, 0.85f, 1.0f), 0.9);
+            draw_vertices(m_vertex_model, mids, ColorRGBA(0.85f, 0.85f, 0.88f, 1.0f), 0.9);   // neutral: not the selection hue
 
         // Derived feature handles (A3): the circle RadiusHandle is not a SketchPointRole,
         // so the per-point pass above doesn't draw it. Render it (cyan) + the hovered
@@ -8967,7 +9161,7 @@ void DesignSketchTool::render(GLCanvas3D& canvas)
                 h.role == HandleRole::MinorAxis    || h.role == HandleRole::BSplineCtrl)
                 radius_h.push_back(h.pos);
         if (!radius_h.empty())
-            draw_vertices(m_vertex_model, radius_h, ColorRGBA(0.30f, 0.75f, 0.95f, 1.0f),
+            draw_vertices(m_vertex_model, radius_h, ColorRGBA(0.95f, 0.95f, 0.95f, 1.0f),
                           std::max(4.0 * upp, 1e-4));
         if (m_has_hover_handle)
             draw_vertices(m_highlight_model, { m_hover_handle.pos }, white,
@@ -9251,7 +9445,7 @@ void DesignSketchTool::render(GLCanvas3D& canvas)
         ColorRGBA hint(1.0f, 0.55f, 0.1f, 1.0f);                 // endpoint: orange
         switch (m_cursor_snap.kind) {
         case InferenceSnap::Kind::Midpoint: hint = ColorRGBA(0.35f, 0.90f, 0.75f, 1.0f); break; // teal
-        case InferenceSnap::Kind::Center: hint = ColorRGBA(0.30f, 0.80f, 1.0f, 1.0f); break; // cyan
+        case InferenceSnap::Kind::Center: hint = ColorRGBA(1.0f, 0.85f, 0.2f, 1.0f); break;  // yellow (cyan = selected)
         case InferenceSnap::Kind::Origin: hint = ColorRGBA(1.0f, 0.30f, 0.85f, 1.0f); break; // magenta
         case InferenceSnap::Kind::OnEdge: hint = ColorRGBA(0.45f, 0.70f, 1.0f, 1.0f); break; // blue
         default: break;
@@ -9800,6 +9994,13 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
         // opens somewhere unexpected can't leave the viewport unusable.
         else if (evt.Dragging() || evt.GetWheelRotation() != 0)
             return false;
+        // A click elsewhere accepts the typed value, as Enter would (the field then advances or
+        // closes). The click itself is still swallowed: it was aimed at leaving the field, not
+        // at drawing, and a point placed by it would land under a field that just vanished.
+        else if (evt.LeftDown()) {
+            if (on_inline_commit) on_inline_commit();
+            return true;
+        }
         else
             return true;
     }
@@ -9852,7 +10053,10 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
                 if (!moved && d < 3) open_move_editor(d);   // stationary click on an arrow = edit offset
                 return true;
             }
-            if (evt.RightDown()) { clear_move_gizmo(); canvas.set_as_dirty(); if (on_move_exit) on_move_exit(); return true; }
+            // Right-click opens the offer; the move is kept with Enter/✓ and reverted with Esc/✗,
+            // like every other pending edit. It used to keep the move and close the gizmo — a
+            // commit on the one button the charter reserves for "what can I do here".
+            if (evt.RightDown()) return false;
             if (evt.LeftDown()) {
                 int axis = -1;
                 if (hit_test_move_arrow(canvas, evt, axis)) {   // translate arrows win over rings
@@ -10229,19 +10433,19 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
             Vec2d p; screen_to_plane(canvas, evt, p);
             const Linef3 r2 = canvas.mouse_ray(Point(evt.GetX() + 8, evt.GetY()));
             const double tol = std::max(1e-3, (m_plane.project(r2.a, r2.vector()) - p).norm());
-            if (apply_live_trim(p, tol * 3.0, m_mode == Mode::Extend)) {
+            if (apply_live_trim(p, screen_tol(canvas, evt, p, kToolPickPx), m_mode == Mode::Extend)) {
                 resolve_live();
-            } else if (on_readout) {
+            } else {
                 // nde #15: don't fail silently. The pick found nothing to cut/extend — either
                 // the click missed every live segment, or the picked segment has no crossing /
                 // target among the OTHER live entities (committed sketches aren't trimmed).
-                on_readout(m_mode == Mode::Extend
-                    ? std::string("Extend: click a line/arc that can reach another live entity")
-                    : std::string("Trim: click a segment where it crosses another live entity"));
+                notify(m_mode == Mode::Extend
+                    ? _u8L("Extend: click a line or an arc that can reach another entity")
+                    : _u8L("Trim: click a segment where it crosses another entity"));
             }
             return true;
         }
-        if (evt.RightDown()) { request_exit(); return true; }
+        if (evt.RightDown()) return false;   // nothing pending to abandon: the offer opens
         return false;   // let move/drag orbit the camera
     }
 
@@ -10266,8 +10470,7 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
             const double tol = std::max(1e-3, (m_plane.project(r2.a, r2.vector()) - p).norm());
             // 1) live gizmo: click the value label to type, or grab the arrow to drag.
             if (op_ready() && m_mode != Mode::Mirror) {
-                const Linef3 rl = canvas.mouse_ray(Point(evt.GetX() + 24, evt.GetY()));
-                const double ltol = std::max(tol, (m_plane.project(rl.a, rl.vector()) - p).norm());
+                const double ltol = std::max(tol, screen_tol(canvas, evt, p, kLabelPx));
                 if ((m_op_label - p).norm() <= ltol) { open_op_editor(); return true; }
                 if (hit_test_op_arrow(p, tol))        { m_op_dragging_arrow = true; return true; }
             }
@@ -10277,19 +10480,21 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
                 const double d = entity_pick_dist(p, m_entities[i]);
                 if (d < best) { best = d; bi = int(i); }
             }
-            if (bi >= 0 && best <= tol * 3.0) { op_pick(bi); return true; }
-            // 3) empty click confirms a ready gesture.
-            if (op_ready()) confirm_op();
+            if (bi >= 0 && best <= screen_tol(canvas, evt, p, kToolPickPx)) { op_pick(bi); return true; }
+            // 3) Empty space never commits (charter 4.2 withdrew that invisible gesture). A ready
+            // op stays pending and says how to finish it; half-made picks are a selection, and
+            // empty space clears a selection.
+            if (op_ready()) notify(_u8L("Press Enter or ✓ to apply, Esc to discard"), false);
+            else if (m_op_a >= 0) { reset_op(); m_selection.clear(); if (on_selection_changed) on_selection_changed(0); }
             return true;
         }
         if (evt.RightDown()) {
-            if (m_op_a >= 0 || !m_mirror_targets.empty()) {
-                reset_op();
-                m_selection.clear();
-                if (on_selection_changed) on_selection_changed(0);
-            } else {
-                request_exit();
-            }
+            // The draw tools' rule (right_abandon): drop what is pending, else hand the click
+            // back so the offer opens. Leaving the tool is Esc's job, not right-click's.
+            if (m_op_a < 0 && m_mirror_targets.empty()) return false;
+            reset_op();
+            m_selection.clear();
+            if (on_selection_changed) on_selection_changed(0);
             return true;
         }
         return false;
@@ -10319,8 +10524,7 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
             const double tol = std::max(1e-3, (m_plane.project(r2.a, r2.vector()) - p).norm());
             // 1) live gizmo: click a value label to type, or grab the handle to drag.
             if (tf_ready()) {
-                const Linef3 rl = canvas.mouse_ray(Point(evt.GetX() + 24, evt.GetY()));
-                const double ltol = std::max(tol, (m_plane.project(rl.a, rl.vector()) - p).norm());
+                const double ltol = std::max(tol, screen_tol(canvas, evt, p, kLabelPx));
                 if ((m_tf_label_a - p).norm() <= ltol) { open_tf_editor_a();     return true; }
                 if ((m_tf_label_b - p).norm() <= ltol) { open_tf_editor_count(); return true; }
                 if (hit_test_tf_handle(p, tol))        { m_tf_dragging = true;   return true; }
@@ -10331,19 +10535,16 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
                 const double d = entity_pick_dist(p, m_entities[i]);
                 if (d < best) { best = d; bi = int(i); }
             }
-            if (bi >= 0 && best <= tol * 3.0) { tf_pick(bi); return true; }
-            // 3) empty click confirms a ready gesture.
-            if (tf_ready()) confirm_transform();
+            if (bi >= 0 && best <= screen_tol(canvas, evt, p, kToolPickPx)) { tf_pick(bi); return true; }
+            // 3) Empty space never commits (charter 4.2): the pending transform waits for Enter/✓.
+            if (tf_ready()) notify(_u8L("Press Enter or ✓ to apply, Esc to discard"), false);
             return true;
         }
         if (evt.RightDown()) {
-            if (!m_tf_targets.empty()) {
-                reset_tf();
-                m_selection.clear();
-                if (on_selection_changed) on_selection_changed(0);
-            } else {
-                request_exit();
-            }
+            if (m_tf_targets.empty()) return false;   // nothing to abandon: the offer opens
+            reset_tf();
+            m_selection.clear();
+            if (on_selection_changed) on_selection_changed(0);
             return true;
         }
         return false;
@@ -10359,8 +10560,7 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
         }
         if (evt.LeftDown()) {
             Vec2d p; screen_to_plane(canvas, evt, p);
-            const Linef3 r2 = canvas.mouse_ray(Point(evt.GetX() + 10, evt.GetY()));
-            const double tol = std::max(1e-3, (m_plane.project(r2.a, r2.vector()) - p).norm());
+            const double tol = screen_tol(canvas, evt, p, kPickPx);
             const int h = hit_test_xform_handle(p, tol);
             if (h >= 0) {
                 m_xform_handle = h;
@@ -10375,7 +10575,9 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
             return true;
         }
         if (evt.LeftUp()) { m_xform_handle = -1; return true; }
-        if (evt.RightDown()) { if (on_exit) on_exit(); else cancel(); return true; }
+        // Right-click opens the offer like everywhere else; the placement is kept with Enter/✓
+        // and discarded with Esc/✗ (the panel's Insert card), never by a mouse button.
+        if (evt.RightDown()) return false;
         return false;
     }
 
@@ -10393,6 +10595,12 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
                     const double d = entity_pick_dist(p, m_entities[i]);
                     if (d < best) { best = d; bi = int(i); }
                 }
+                // Same reach as every other tool that picks an entity to act on. With no limit,
+                // a click anywhere on screen picked whatever was nearest; empty space now clears.
+                if (bi >= 0 && best > screen_tol(canvas, evt, p, kToolPickPx)) {
+                    bi = -1;
+                    m_pick0 = m_pick1 = m_pick2 = -1;
+                }
                 if (bi >= 0) {
                     // Rolling three-slot selection: slots 0/1 feed all 2-entity
                     // constraints; slot 2 is the Symmetric axis (only filled once
@@ -10404,7 +10612,9 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
                 }
                 return true;
             }
-            if (evt.RightDown()) { cancel(); return true; }
+            // The picks are this mode's selection, and right-click on a selection opens the
+            // offer for it — the constraint verbs. It used to cancel(), wiping the whole session
+            // behind the panel's back. Esc drops the picks.
             return false;
         }
         if (evt.LeftDown()) {
@@ -10425,11 +10635,7 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
             }
             return true;
         }
-        if (evt.RightDown()) {
-            cancel();
-            return true;
-        }
-        return false;
+        return false;   // right-click included: the offer opens on the picked segment
     }
 
     // Selection mode: click to pick an entity, Shift/Ctrl to extend, double-click
@@ -10530,9 +10736,9 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
             Vec2d p;
             screen_to_plane(canvas, evt, p);
             if (evt.LeftDClick()) {                // double-click a quote label -> edit it
-                const Linef3 rd = canvas.mouse_ray(Point(evt.GetX() + 28, evt.GetY()));
-                const double dtol = std::max(2.0, (m_plane.project(rd.a, rd.vector()) - p).norm());
-                const int di = hit_test_dimension(p, dtol);
+                // Labels have ONE budget, single- or double-click, and it is in pixels: the old
+                // 2 mm floor made a label's target grow without bound as the view zoomed in.
+                const int di = hit_test_dimension(p, screen_tol(canvas, evt, p, kLabelPx));
                 if (di >= 0) { edit_dimension(di); return true; }
             }
             // Zoom-aware tolerance: project a point 8 px away and measure in plane units.
@@ -10546,8 +10752,7 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
             // opens — so typing a value sets the precise dimension. Generous label
             // tolerance (~24 px) since text labels are wider than a point grip.
             if (evt.LeftDown()) {
-                const Linef3 rdl = canvas.mouse_ray(Point(evt.GetX() + 24, evt.GetY()));
-                const double ltol = std::max(tol, (m_plane.project(rdl.a, rdl.vector()) - p).norm());
+                const double ltol = std::max(tol, screen_tol(canvas, evt, p, kLabelPx));
                 const int di = hit_test_dimension(p, ltol);
                 if (di >= 0) { open_value_editor(di); return true; }
                 for (const DimAnnot& q : m_live_quotes) {
@@ -10733,10 +10938,7 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
         if (evt.LeftDClick()) {                    // double-click a quote label -> edit it
             Vec2d p;
             screen_to_plane(canvas, evt, p);
-            const Linef3 r2 = canvas.mouse_ray(Point(evt.GetX() + 28, evt.GetY()));
-            const Vec2d p2 = m_plane.project(r2.a, r2.vector());
-            const double di_tol = std::max(2.0, (p2 - p).norm());
-            const int di = hit_test_dimension(p, di_tol);
+            const int di = hit_test_dimension(p, screen_tol(canvas, evt, p, kLabelPx));
             if (di >= 0) edit_dimension(di);
             m_dim_has0 = false;
             return true;
@@ -10759,8 +10961,8 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
                     if (t == SketchEntity::Type::Line)        { a.kind = DimType::Length;   place_dimension(a); }
                     else if (t == SketchEntity::Type::Circle) { a.kind = DimType::Diameter; place_dimension(a); }
                     else if (t == SketchEntity::Type::Arc)    { a.kind = DimType::Radius;   place_dimension(a); }
-                    else if (on_readout)
-                        on_readout("no dimension for that entity yet — click a line, a circle, an arc, or two points");
+                    else
+                        notify(_u8L("No dimension for that entity yet — click a line, a circle, an arc, or two points"));
                 }
             } else {
                 if (got_pt && !(pe == m_dim_e0 && pr == m_dim_r0)) {
@@ -10771,14 +10973,18 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
                     DimAnnot a; a.kind = DimType::DistanceToLine;
                     a.ea = m_dim_e0; a.ra = m_dim_r0; a.eb = he;
                     place_dimension(a);
-                } else if (he >= 0 && on_readout) {
-                    on_readout("click a second point, or a line to measure the distance to");
+                } else if (he >= 0) {
+                    notify(_u8L("Click a second point, or a line to measure the distance to"), false);
                 }
                 m_dim_has0 = false;                    // reset after the second pick
             }
             return true;
         }
-        if (evt.RightDown()) { m_dim_has0 = false; return true; }
+        if (evt.RightDown()) {                         // abandon the first pick, if any (right_abandon's rule)
+            if (!m_dim_has0) return false;             // nothing down: the offer opens
+            m_dim_has0 = false;
+            return true;
+        }
         return false;                                  // let drag orbit the camera
     }
 
@@ -10788,7 +10994,10 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
         m_has_cursor = true;
         m_cursor_locked = false;
         bool vsnap = false;
-        m_cursor = snap_vertex(canvas, evt, m_cursor, vsnap);   // preview-snap to endpoints
+        // Preview exactly what the next click will do: a snap marker over a click that then
+        // lands on the raw point promised a coincidence that never happened.
+        if (click_snaps()) m_cursor = snap_vertex(canvas, evt, m_cursor, vsnap);   // preview-snap
+        else               m_cursor_snap = InferenceSnap{};
         // The chain's own start is not an entity yet, so snap_vertex cannot see it. Offer it
         // here: the cursor lands exactly on it, so the rubber band below IS the closing segment.
         if (snap_chain_start(canvas, evt, m_cursor)) vsnap = true;
@@ -10822,17 +11031,13 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
                 bool lk = false;
                 p = snap_dir(m_points.back(), p, lk);  // lock new segment to inference angle
             }
+            m_chain_dup_tol = screen_tol(canvas, evt, p, 3.0);
             m_points.push_back(p);
             arm_polyline_segment_edit();   // refine this segment's Length+Angle, then continue
             return true;
         }
         if (evt.LeftDClick()) {
-            if (m_points.size() >= 2) {
-                const int base = int(m_entities.size());
-                push_open_chain(m_points);     // end as an open chain
-                infer_auto_constraints(base);
-                m_points.clear();
-            }
+            if (m_points.size() >= 2) end_chain();   // end as an open chain
             return true;
         }
         if (evt.RightDown() && m_points.empty())
@@ -10848,11 +11053,7 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
             // is this tab's goal and it stays a four-action triangle either way; what changes
             // is that the closing edge is now something the user saw and chose, not one the
             // app appended on their behalf.
-            const int base = int(m_entities.size());
-            if (m_points.size() >= 2)
-                push_open_chain(m_points);
-            infer_auto_constraints(base);
-            m_points.clear();
+            end_chain();
             return true;
         }
         break;
@@ -10888,6 +11089,7 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
         if (evt.LeftDown()) {
             Vec2d p;
             screen_to_plane(canvas, evt, p);
+            { bool vsnap = false; if (click_snaps()) p = snap_vertex(canvas, evt, p, vsnap); }
             if (m_points.empty()) {
                 m_points.push_back(p);
             } else {
@@ -10910,6 +11112,7 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
         if (evt.LeftDown()) {
             Vec2d p;
             screen_to_plane(canvas, evt, p);
+            { bool vsnap = false; if (click_snaps()) p = snap_vertex(canvas, evt, p, vsnap); }
             if (m_points.empty()) {
                 m_points.push_back(p);
             } else {
@@ -10993,6 +11196,7 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
         if (evt.LeftDown()) {
             Vec2d p;
             screen_to_plane(canvas, evt, p);
+            { bool vsnap = false; if (click_snaps()) p = snap_vertex(canvas, evt, p, vsnap); }
             if (m_points.empty()) {
                 m_points.push_back(p);
             } else {
@@ -11026,6 +11230,7 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
     case Mode::ThreePointCircle: {
         if (evt.LeftDown()) {
             Vec2d p; screen_to_plane(canvas, evt, p);
+            { bool vsnap = false; if (click_snaps()) p = snap_vertex(canvas, evt, p, vsnap); }
             m_points.push_back(p);
             if (m_points.size() == 3) {
                 append_entities(make_three_point_circle(m_points[0], m_points[1], m_points[2]));
@@ -11098,6 +11303,7 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
     case Mode::Slot: {
         if (evt.LeftDown()) {
             Vec2d p; screen_to_plane(canvas, evt, p);
+            { bool vsnap = false; if (click_snaps()) p = snap_vertex(canvas, evt, p, vsnap); }
             if (m_points.size() < 2) {
                 m_points.push_back(p);
             } else {
@@ -11150,6 +11356,7 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
     case Mode::Polygon: {
         if (evt.LeftDown()) {
             Vec2d p; screen_to_plane(canvas, evt, p);
+            { bool vsnap = false; if (click_snaps()) p = snap_vertex(canvas, evt, p, vsnap); }
             if (m_points.empty()) {
                 m_points.push_back(p);
             } else {
@@ -11211,18 +11418,14 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
             m_snap_off = evt.ShiftDown();
             bool vsnap = false;
             p = snap_vertex(canvas, evt, p, vsnap);   // poles can land on endpoints
+            m_chain_dup_tol = screen_tol(canvas, evt, p, 3.0);
             m_points.push_back(p);
             return true;
         }
         if (evt.RightDown() && m_points.empty())
             return false;               // no poles down — ghcz, let the offer open
         if (evt.LeftDClick() || evt.RightDown()) {
-            if (m_points.size() >= 2) {
-                const int base = int(m_entities.size());
-                append_entities(make_bspline(m_points));
-                infer_auto_constraints(base);         // end poles auto-Coincident -> loops close
-            }
-            m_points.clear();
+            end_chain();
             return true;
         }
         break;
@@ -11232,6 +11435,7 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
         if (evt.LeftDown()) {
             Vec2d p;
             screen_to_plane(canvas, evt, p);
+            { bool vsnap = false; if (click_snaps()) p = snap_vertex(canvas, evt, p, vsnap); }
             push_point(p);
             return true;
         }

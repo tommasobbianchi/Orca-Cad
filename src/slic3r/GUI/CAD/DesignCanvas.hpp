@@ -122,7 +122,6 @@ public:
                         const std::vector<bool>* visible = nullptr,
                         const std::vector<Transform3d>* xform = nullptr);
     void set_on_solid_selection_changed(std::function<void(int, int, int, int)> cb);
-    void set_on_place_on_face(std::function<bool()> cb);   // F key: Place on Face
     void select_body(int body);   // Parts-list -> highlight a whole body by index
     // Effective display colour of a body: the per-body override (Color tool) when set,
     // otherwise the auto body-index palette. Single source of truth shared with reload().
@@ -213,7 +212,7 @@ public:
     void set_on_datum_base_picked(std::function<void(int)> cb);
     void set_on_sketch_exit(std::function<void()> cb);           // Esc -> exit the tool
     void set_on_sketch_exit_refused(std::function<void()> cb);   // Esc declined: sketch has work
-    void set_on_undo_redo(std::function<void(bool /*redo*/)> cb); // Ctrl+Z / Ctrl+Shift+Z
+    void set_on_sketch_notice(std::function<void(const std::string&, bool)> cb);   // tool refusals/side effects
     // Persistently draw committed sketches (un-consumed ones stay visible).
     void set_display_sketches(std::vector<DesignSketchTool::DisplaySketch> ds);
     void set_highlight_sketches(std::vector<std::pair<int, ColorRGBA>> hl);
@@ -235,13 +234,12 @@ public:
     void set_body_translucent(bool on); // render the solid see-through (fillet/chamfer preview)
     void set_xray_focus(int body);      // >=0: fade+lock out every other body (CoordSys picking)
     void set_body_hidden(bool on);      // preview-only: hide base bodies, show only the result ghost
-    void set_on_move_exit(std::function<void()> cb);   // right-click finished the move-body gizmo
     // Right-click (or its platform equivalent) on the viewport with no tool running: open the
     // object-driven offer there. Fires with SCREEN coordinates. Deliberately NOT fired while a
     // tool is live — right-click already ends a polyline chain and finishes the move gizmo, and
     // taking those over would break two working interactions in order to add a third.
     void set_on_context_menu(std::function<void(const wxPoint&)> cb);
-    void delete_selected_sketch_entities();
+    bool delete_selected_sketch_entities();           // false when nothing was selected
     bool inline_busy() const;                         // a sketch value field is open (guard keys)
     bool inline_has_focus() const;                    // the field itself holds keyboard focus
     void inline_commit();                             // accept the typed value (Enter/Tab)
@@ -251,8 +249,10 @@ public:
     // panel can do it when focus is not on the canvas.
     void request_sketch_exit();
     bool live_sketch_has_work() const;                // the live sketch holds entities a cancel would destroy
-    bool undo_last_sketch_entity();                   // Ctrl+Z in a sketch: drop the last entity
-    bool delete_selected_or_last_sketch_entity();     // Delete in a sketch: selected, else last
+    bool undo_last_sketch_entity();                   // Ctrl+Z in a sketch: drop the last drawn shape
+    bool redo_last_sketch_entity();                   // Ctrl+Y in a sketch: bring it back
+    bool can_undo_sketch_entity() const { return m_sketch_tool.can_undo_entity(); }
+    bool can_redo_sketch_entity() const { return m_sketch_tool.can_redo_entity(); }
     void clear_sketch_selection();
 
     // View toggles (keys P / A): origin planes, world axis triad. Each returns the new on/off
@@ -299,9 +299,10 @@ public:
     // Esc routing (DesignInteraction.hpp). The panel decides WHICH level one press belongs to;
     // these are the levels it can act on inside the canvas. Each returns whether it did anything,
     // so the panel can fall through to the next level without asking twice.
-    bool sketch_abort_gesture();     // CadLevel::Gesture — drop the entity being drawn
+    bool sketch_abort_gesture();     // CadLevel::Gesture — drop the entity being drawn, or the tool's picks
     bool sketch_disarm_tool();       // CadLevel::Tool    — armed sketch tool falls back to Select
-    bool drawing_in_progress() const;// an entity has clicks down but is not committed
+    bool sketch_confirm_pending();   // Enter — apply a ready edit-op or transform
+    bool drawing_in_progress() const;// clicks or picks are down but nothing is committed yet
     bool has_any_selection() const;  // model pick or sketch pick
     bool clear_any_selection();      // CadLevel::Idle — drop both; true if anything was dropped
     bool sketch_first_selected_type(SketchEntity::Type& out) const;
@@ -367,7 +368,8 @@ private:
     std::function<void(const wxPoint&)> m_on_context_menu;
     bool        m_ctx_bound{false};   // bind the RIGHT_UP handler once, however often the cb is set
     wxPoint     m_ctx_press{0, 0};    // right-press origin: a right-DRAG orbits, it must not offer
-    long long   m_ctx_press_ms{0};    // and a right-HOLD is navigation too, however still it is held
+    bool        m_ctx_travelled{false};   // the right press wandered past the budget at ANY point,
+                                          // so an orbit that ends where it began is still an orbit
 
     Bed3D       m_bed;
     // The half of the camera swap above that is NOT on screen: the editor tabs' view while
