@@ -1,6 +1,7 @@
 #include "slic3r/GUI/CAD/DesignPanel.hpp"
 #include "slic3r/GUI/CAD/DesignCanvas.hpp"
 #include "slic3r/GUI/CAD/DesignSketchTool.hpp"
+#include "slic3r/GUI/CAD/DesignTextDialog.hpp"           // Text: font, height, live outline
 #include "slic3r/GUI/CAD/DesignOffer.hpp"                // generated offer table — see docs/ux/tool_atlas.json
 #include "libslic3r/CAD/GeometryEngine.hpp"   // face_by_index for face-extrude gizmo anchor
 #include "libslic3r/TriangleMesh.hpp"     // mesh import: STL/OBJ -> indexed_triangle_set
@@ -4562,15 +4563,12 @@ void DesignPanel::sync_sketch_display()
 
 void DesignPanel::on_add_text()
 {
-    wxTextEntryDialog dlg(this, _L("Text to insert:"), _L("Text"), wxEmptyString);
-    if (dlg.ShowModal() != wxID_OK)
+    // Font, height and a live outline with its size are chosen up front; the bbox handles
+    // (Move/Scale) still resize the art in the canvas afterwards.
+    DesignTextDialog dlg(this);
+    if (dlg.ShowModal() != wxID_OK || dlg.regions().empty())
         return;
-    const wxString text = dlg.GetValue();
-    if (text.empty())
-        return;
-    const std::string utf8(text.ToUTF8().data());
-    // Insert at a default height; resize in-canvas via the bbox handles (Move/Scale).
-    add_imported_sketch(text_to_regions(utf8, 10.0), _L("Text"));
+    add_imported_sketch(dlg.regions(), _L("Text"));
 }
 
 void DesignPanel::on_import_svg()
@@ -6369,6 +6367,38 @@ static void offer_trace(const char* fmt, ...)
     fflush(stderr);
 }
 
+// The offer menu's title line for selection `kind` (an OfferSel), or empty for none.
+wxString DesignPanel::offer_header(int kind) const
+{
+    const int nb = int(m_doc.bodies.size());
+    auto body = [&]() {
+        if (m_sel_solid_body < 0 || m_sel_solid_body >= nb) return wxString();
+        const std::string& n = m_doc.bodies[m_sel_solid_body].name;
+        return n.empty() ? wxString::Format(_L("Body %d"), m_sel_solid_body + 1) : wxString::FromUTF8(n);
+    };
+    switch (OfferSel(kind)) {
+    case OfferSel::None:       return _L("Nothing selected");
+    case OfferSel::BodySolid:  return wxString::Format(_L("%s — solid body"), body());
+    case OfferSel::BodySheet:  return wxString::Format(_L("%s — surface body"), body());
+    case OfferSel::FacePlanar: return wxString::Format(_L("Flat face %d of %s"), m_sel_solid_face, body());
+    case OfferSel::FaceCyl:    return wxString::Format(_L("Cylindrical face %d of %s"), m_sel_solid_face, body());
+    case OfferSel::FaceOther:  return wxString::Format(_L("Face %d of %s"), m_sel_solid_face, body());
+    case OfferSel::EdgeStr:    return wxString::Format(_L("Straight edge %d of %s"), m_sel_solid_edge, body());
+    case OfferSel::EdgeCirc:   return wxString::Format(_L("Circular edge %d of %s"), m_sel_solid_edge, body());
+    case OfferSel::Vertex:     return wxString::Format(_L("Vertex of %s"), body());
+    case OfferSel::SkLoop:     return _L("Sketch profile");
+    case OfferSel::SkNone:     return _L("Sketch — nothing selected");
+    case OfferSel::SkLine:     return _L("Sketch line");
+    case OfferSel::SkArc:      return _L("Sketch curve");
+    case OfferSel::SkPoint:    return _L("Sketch point");
+    case OfferSel::Sk2Ent: {
+        const int n = m_viewport ? m_viewport->sketch_selection_count() : 0;
+        return wxString::Format(_L("%d sketch entities"), n);
+    }
+    default:                   return wxString();
+    }
+}
+
 void DesignPanel::show_offer_menu(const wxPoint& screen_pos)
 {
     const int      kind = offer_selection_kind();
@@ -6419,6 +6449,17 @@ void DesignPanel::show_offer_menu(const wxPoint& screen_pos)
     wxMenu menu;
     std::vector<const OfferVerb*> bound;      // menu id offset -> verb
     const int base = wxID_HIGHEST + 4200;
+
+    // Header: WHAT the rows below act on, named the way the tree and the cards name it. The rows
+    // only make sense against the selection, and the selection is not always visible under the
+    // cursor that opened the menu. Greyed, so it reads as a title and cannot be run.
+    {
+        const wxString head = offer_header(kind);
+        if (!head.empty()) {
+            menu.Append(wxID_ANY, head)->Enable(false);
+            menu.AppendSeparator();
+        }
+    }
 
     for (int row = 0; row < kOfferRowCount; ++row) {
         std::vector<const OfferVerb*> live, family;

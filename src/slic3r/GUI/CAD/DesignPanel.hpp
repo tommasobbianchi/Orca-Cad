@@ -754,6 +754,7 @@ private:
     // monitor, and the menu would map there — detached from the geometry it is about.
     wxPoint offer_anchor() const;
     int  offer_selection_kind() const;          // an OfferSel, as int to keep the header light
+    wxString offer_header(int kind) const;      // the offer menu's title line for that selection
     // Does the SKETCH half of the map apply? A mode question, not a session one: begin_sketch
     // does not run until the first tool is armed, so between "press Sketch" and "pick a tool"
     // is_sketching() is still false — precisely when the drawing tools must be on offer. The

@@ -60,6 +60,9 @@ pointing at things stays quiet.
 The offer also opens by itself the moment you press Sketch on a face or plane, showing the
 sketch tools — the app hands you the tools directly.
 
+The first line names what the rows act on — *"Flat face 4 of Body 2"*, *"Sketch line"*,
+*"Nothing selected"* — so the menu is readable even when the selection is not under the cursor.
+
 **Eight families, always in this fixed order:** Create, Add material, Remove, Dress-up,
 Repeat, Transform, Reference, Modify.
 
@@ -301,6 +304,10 @@ variable and the whole model follows.
 ---
 
 ## Import and export
+
+**Text** asks for the words, the font (any installed font, bold, italic) and the height, and
+shows the outline that will be inserted with its size in millimetres before anything is added.
+The last font and height are remembered.
 
 **Import STEP** brings in a real B-rep solid, not a mesh: its faces and edges can be filleted,
 shelled and cut like anything modelled here.
