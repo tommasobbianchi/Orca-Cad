@@ -36,8 +36,9 @@ struct PrimitiveParams {
     double dressup_radius{1.0};    // fillet radius
     double dressup_chamfer_dist{1.0}; // chamfer distance (symmetric)
 
-    // Mesh quality
-    double linear_deflection{0.01};
+    // Mesh quality — the Design tab's own density (CadDocument::linear_deflection), so a
+    // primitive and the same body modelled in the Design tab reach the screen alike.
+    double linear_deflection{0.003};
     double angular_deflection{0.5};
 
     template<class Archive>
@@ -121,7 +122,7 @@ public:
                                        int edge_id);
 
     static TriangleMesh tessellate(const TopoDS_Shape& shape,
-                                   double linear_deflection = 0.01,
+                                   double linear_deflection = 0.003,
                                    double angular_deflection = 0.5);
     static std::string  primitive_name(PrimitiveType type);
 

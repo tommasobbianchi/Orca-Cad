@@ -605,7 +605,21 @@ TEST_CASE("entity constraints: point-on-line positions a centre onto an axis", "
         cons.push_back({T::Fix,         0, -1, R::P1, R::P1, 0.0});
         cons.push_back({T::PointOnLine, 1,  0, R::P0, R::P0, 2.0});        // hold at distance 2
         REQUIRE(solve_sketch_entities(ents, cons));
-        REQUIRE(std::abs(std::abs(ents[1].p0.y()) - 2.0) < 1e-6);         // 2 mm off the axis
+        REQUIRE(std::abs(ents[1].p0.y() - 2.0) < 1e-6);                    // 2 mm off, same side
+    }
+
+    SECTION("a point below the line stays below it") {
+        std::vector<SketchEntity> ents = {
+            {SketchEntity::Type::Line,  Vec2d(0,0), Vec2d(10,0)},
+            {SketchEntity::Type::Point, Vec2d(4,-9)},                      // point BELOW the axis
+        };
+        std::vector<SketchEntityConstraintDef> cons;
+        cons.push_back({T::Fix,         0, -1, R::P0, R::P0, 0.0});
+        cons.push_back({T::Fix,         0, -1, R::P1, R::P1, 0.0});
+        cons.push_back({T::PointOnLine, 1,  0, R::P0, R::P0, 2.0});
+        REQUIRE(solve_sketch_entities(ents, cons));
+        // |value| used to be forced onto the positive side, flipping the point across the line.
+        REQUIRE(std::abs(ents[1].p0.y() + 2.0) < 1e-6);
     }
 }
 
@@ -674,7 +688,38 @@ TEST_CASE("entity constraints: tangent/midpoint/symmetric/angle", "[CadDocument]
 
         REQUIRE(doc.solve_sketch_feature(sk));
         const auto& e = doc.features[sk].entities;
-        REQUIRE(std::abs(std::abs(e[1].p0.y()) - 5.0) < 1e-3);
+        // The line started ABOVE the circle (y=8) and must stay on that side: tangency keeps
+        // the side the geometry is on, it does not pick one.
+        REQUIRE(std::abs(e[1].p0.y() - 5.0) < 1e-3);
+    }
+
+    SECTION("tangent line to circle, line below it") {
+        CadDocument doc;
+        std::vector<SketchEntity> ents = {
+            {SketchEntity::Type::Circle, Vec2d(0,0), Vec2d(0,0), Vec2d(0,0), 5.0},
+            {SketchEntity::Type::Line,   Vec2d(-10,-8), Vec2d(10,-8)},
+        };
+        int sk = doc.add_sketch_entities(ents, SketchPlane::XY(), "S");
+        auto& ec = doc.features[sk].entity_constraints;
+        ec.push_back({T::Fix,        0,-1, R::Center,R::Center,  0.0,-1,R::P0});
+        ec.push_back({T::LockX,      1,-1, R::P0,    R::P0,   -10.0,-1,R::P0});
+        ec.push_back({T::LockX,      1,-1, R::P1,    R::P0,    10.0,-1,R::P0});
+        ec.push_back({T::Horizontal, 1, 1, R::P0,    R::P1,     0.0,-1,R::P0});
+        ec.push_back({T::Tangent,    0, 1, R::Center,R::P0,     0.0,-1,R::P0});
+        REQUIRE(doc.solve_sketch_feature(sk));
+        REQUIRE(std::abs(doc.features[sk].entities[1].p0.y() + 5.0) < 1e-3);
+    }
+
+    SECTION("tangent circle to circle does not abort and keeps them touching") {
+        std::vector<SketchEntity> ents = {
+            {SketchEntity::Type::Circle, Vec2d(0,0),  Vec2d(0,0),  Vec2d(0,0),  5.0},
+            {SketchEntity::Type::Circle, Vec2d(9,0),  Vec2d(9,0),  Vec2d(9,0),  3.0},
+        };
+        std::vector<SketchEntityConstraintDef> cons;
+        cons.push_back({T::Fix,     0,-1, R::Center,R::Center, 0.0,-1,R::P0});
+        cons.push_back({T::Tangent, 0, 1, R::Center,R::Center, 0.0,-1,R::P0});
+        REQUIRE(solve_sketch_entities(ents, cons));
+        CHECK(std::abs((ents[1].center - ents[0].center).norm() - 8.0) < 1e-6);   // r1 + r2
     }
 
     SECTION("symmetric across a line") {
@@ -2136,7 +2181,7 @@ TEST_CASE("a v4 project still opens", "[CadDocument][recipe]")
     ifs.close();
     REQUIRE_FALSE(blob.empty());
 
-    // Trusted reference read of the flat v4 layout (what the golden test's Layer 1 does).
+    // Reference read of the flat v4 layout with the frozen v4 field list.
     std::vector<CadFeature> flat;
     {
         std::istringstream iss(blob);
@@ -2144,19 +2189,40 @@ TEST_CASE("a v4 project still opens", "[CadDocument][recipe]")
         uint32_t v;
         ar(v);
         REQUIRE(v == 4);
-        ar(flat);
+        cereal::size_type n = 0;
+        ar(cereal::make_size_tag(n));
+        flat.assign(size_t(n), CadFeature{});
+        for (CadFeature& f : flat) f.load_flat_v4(ar);
+        // The whole stream must be consumed by features + variables: a layout mismatch leaves
+        // bytes behind (or runs out), which is exactly what reading v4 with the CURRENT field
+        // list would do the moment a field is appended to it.
+        std::map<std::string, std::string> vars;
+        ar(vars);
+        CHECK(iss.peek() == std::char_traits<char>::eof());
     }
     REQUIRE_FALSE(flat.empty());
 
     CadDocument doc;
-    doc.deserialize_recipe(blob);
-    // Not refused at the gate: the only failure allowed is the fixture's own geometry
-    // (the golden doc is a serialization-coverage tree whose fillet radius is too large),
-    // which is orthogonal to the v5 framing change and unchanged by it.
-    REQUIRE(doc.error.find("older version") == std::string::npos);
-    REQUIRE(doc.error.find("newer version") == std::string::npos);
-    // The v4 flat path read the same feature tree as the trusted reference.
+    const bool ok = doc.deserialize_recipe(blob);
+    // It must OPEN: either cleanly, or failing only on the fixture's own geometry (the golden
+    // doc is a serialization-coverage tree whose fillet radius is too large). "CAD data could not
+    // be read" — a misread stream — passed the old version of this test, which only ruled out
+    // the version-gate messages.
+    if (!ok) {
+        INFO("v4 load error: " << doc.error);
+        CHECK(doc.error.find("could not be read") == std::string::npos);
+        CHECK(doc.error.find("older version") == std::string::npos);
+        CHECK(doc.error.find("newer version") == std::string::npos);
+    }
+    // The v4 path read the same feature tree as the reference, field for field.
     REQUIRE(doc.features.size() == flat.size());
+    for (size_t i = 0; i < flat.size(); ++i) {
+        CHECK(doc.features[i].name == flat[i].name);
+        CHECK(doc.features[i].type == flat[i].type);
+        CHECK(doc.features[i].distance == flat[i].distance);
+        CHECK(doc.features[i].mate_kind == flat[i].mate_kind);
+        CHECK(doc.features[i].coordsys_face_edges == flat[i].coordsys_face_edges);
+    }
 }
 
 // Do NOT regenerate cad_recipe_v5.bin either. It was written by the build that predates the
@@ -2280,10 +2346,13 @@ TEST_CASE("a truncated feature keeps what it could read", "[CadDocument][recipe]
         off += 4 + f_len.back();
     }
 
-    // Shorten feature 1 by dropping its final field (4 bytes): rewrite its length prefix
-    // and erase the tail bytes. The reader then runs out inside fa(f), throws, and keeps
-    // everything it had already assigned — that is the whole point of the try/catch.
-    const size_t drop = sizeof(uint32_t);
+    // Shorten feature 1 so it ends right after coordsys_face_kind: drop coordsys_face_edges
+    // (4 bytes) and the two flags appended after it (thread_major_nominal, pattern_inclusive:
+    // 1 byte each). Rewrite its length prefix and erase the tail bytes. The reader then runs
+    // out inside fa(f), throws, and keeps everything it had already assigned — that is the
+    // whole point of the try/catch. (Cut on a field boundary: a field cut in half is read as
+    // whatever half arrived.)
+    const size_t drop = sizeof(uint32_t) + 2 * sizeof(bool);
     REQUIRE(f_len[1] > drop);
     std::string shortened = blob;
     shortened.erase(f_off[1] + 4 + f_len[1] - drop, drop);
@@ -2299,6 +2368,8 @@ TEST_CASE("a truncated feature keeps what it could read", "[CadDocument][recipe]
     REQUIRE(loaded.features[1].name == doc.features[1].name);
     REQUIRE(loaded.features[1].coordsys_face_kind  == 777);   // right before the cut
     REQUIRE(loaded.features[1].coordsys_face_edges == -1);    // defaulted by the cut
+    REQUIRE_FALSE(loaded.features[1].thread_major_nominal);   // ...and so were the later flags
+    REQUIRE_FALSE(loaded.features[1].pattern_inclusive);
     REQUIRE(loaded.features[0].name == doc.features[0].name);
     REQUIRE(loaded.features[2].name == doc.features[2].name);
 }
@@ -4166,8 +4237,12 @@ TEST_CASE("golden recipe v1 still deserialises", "[CadDocument]")
         cereal::BinaryInputArchive ar(iss);
         uint32_t v;
         ar(v);
-        REQUIRE(v <= CadDocument::ORCA_CAD_RECIPE_VERSION);
-        ar(features);
+        REQUIRE(v == 4);
+        // The fixture is a v4 (flat) blob: read it with the frozen v4 field list.
+        cereal::size_type n = 0;
+        ar(cereal::make_size_tag(n));
+        features.assign(size_t(n), CadFeature{});
+        for (CadFeature& f : features) f.load_flat_v4(ar);
     }
 
     CadDocument expected = make_golden_doc_v1();
@@ -4641,41 +4716,26 @@ TEST_CASE("bridge closes a C profile and extrudes", "[CadDocument][bridge]")
         // top edge: (10,10) to (-10,10)
         {SketchEntity::Type::Line, Vec2d(10,10), Vec2d(-10,10)},
     };
-    // Missing: left edge from (-10,10) to (-10,-10). Build it as a separate line
-    // entity so the bridge connects two existing lines.
+    // The C is open on the left: entity 2 (top) ends at (-10,10), entity 0 (bottom) starts at
+    // (-10,-10). The bridge IS the closing edge.
     int sk = doc.add_sketch_entities(ents, SketchPlane::XY(), "C");
     REQUIRE(sk == 0);
-
-    // Add the closing line as entity 3: (-10,10) to (-10,-10)
     CadFeature& f = doc.features[sk];
-    SketchEntity closing;
-    closing.type = SketchEntity::Type::Line;
-    closing.p0 = Vec2d(-10, 10);
-    closing.p1 = Vec2d(-10, -10);
-    // The C is entities 0,1,2 (bottom cap, right side, top cap).
-    // Entity 0 end=1 is (10,-10); entity 2 start=0 is (10,10). That's a U.
-    // But we need a closed square from C shape.
-    // Re-think: a C shape open on the left side.
-    // Entities: 0 = bottom edge (-10,-10)->(10,-10) [end=1 at (10,-10)]
-    //           1 = right edge (10,-10)->(10,10) [start=0 at (10,-10), end=1 at (10,10)]
-    //           2 = top edge (10,10)->(-10,10) [start=0 at (10,10), end=1 at (-10,10)]
-    // The C is open: entity 2's end is at (-10,10) and entity 0's start is at (-10,-10).
-    // Bridge: entity 2 end=1 (-10,10) -> entity 0 start=0 (-10,-10).
-    f.entities.push_back(closing);
+
+    int bi = doc.add_bridge(sk, 2/*top edge*/, 1/*end*/, 0/*bottom edge*/, 0/*start*/, "Bridge");
+    REQUIRE(bi == 3);
     REQUIRE(f.entities.size() == 4);
 
-    // Now bridge from top end (entity 2 end=1 = (-10,10)) to bottom start (entity 0 end=0 = (-10,-10))
-    int bi = doc.add_bridge(sk, 2/*top edge*/, 1/*end*/, 0/*bottom edge*/, 0/*start*/, "Bridge");
-    REQUIRE(bi == 4);
-    REQUIRE(f.entities.size() == 5);
-
-    // Now the entities should form a closed loop -> extrude
     int ex = doc.add_extrude(sk, 5.0, false, BooleanMode::New, "Extrude");
     REQUIRE(ex >= 0);
     REQUIRE(doc.recompute());
     REQUIRE(doc.error.empty());
     REQUIRE(doc.display_mesh.facets_count() > 0);
-    REQUIRE_THAT(double(doc.display_mesh.volume()), WithinRel(20.0 * 20.0 * 5.0, 1e-2));
+    // G1 with both edges means the bridge LEAVES the top edge heading -X and ARRIVES on the
+    // bottom edge heading +X: it bulges out to the left, a cubic whose inner poles sit 20/3 mm
+    // out, enclosing 3/5 x 20/3 x 20 = 80 mm2 beyond the square. (This test used to expect the
+    // bare square: the old end pole sent the curve back across x = -10 in an S, a cusp.)
+    REQUIRE_THAT(double(doc.display_mesh.volume()), WithinRel((20.0 * 20.0 + 80.0) * 5.0, 1e-2));
 }
 
 TEST_CASE("bridge bad indices throw", "[CadDocument][bridge]")
@@ -7383,11 +7443,16 @@ TEST_CASE("Failed sketch solve leaves geometry untouched", "[CadDocument]")
     auto tang = [&](int ln) {
         SketchEntityConstraintDef d; d.type = CT::Tangent; d.ea = xi; d.eb = ln; return d; };
 
-    // Rung 1 of the ladder: a tangent on each leg. Over-constrained against the legs'
-    // own H/V, so it must be rejected -- and must not move a single point.
+    // A genuinely conflicting batch (the right leg held at two different lengths) must be
+    // rejected -- and must not move a single point.
     {
         std::vector<SketchEntityConstraintDef> pc = cs;
-        for (const auto& c : { coin(R::P0, a, R::P0), coin(R::P1, b, R::P1), tang(a), tang(b) })
+        SketchEntityConstraintDef d10, d20;   // one leg held at two different lengths
+        d10.type = d20.type = CT::Distance;
+        d10.ea = d20.ea = d10.eb = d20.eb = 1;
+        d10.ra = d20.ra = R::P0; d10.rb = d20.rb = R::P1;
+        d10.value = 100.0; d20.value = 120.0;
+        for (const auto& c : { coin(R::P0, a, R::P0), coin(R::P1, b, R::P1), d10, d20 })
             pc.push_back(c);
         std::vector<SketchEntity> e = ents;
         REQUIRE_FALSE(solve_sketch_entities(e, pc));
@@ -7396,6 +7461,22 @@ TEST_CASE("Failed sketch solve leaves geometry untouched", "[CadDocument]")
             CHECK((e[i].p1 - trimmed[i].p1).norm() == Approx(0.0).margin(1e-9));
             CHECK((e[i].center - trimmed[i].center).norm() == Approx(0.0).margin(1e-9));
         }
+    }
+
+    // Rung 1 of the ladder — a tangent on EACH leg — is a well-posed fillet, not a conflict. It
+    // used to be rejected because both tangencies were bound to the arc's START point, which
+    // forced the two legs parallel; each is now bound to the end that touches its leg.
+    {
+        std::vector<SketchEntityConstraintDef> pc = cs;
+        for (const auto& c : { coin(R::P0, a, R::P0), coin(R::P1, b, R::P1), tang(a), tang(b) })
+            pc.push_back(c);
+        std::vector<SketchEntity> e = ents;
+        REQUIRE(solve_sketch_entities(e, pc));
+        CHECK(e[xi].radius == Approx(28.205).margin(1e-6));
+        // Tangent at both ends: the radius to each end is perpendicular to that end's leg.
+        const Vec2d da = (e[a].p1 - e[a].p0).normalized(), db = (e[b].p1 - e[b].p0).normalized();
+        CHECK(std::abs((e[xi].p0 - e[xi].center).normalized().dot(da)) < 1e-6);
+        CHECK(std::abs((e[xi].p1 - e[xi].center).normalized().dot(db)) < 1e-6);
     }
 
     // Rung 2 (one tangent) solves, and the arc keeps the radius the fillet gave it.
@@ -8411,4 +8492,203 @@ TEST_CASE("deleting a feature remaps the references of every consumer, not just 
         REQUIRE(doc.remove_feature(0));
         REQUIRE(doc.features.empty());
     }
+}
+
+// A sketch past libslvs' MAX_UNKNOWNS is solved component by component. Constraints onto the
+// sketch origin / axes reference NEGATIVE sentinels; the partitioned path used to turn them into
+// "no entity" and drop the constraint while still reporting success.
+TEST_CASE("Partitioned solve keeps constraints onto the origin and the axes", "[CadDocument][sketch]")
+{
+    using R = SketchPointRole;
+    using T = SketchConstraintType;
+    std::vector<SketchEntity> ents;
+    std::vector<SketchEntityConstraintDef> cons;
+    const int n = 600;   // 600 lines x 4 params: well past the 1024-unknown ceiling
+    for (int i = 0; i < n; ++i) {
+        SketchEntity e; e.type = SketchEntity::Type::Line;
+        e.p0 = Vec2d(1.0 + 0.01 * i, 2.0); e.p1 = Vec2d(5.0 + 0.01 * i, 7.0 + i);
+        ents.push_back(e);
+        // P0 onto the origin: the sentinel is in eb, the entity in ea...
+        cons.push_back({T::Coincident, i, kSketchRefOrigin, R::P0, R::P0, 0.0});
+    }
+    // ...and line 1's far end onto the X axis.
+    SketchEntityConstraintDef on_x; on_x.type = T::PointOnObject;
+    on_x.ea = 1; on_x.ra = R::P1; on_x.eb = kSketchRefAxisX;
+    cons.push_back(on_x);
+    REQUIRE(solve_sketch_entities(ents, cons));
+    for (int i = 0; i < n; ++i)
+        REQUIRE(ents[i].p0.norm() < 1e-6);
+    CHECK(std::abs(ents[1].p1.y()) < 1e-6);
+}
+
+// ---- references that must follow their target across a change of history ----------------
+
+static CadDocument two_boxes_and_a_lift(int& ea, int& eb, int& lift)
+{
+    CadDocument doc;
+    SketchPlane pa = SketchPlane::XY();
+    SketchPlane pb = SketchPlane::XY(); pb.origin = Vec3d(100, 0, 0);
+    const int sa = doc.add_sketch(SketchShape::Rectangle, pa, 10, 10, 0, "A");
+    ea = doc.add_extrude(sa, 5, false, BooleanMode::New, "EA");              // body 0
+    const int sb = doc.add_sketch(SketchShape::Rectangle, pb, 10, 10, 0, "B");
+    eb = doc.add_extrude(sb, 5, false, BooleanMode::New, "EB");              // body 1
+    lift = doc.add_transform(1, Vec3d(0, 0, 50), Vec3d(0, 0, 1), Vec3d(0, 0, 0), 0, false, "Lift B");
+    REQUIRE(doc.recompute());
+    return doc;
+}
+
+TEST_CASE("Deleting the feature that made an EARLIER body keeps later features on their body",
+          "[CadDocument][history]")
+{
+    int ea, eb, lift;
+    CadDocument doc = two_boxes_and_a_lift(ea, eb, lift);
+    REQUIRE(doc.bodies.size() == 2);
+    // Body A goes away, so B becomes body 0. "Lift B" said body 1: by index it would now name
+    // nothing (and used to fall back to the last body in silence); by identity it is still B.
+    REQUIRE(doc.remove_feature(ea));
+    REQUIRE(doc.bodies.size() == 1);
+    CHECK(doc.features[lift - 1].target_body == 0);
+    const auto bb = doc.display_mesh.bounding_box();
+    CHECK(bb.min.z() > 49.0);          // B was lifted
+    CHECK(bb.min.x() > 90.0);          // and it is B, not A
+}
+
+TEST_CASE("Deleting the feature that made a body a later feature works on is refused",
+          "[CadDocument][history]")
+{
+    int ea, eb, lift;
+    CadDocument doc = two_boxes_and_a_lift(ea, eb, lift);
+    const size_t n = doc.features.size();
+    CHECK_FALSE(doc.remove_feature(eb));   // "Lift B" would have nothing to lift
+    CHECK(doc.features.size() == n);        // rolled back
+    CHECK(doc.bodies.size() == 2);
+    CHECK_FALSE(doc.error.empty());
+}
+
+TEST_CASE("Hiding a body-making feature keeps later features on their body", "[CadDocument][history]")
+{
+    int ea, eb, lift;
+    CadDocument doc = two_boxes_and_a_lift(ea, eb, lift);
+    REQUIRE(doc.set_feature_enabled(ea, false));
+    REQUIRE(doc.bodies.size() == 1);
+    CHECK(doc.display_mesh.bounding_box().min.z() > 49.0);
+    // ...and showing it again puts the reference back where it was.
+    REQUIRE(doc.set_feature_enabled(ea, true));
+    REQUIRE(doc.bodies.size() == 2);
+    CHECK(doc.features[lift].target_body == 1);
+}
+
+TEST_CASE("Datum-plane references follow their plane when an earlier plane is deleted",
+          "[CadDocument][history]")
+{
+    CadDocument doc;
+    const int p1 = doc.add_plane(0, 10, 0, 0, "P1");    // datum 0 (3 + 0)
+    doc.add_plane(0, 20, 0, 0, "P2");                   // datum 1 (3 + 1)
+    const int p3 = doc.add_plane(3 + 1, 5, 0, 0, "P3"); // built on P2: z = 25
+    auto planes = doc.resolve_datum_planes();
+    REQUIRE(planes.size() == 3);
+    REQUIRE(std::abs(planes[2].second.origin.z() - 25.0) < 1e-9);
+    REQUIRE(doc.remove_feature(p1));
+    CHECK(doc.features[p3 - 1].plane_base == 3 + 0);    // P2 is datum 0 now
+    planes = doc.resolve_datum_planes();
+    REQUIRE(planes.size() == 2);
+    CHECK(std::abs(planes[1].second.origin.z() - 25.0) < 1e-9);   // still on P2, not on XY
+}
+
+TEST_CASE("clear() starts a document without the previous one's variables", "[CadDocument]")
+{
+    CadDocument doc;
+    doc.variables["w"] = "12";
+    doc.clear();
+    CHECK(doc.variables.empty());
+}
+
+TEST_CASE("Expressions: trig takes degrees, deg()/rad() convert, pi is the number", "[CadDocument][expr]")
+{
+    CadDocument doc;
+    const int sk = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(), 10, 10, 0, "S");
+    const int ex = doc.add_extrude(sk, 5, false, BooleanMode::New, "E");
+    doc.features[ex].expr["distance"] = "10 * sin(deg(pi / 2)) + 10 * cos(rad(0) + 90) + 2 * cos(60)";
+    REQUIRE(doc.recompute());
+    CHECK(std::abs(doc.features[ex].distance - 11.0) < 1e-9);   // 10 + 0 + 1
+}
+
+TEST_CASE("Every field the Design tab offers for an expression can be bound", "[CadDocument][expr]")
+{
+    // The per-tool pickers in DesignPanel::fields_for_tool. A name the kernel does not know made
+    // the next recompute throw "unknown parameter" and the whole model stopped rebuilding.
+    for (const char* f : { "width", "height", "radius", "distance", "distance2", "taper_deg",
+                           "dressup_size", "hole_diameter", "hole_depth", "hole_x", "hole_y",
+                           "thread_diameter", "thread_pitch", "thread_height", "thread_depth",
+                           "thread_x", "thread_y", "shell_thickness", "revolve_angle",
+                           "pattern_count", "pattern_spacing", "pattern_angle", "plane_offset",
+                           "plane_angle_tilt", "draft_angle", "thicken_thickness", "rib_thickness",
+                           "rib_depth", "helix_radius", "helix_pitch", "helix_height",
+                           "helix_taper_deg" }) {
+        INFO(f);
+        CHECK(CadDocument::is_bindable_field(f));
+    }
+    CHECK_FALSE(CadDocument::is_bindable_field("no_such_field"));
+}
+
+TEST_CASE("A circular pattern spans its whole angle", "[CadDocument][pattern]")
+{
+    // A 2 mm cube 10 mm out on +X, three copies over 90°: at 0°, 45° and 90°. The old spacing
+    // (angle / count) stopped at 60°, so the last copy never reached the +Y axis.
+    CadDocument doc;
+    SketchPlane p = SketchPlane::XY(); p.origin = Vec3d(10, 0, 0);
+    const int sk = doc.add_sketch(SketchShape::Rectangle, p, 2, 2, 0, "S");
+    doc.add_extrude(sk, 2, false, BooleanMode::New, "E");
+    doc.add_pattern(true, 3, 0, 0, 90.0, -1, "P");
+    REQUIRE(doc.recompute());
+    CHECK(doc.display_mesh.bounding_box().max.y() > 10.5);
+}
+
+TEST_CASE("Hole standards: inch sizes by either name, with their 82° countersink", "[CadDocument][hole]")
+{
+    CadDocument doc;
+    const int a = doc.add_hole_standard("1/4-20", 2, true, 10, 0, 0, SketchPlane::XY(), "H1");
+    const int b = doc.add_hole_standard("#10-24 UNC", 2, true, 10, 0, 0, SketchPlane::XY(), "H2");
+    CHECK(doc.features[a].hole_standard == "1/4-20 UNC");
+    CHECK(doc.features[a].hole_csink_angle == 82.0);
+    CHECK(doc.features[b].hole_standard == "#10-24 UNC");
+    const int m = doc.add_hole_standard("M6", 1, true, 10, 0, 0, SketchPlane::XY(), "H3");
+    CHECK(doc.features[m].hole_csink_angle == 90.0);
+    CHECK(doc.features[m].hole_cbore_diameter == 11.0);
+}
+
+TEST_CASE("Body colours and names survive a save and a load", "[CadDocument][recipe]")
+{
+    CadDocument doc;
+    const int sk = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(), 10, 10, 0, "S");
+    doc.add_extrude(sk, 5, false, BooleanMode::New, "E");
+    doc.modeling_origin = Vec3d(110, 120, 0);
+    REQUIRE(doc.recompute());
+    doc.bodies[0].has_color = true;
+    doc.bodies[0].color = ColorRGBA(0.1f, 0.2f, 0.3f, 1.0f);
+    const std::string blob = doc.serialize_recipe();
+    CadDocument back;
+    back.modeling_origin = Vec3d(1, 2, 3);        // a different printer's bed centre
+    REQUIRE(back.deserialize_recipe(blob));
+    REQUIRE(back.bodies.size() == 1);
+    CHECK(back.bodies[0].has_color);
+    CHECK(std::abs(back.bodies[0].color.g() - 0.2f) < 1e-6);
+    CHECK((back.modeling_origin - Vec3d(110, 120, 0)).norm() < 1e-9);   // the project's own
+    CHECK(back.origin_from_recipe);
+}
+
+TEST_CASE("A new thread reads its radius as the nominal (major) radius", "[CadDocument][thread]")
+{
+    CadDocument doc;
+    const int sk = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(), 30, 30, 0, "S");
+    doc.add_extrude(sk, 12, false, BooleanMode::New, "E");
+    // M6 internal: major radius 3, depth (major - minor) / 2.
+    const double P = 1.0, depth = 0.5 * 1.0825 * P;
+    const int t = doc.add_thread(3.0, P, 10.0, depth, true, 0, 0, SketchPlane::XY(), "T");
+    CHECK(doc.features[t].thread_major_nominal);
+    REQUIRE(doc.recompute());
+    // A degenerate new thread says why instead of doing nothing.
+    doc.features[t].thread_depth = 0.9 * P;
+    CHECK_FALSE(doc.recompute());
+    CHECK(doc.error.find("thread") != std::string::npos);
 }

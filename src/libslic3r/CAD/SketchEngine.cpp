@@ -62,14 +62,6 @@ void   set_sketch_auto_close(bool on) { s_auto_close = on; }
 
 // ---- SketchPlane ----
 
-gp_Pln SketchPlane::to_occt() const
-{
-    gp_Pnt o(origin.x(), origin.y(), origin.z());
-    gp_Dir n(normal.x(), normal.y(), normal.z());
-    gp_Dir x(x_axis.x(), x_axis.y(), x_axis.z());
-    return gp_Pln(gp_Ax3(o, n, x));
-}
-
 SketchPlane SketchPlane::from_face(const TopoDS_Face& face)
 {
     SketchPlane sp;
@@ -123,26 +115,6 @@ Vec3d SketchPlane::to_world(const Vec2d& pt) const
 }
 
 // ---- SketchProfile ----
-
-bool SketchProfile::is_closed(double tolerance) const
-{
-    if (points.size() < 3) return false;
-    return (points.front() - points.back()).norm() < tolerance;
-}
-
-bool SketchProfile::try_close(double tolerance)
-{
-    if (is_closed(tolerance)) {
-        closed = true;
-        return true;
-    }
-    if (points.size() < 2) return false;
-    if ((points.front() - points.back()).norm() < tolerance) {
-        closed = true;
-        return true;
-    }
-    return false;
-}
 
 TopoDS_Wire SketchProfile::to_occt_wire(const SketchPlane& plane) const
 {
@@ -276,7 +248,9 @@ TopoDS_Shape SketchEngine::make_extrude_regions(
     // degenerate OCCT edge and make the wire builder throw — sanitising keeps a
     // single bad glyph from killing the whole extrude.
     auto clean = [](const std::vector<Vec2d>& pts) {
-        const double eps2 = 1e-12;   // ~1e-6 mm
+        // The sketch's own joint tolerance: points closer than this are one point everywhere
+        // else in the sketcher, so they must not become a sub-micron edge here either.
+        const double eps2 = kSketchJoinTol * kSketchJoinTol;
         std::vector<Vec2d> out;
         out.reserve(pts.size());
         for (const Vec2d& p : pts)
@@ -304,6 +278,10 @@ TopoDS_Shape SketchEngine::make_extrude_regions(
     };
 
     gp_Dir dir(plane.normal.x(), plane.normal.y(), plane.normal.z());
+    // Faces are built ON the sketch plane, as wires_to_face does: a surface inferred from the
+    // outer wire need not share the sketch normal, and then the extrude direction and the hole
+    // classification disagree with it.
+    const gp_Pln pln(gp_Pnt(plane.origin.x(), plane.origin.y(), plane.origin.z()), dir);
 
     // Accumulate each region's solid into a compound rather than boolean-fusing:
     // glyphs are independent profiles, so a compound avoids every boolean-failure
@@ -324,7 +302,10 @@ TopoDS_Shape SketchEngine::make_extrude_regions(
             // classify outer vs holes by area/containment and set correct wire
             // orientations. This is winding-independent, so holed glyphs extrude
             // with a solid body and empty counters regardless of source winding.
-            BRepBuilderAPI_MakeFace fm(outer);
+            // Probe on the inferred surface first: naming a plane makes MakeFace accept a wire
+            // that bounds nothing, and this check is what skips such a contour.
+            if (!BRepBuilderAPI_MakeFace(outer).IsDone()) continue;
+            BRepBuilderAPI_MakeFace fm(pln, outer);
             if (!fm.IsDone()) continue;
             for (size_t h = 1; h < region.size(); ++h) {
                 TopoDS_Wire hole = contour_wire(region[h]);
@@ -567,7 +548,12 @@ std::vector<TopoDS_Wire> SketchEngine::entities_to_wires(const std::vector<Sketc
     auto make_elips = [&](const SketchEntity& c) -> gp_Elips {
         Vec3d  c3 = plane.to_world(c.center);
         gp_Pnt center(c3.x(), c3.y(), c3.z());
-        gp_Dir n(plane.normal.x(), plane.normal.y(), plane.normal.z());
+        // The frame's normal is x_axis x y_axis, not plane.normal: OCCT takes the ellipse's Y
+        // as N x X, and the parametric angles were measured in the sketch's own (x, y). The two
+        // agree on XY and YZ; the XZ base plane stores normal = +Y while x x y = -Y, so there
+        // every elliptical arc came out mirrored against what the sketch showed.
+        const Vec3d nz = plane.x_axis.cross(plane.y_axis);
+        gp_Dir n(nz.x(), nz.y(), nz.z());
         Vec2d  maj2(std::cos(c.rotation), std::sin(c.rotation));
         Vec3d  x3 = plane.to_world(c.center + maj2) - c3;
         gp_Dir xdir(x3.x(), x3.y(), x3.z());
@@ -691,6 +677,9 @@ std::vector<TopoDS_Wire> SketchEngine::entities_to_wires(const std::vector<Sketc
                 if (c.radius <= 1e-9 || c.rminor <= 1e-9) return {};
                 e = BRepBuilderAPI_MakeEdge(make_elips(c)).Edge();
             } else {
+                // Same guard as the ellipse above: a zero radius would reach OCCT and throw from
+                // .Edge() instead of reporting a sketch that cannot be built.
+                if (c.radius <= 1e-9) return {};
                 Vec3d  c3 = plane.to_world(c.center);
                 gp_Pnt center(c3.x(), c3.y(), c3.z());
                 gp_Dir n(plane.normal.x(), plane.normal.y(), plane.normal.z());
@@ -1036,8 +1025,11 @@ std::vector<SketchEntity> SketchEngine::mirror_entities(
             } else {
                 m.p0 = reflect(e.p0);
                 m.p1 = reflect(e.p1);
-                // Reflection reverses orientation: recompute parametric angles in
-                // the reflected frame, original end -> new start (CCW sense kept).
+                // Reflection reverses orientation. Like the Arc branch above, this pass keeps
+                // each angle with ITS point (start with p0) and lets the sweep run clockwise;
+                // the reversal pass below then swaps points and angles together, giving a CCW
+                // arc whose start is p0. Pairing them crosswise here, as this used to, was
+                // undone by that same swap and produced the complementary arc.
                 auto param = [&](const Vec2d& P) {
                     const Vec2d d  = P - m.center;
                     const double cu = std::cos(m.rotation), su = std::sin(m.rotation);
@@ -1045,8 +1037,9 @@ std::vector<SketchEntity> SketchEngine::mirror_entities(
                     const double v = -d.x() * su + d.y() * cu;
                     return std::atan2(v / std::max(e.rminor, 1e-9), u / std::max(e.radius, 1e-9));
                 };
-                m.start_angle = param(m.p1);
-                m.end_angle   = param(m.p0);
+                m.start_angle = param(m.p0);
+                m.end_angle   = param(m.p1);
+                while (m.end_angle >= m.start_angle) m.end_angle -= 2.0 * M_PI;
             }
             break;
         }
@@ -1106,9 +1099,14 @@ std::vector<SketchEntity> SketchEngine::mirror_entities(
 // get their last-to-first seam repaired too, which is what makes the result closed again.
 namespace {
 
-constexpr double kOffJoinEps = 1e-6;
-
-bool off_same(const Vec2d& a, const Vec2d& b) { return (a - b).squaredNorm() < kOffJoinEps * kOffJoinEps; }
+// Two ends are the same point when the WIRE BUILDER would weld them: a loop the viewport and
+// the kernel treat as closed must offset as one closed chain, not as separate open pieces with
+// unrepaired seams. The floor keeps exact coincidence meaningful with auto-close switched off.
+bool off_same(const Vec2d& a, const Vec2d& b)
+{
+    const double tol = std::max(sketch_join_tol(), 1e-6);
+    return (a - b).squaredNorm() <= tol * tol;
+}
 
 // Does this entity type take part in chaining (i.e. does it have two ends)?
 bool off_is_open_curve(const SketchEntity& e)
@@ -1214,7 +1212,10 @@ bool off_one(const SketchEntity& e, double d, SketchEntity& out)
         return true;
     }
     case SketchEntity::Type::Circle: {
-        const double r = e.radius + d;
+        // A circle runs CCW (it is what a 360° CCW arc chain closes into), so the rule below
+        // applies to it too: +d is the left side, the inside, and the radius SHRINKS. It used to
+        // grow, so a full circle and the same outline drawn as arcs offset opposite ways.
+        const double r = e.radius - d;
         if (r <= 1e-9) return false;
         out = e; out.radius = r; out.p0 = out.center;
         return true;
@@ -1453,6 +1454,9 @@ std::vector<SketchEntity> SketchEngine::transform_entities(
     out.reserve(src.size());
     const double ca = std::cos(angle), sa = std::sin(angle);
     const double rs = std::abs(scale);   // radii are unsigned magnitudes
+    // A negative scale is |scale| plus a half turn about the pivot: points get that from xf()
+    // below, and angle-valued fields (arc ends, ellipse axis) need the same extra pi.
+    const double turn = angle + (scale < 0.0 ? M_PI : 0.0);
     // Affine map: translate pivot to origin, scale, rotate, then translate by `move`.
     auto xf = [&](const Vec2d& p) -> Vec2d {
         const Vec2d d = scale * (p - pivot);
@@ -1475,8 +1479,8 @@ std::vector<SketchEntity> SketchEngine::transform_entities(
         case SketchEntity::Type::Arc: {
             m.center      = xf(e.center);
             m.radius      = e.radius * rs;
-            m.start_angle = e.start_angle + angle;
-            m.end_angle   = e.end_angle   + angle;   // rigid sweep, shifted by rotation
+            m.start_angle = e.start_angle + turn;
+            m.end_angle   = e.end_angle   + turn;    // rigid sweep, shifted by rotation
             m.p0 = m.center + m.radius * Vec2d(std::cos(m.start_angle), std::sin(m.start_angle));
             m.p1 = m.center + m.radius * Vec2d(std::cos(m.end_angle),   std::sin(m.end_angle));
             break;
@@ -1486,7 +1490,7 @@ std::vector<SketchEntity> SketchEngine::transform_entities(
             m.center   = xf(e.center);
             m.radius   = e.radius * rs;
             m.rminor   = e.rminor * rs;
-            m.rotation = e.rotation + angle;          // major axis rotates with the body
+            m.rotation = e.rotation + turn;           // major axis rotates with the body
             if (e.type == SketchEntity::Type::Ellipse) {
                 m.p0 = m.center;
             } else {
@@ -1833,6 +1837,15 @@ static double wrap_2pi(double x)
     return x;
 }
 
+// An arc's endpoints are stored twice: as angles and as p0/p1. Everything downstream reads
+// p0/p1 (the wire builder welds on them, the solver seeds from them, snapping uses them), so
+// any edit of the angles must write them back or the arc's ends silently stay where they were.
+static void sync_arc_ends(SketchEntity& e)
+{
+    e.p0 = e.center + e.radius * Vec2d(std::cos(e.start_angle), std::sin(e.start_angle));
+    e.p1 = e.center + e.radius * Vec2d(std::cos(e.end_angle),   std::sin(e.end_angle));
+}
+
 bool SketchEngine::trim_entity(SketchEntity& e, const std::vector<SketchEntity>& others,
                                const Vec2d& pick)
 {
@@ -1867,6 +1880,7 @@ bool SketchEngine::trim_entity(SketchEntity& e, const std::vector<SketchEntity>&
             if (uc == -std::numeric_limits<double>::max()) return false;
             e.end_angle = e.start_angle + uc * sweep;      // drop (uc, 1]
         }
+        sync_arc_ends(e);
         return true;
     }
 
@@ -1898,6 +1912,7 @@ bool SketchEngine::trim_entity(SketchEntity& e, const std::vector<SketchEntity>&
         e.type        = SketchEntity::Type::Arc;
         e.start_angle = hi;
         e.end_angle   = lo + 2.0 * M_PI;
+        sync_arc_ends(e);   // p0 was the circle's centre (circle convention); now the arc's start
         return true;
     }
 
@@ -1970,6 +1985,7 @@ bool SketchEngine::extend_entity(SketchEntity& e, const std::vector<SketchEntity
         if (best == std::numeric_limits<double>::max()) return false;
         if (extend_end) e.end_angle   += sgn * best;
         else            e.start_angle -= sgn * best;
+        sync_arc_ends(e);
         return true;
     }
 
@@ -2010,7 +2026,9 @@ bool SketchEngine::extend_entity(SketchEntity& e, const std::vector<SketchEntity
 }
 
 // Bridge: cubic Bézier with G1 continuity at both ends.
-// Poles = {Pa, Pa + Ta*d/3, Pb - Tb*d/3, Pb}, where d = |Pb - Pa|.
+// Poles = {Pa, Pa + Ta*d/3, Pb + Tb*d/3, Pb}, where d = |Pb - Pa| and Ta/Tb are the OUTWARD
+// tangents at the two ends (the direction you would leave each entity in). The curve leaves
+// Pa along Ta and arrives at Pb along -Tb, i.e. continuing INTO b.
 SketchEntity SketchEngine::make_bridge(const SketchEntity& a, int a_end,
                                        const SketchEntity& b, int b_end)
 {
@@ -2056,7 +2074,9 @@ SketchEntity SketchEngine::make_bridge(const SketchEntity& a, int a_end,
     SketchEntity e;
     e.type         = SketchEntity::Type::BSpline;
     e.construction = false;
-    e.ctrl = { Pa, Pa + Ta * k, Pb - Tb * k, Pb };
+    // Pb + Tb*k, not minus: with Tb outward, minus put the last inner pole on b's side, so the
+    // curve overshot Pb (and against a line arrived with a cusp instead of continuing into it).
+    e.ctrl = { Pa, Pa + Ta * k, Pb + Tb * k, Pb };
     e.p0 = e.ctrl.front();
     e.p1 = e.ctrl.back();
     return e;

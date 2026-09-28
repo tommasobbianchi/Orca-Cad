@@ -52,9 +52,11 @@ struct SketchPlane {
     Vec3d x_axis{1,0,0};
     Vec3d y_axis{0,1,0};
 
-    gp_Pln to_occt() const;
     static SketchPlane from_face(const TopoDS_Face& face);
     static SketchPlane XY() { return {}; }
+    // NOTE: XZ's stored normal (+Y) is the OPPOSITE of x_axis x y_axis (-Y). Kept as it is —
+    // extrude directions and saved recipes depend on it — so anything that needs the frame's
+    // own handedness takes x_axis.cross(y_axis) instead of `normal` (see make_elips).
     static SketchPlane XZ() { return {{0,0,0}, {0,1,0}, {1,0,0}, {0,0,1}}; }
     static SketchPlane YZ() { return {{0,0,0}, {1,0,0}, {0,1,0}, {0,0,1}}; }
 
@@ -69,8 +71,6 @@ struct SketchProfile {
     std::vector<Vec2d> points;
     bool closed{false};
 
-    bool is_closed(double tolerance = 0.5) const;
-    bool try_close(double tolerance = 0.5);
     void clear() { points.clear(); closed = false; }
     TopoDS_Wire to_occt_wire(const SketchPlane& plane) const;
 
@@ -108,8 +108,8 @@ enum class SketchConstraintType {
     // inserting anywhere but the end reinterprets every constraint in every saved recipe.
     EqualRadius,
     Collinear,
-    DistanceX,     // |dx| between two points, projected onto the sketch X axis
-    DistanceY,     // |dy| between two points, projected onto the sketch Y axis
+    DistanceX,     // signed dx between two points (eb - ea), projected onto the sketch X axis
+    DistanceY,     // signed dy between two points (eb - ea), projected onto the sketch Y axis
     SymmetricAboutY, // mirror across the sketch's vertical axis (x = 0); axis is implicit
     SymmetricAboutX  // mirror across the sketch's horizontal axis (y = 0); axis is implicit
 };
@@ -314,7 +314,7 @@ public:
     // offset together and their seams repaired (miter join), so a closed profile comes back
     // closed and can still be extruded; per-entity offsetting cannot do that. Sign convention:
     // +d moves each curve to the LEFT of its direction of travel, which for a CCW closed loop
-    // is inward. Ellipses and splines are not offset (a parallel of either is not the same
+    // is inward; a full circle counts as CCW, so +d shrinks it. Ellipses and splines are not offset (a parallel of either is not the same
     // kind of curve) and are dropped from the result.
     static std::vector<SketchEntity> offset_entities(
         const std::vector<SketchEntity>& src, double d);
