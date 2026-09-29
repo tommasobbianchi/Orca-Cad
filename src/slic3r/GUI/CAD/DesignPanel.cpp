@@ -6283,7 +6283,7 @@ static wxString sketch_step_prompt(DesignSketchTool::Mode m, int step, int picks
                          : _L("Chamfer — drag the arrow, or click the number to type the setback  ·  "
                               "Enter applies  ·  Esc cancels");
     case Mode::Offset:
-        return step == 0 ? _L("Offset — click the entity to offset")
+        return step == 0 ? _L("Offset — click a curve; its whole outline is offset")
                          : _L("Offset — drag the arrow to either side, or click the number to type "
                               "the distance  ·  Enter applies  ·  Esc cancels");
     case Mode::Mirror:

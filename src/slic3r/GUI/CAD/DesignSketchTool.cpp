@@ -7895,6 +7895,15 @@ void DesignSketchTool::reset_op()
     m_op_ghost.clear();
     m_op_dragging_arrow = false;
     m_mirror_targets.clear();
+    m_op_chain.clear();
+}
+
+std::vector<SketchEntity> DesignSketchTool::op_chain_entities() const
+{
+    std::vector<SketchEntity> out;
+    for (int i : m_op_chain)
+        if (i >= 0 && i < int(m_entities.size())) out.push_back(m_entities[i]);
+    return out;
 }
 
 // ---- Imported-art bounding-box transform gizmo (Mode::TransformArt) ----
@@ -8083,7 +8092,27 @@ void DesignSketchTool::recompute_op_ghost()
             m_op_anchor = e.center + Vec2d(e.radius, 0.0);
             m_op_dir = Vec2d(ccw ? -1.0 : 1.0, 0.0);
         }
-        m_op_ghost = SketchEngine::offset_entities({ e }, m_op_value);
+        m_op_ghost = SketchEngine::offset_entities(op_chain_entities(), m_op_value);
+        // In a chain the engine walks the entities in its own traversal order, so the picked
+        // one may be travelled backwards and "+distance = left" lands on the other side of it.
+        // Read the side off the ghost instead: the arrow points from the picked entity to its
+        // offset copy, flipped for a negative distance, so dragging it always follows the ghost.
+        if (m_op_chain.size() > 1 && std::abs(m_op_value) > 1e-12 && !m_op_ghost.empty()) {
+            double best = 1e30; Vec2d near = m_op_anchor;
+            for (const SketchEntity& g : m_op_ghost) {
+                bool closed = false;
+                const std::vector<Vec2d> pl = entity_polyline(g, closed);
+                for (size_t k = 0; k + 1 < pl.size(); ++k) {
+                    const Vec2d a = pl[k], d = pl[k + 1] - pl[k];
+                    const double l2 = d.squaredNorm();
+                    const double t = l2 > 1e-24 ? std::clamp((m_op_anchor - a).dot(d) / l2, 0.0, 1.0) : 0.0;
+                    const Vec2d q = a + t * d;
+                    if ((q - m_op_anchor).norm() < best) { best = (q - m_op_anchor).norm(); near = q; }
+                }
+            }
+            const Vec2d v = near - m_op_anchor;
+            if (v.norm() > 1e-12) m_op_dir = (m_op_value > 0 ? 1.0 : -1.0) * v.normalized();
+        }
     } else if (m_mode == Mode::Mirror) {
         if (m_op_a < 0 || m_mirror_targets.empty()) return;
         const SketchEntity& axis = m_entities[m_op_a];
@@ -8120,10 +8149,22 @@ void DesignSketchTool::op_pick(int ei)
         break;
     case Mode::Offset: {
         m_op_a = ei;
-        const SketchEntity& e = m_entities[ei];
-        const double sz = (e.type == SketchEntity::Type::Line) ? (e.p1 - e.p0).norm()
-                                                               : std::max(e.radius * 2.0, 1.0);
-        m_op_value = std::max(0.001, 0.1 * sz);
+        // The whole outline the entity belongs to, not the one segment under the pointer: a
+        // glyph or an imported outline is hundreds of short lines, and offsetting one of them
+        // gave a ghost a few hundredths of a millimetre long — no visible preview, and a typed
+        // distance that moved one invisible segment. Same construction state only.
+        m_op_chain.clear();
+        for (int ci : connected_loop(ei))
+            if (m_entities[ci].construction == m_entities[ei].construction) m_op_chain.push_back(ci);
+        if (m_op_chain.empty()) m_op_chain.push_back(ei);
+        // A starting distance that is visible: a twentieth of the outline's size.
+        Vec2d lo(1e30, 1e30), hi(-1e30, -1e30);
+        for (int ci : m_op_chain) {
+            bool closed = false;
+            for (const Vec2d& q : entity_polyline(m_entities[ci], closed)) { lo = lo.cwiseMin(q); hi = hi.cwiseMax(q); }
+        }
+        const double sz = (hi.x() >= lo.x()) ? std::max(hi.x() - lo.x(), hi.y() - lo.y()) : 1.0;
+        m_op_value = std::max(0.001, 0.05 * sz);
         recompute_op_ghost();
         break;
     }
@@ -8145,6 +8186,7 @@ void DesignSketchTool::op_pick(int ei)
     if (m_op_a >= 0) m_selection.push_back(m_op_a);
     if (m_op_b >= 0) m_selection.push_back(m_op_b);
     for (int ti : m_mirror_targets) m_selection.push_back(ti);
+    for (int ci : m_op_chain) if (ci != m_op_a) m_selection.push_back(ci);
     if (on_selection_changed) on_selection_changed(int(m_selection.size()));
 }
 
@@ -8296,17 +8338,20 @@ void DesignSketchTool::confirm_op()
         }
     } else if (m_mode == Mode::Offset) {
         const int a = m_op_a;
-        auto out = SketchEngine::offset_entities({ m_entities[a] }, m_op_value);
+        auto out = SketchEngine::offset_entities(op_chain_entities(), m_op_value);
         if (out.empty()) {
             notify(_u8L("Offset: an ellipse or a spline has no parallel of its own kind — pick lines, arcs or circles"));
             reset_op();
             return;
         }
         const int ni = int(m_entities.size());
+        const bool single = m_op_chain.size() <= 1;
         for (auto& o : out) m_entities.push_back(o);
         const SketchEntity::Type st = m_entities[a].type;
         SketchEntityConstraintDef d; d.ea = a; d.eb = ni;
-        bool emit = true;
+        // A chain's offset is joined and trimmed at its seams, so its entities no longer map one
+        // to one onto the originals: it is placed as geometry, without per-entity constraints.
+        bool emit = single;
         if (st == SketchEntity::Type::Line)                                   d.type = CT::Parallel;
         else if (st == SketchEntity::Type::Arc || st == SketchEntity::Type::Circle) d.type = CT::Concentric;
         else                                                                  emit = false;
