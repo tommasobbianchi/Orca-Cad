@@ -4566,12 +4566,139 @@ void DesignPanel::sync_sketch_display()
 
 void DesignPanel::on_add_text()
 {
-    // Font, height and a live outline with its size are chosen up front; the bbox handles
-    // (Move/Scale) still resize the art in the canvas afterwards.
-    DesignTextDialog dlg(this);
-    if (dlg.ShowModal() != wxID_OK || dlg.regions().empty())
+    open_text_dialog(-1);
+}
+
+// Text is a FEATURE, "Text N" in the tree, never loose lines in a sketch: that is what makes it
+// visible, and editable afterwards (the feature keeps its string, font and height). While the
+// dialog is open the feature is drawn in the canvas where it will be — the dialog is modeless
+// so it can be moved off it — and Cancel takes it out again. A new text goes on the plane of
+// the sketch that is open (committed first if it holds anything), else on the picked face
+// (centred on it, ready to engrave), else on the reference plane.
+void DesignPanel::open_text_dialog(int feat)
+{
+    if (m_text_dlg != nullptr) { m_text_dlg->Raise(); return; }
+    m_text_editing = feat >= 0 && feat < int(m_doc.features.size()) && m_doc.features[feat].is_text();
+    m_text_feat    = m_text_editing ? feat : -1;
+    m_text_face_body = -1;
+    m_text_offset    = Vec2d(0, 0);
+
+    DesignTextDialog::Spec initial;
+    if (m_text_editing) {
+        const CadFeature& f = m_doc.features[feat];
+        initial = { wxString::FromUTF8(f.text_string), f.text_font, f.text_height };
+        m_doc.checkpoint();   // undo boundary: Cancel restores the text as it was
+    } else {
+        if (m_viewport && m_viewport->is_sketching()) {
+            m_text_plane = m_viewport->mcp_sketch_tool().plane();
+            if (m_viewport->live_sketch_has_work()) {
+                m_viewport->sketch_confirm_pending();
+                m_viewport->finish_sketch();     // keep what was drawn: it is its own feature
+            } else {
+                m_viewport->cancel_sketch();     // an empty sketch was only a way to pick the plane
+            }
+            m_edit_index = -1;
+            set_ui_mode(UiMode::Feature);
+            sync_sketch_display();
+            refresh_tree();
+        } else if (m_sel_solid_face >= 0 && m_sel_solid_body >= 0 && m_sel_solid_body < int(m_doc.bodies.size())) {
+            const TopoDS_Face face = GeometryEngine::face_by_index(m_doc.bodies[m_sel_solid_body].shape, m_sel_solid_face);
+            if (!face.IsNull()) {
+                m_text_plane     = SketchPlane::from_face(face);
+                m_text_offset    = m_text_plane.project(GeometryEngine::face_centroid_world(face), m_text_plane.normal);
+                m_text_face_body = m_sel_solid_body;
+            } else {
+                m_text_plane = plane_from_choice(m_ref_plane);
+            }
+        } else {
+            m_text_plane = plane_from_choice(m_ref_plane);
+        }
+    }
+
+    m_text_dlg = new DesignTextDialog(this, m_text_editing ? &initial : nullptr);
+    m_text_dlg->on_change = [this] { text_dialog_changed(); };
+    m_text_dlg->on_accept = [this] { text_dialog_done(true); };
+    m_text_dlg->on_cancel = [this] { text_dialog_done(false); };
+    m_text_dlg->Show();
+    set_status(StatusKind::Info, m_text_editing ? _L("Edit the text — Enter applies, Esc keeps it as it was")
+                                                : _L("Type the text — it appears in the view as you type; Enter inserts, Esc cancels"));
+}
+
+void DesignPanel::text_dialog_changed()
+{
+    if (m_text_dlg == nullptr) return;
+    const ImportRegions& regions = m_text_dlg->regions();
+    const DesignTextDialog::Spec sp = m_text_dlg->spec();
+    const bool have = m_text_feat >= 0 && m_text_feat < int(m_doc.features.size());
+    if (regions.empty()) {
+        // Nothing to draw. An edited text keeps its last outline (OK is disabled until there is
+        // text again); a new one that has not been accepted simply goes away again.
+        if (!m_text_editing && have) {
+            m_doc.undo();
+            m_text_feat = -1;
+            m_feature_counter--;   // the next keystroke brings the same "Text N" back
+            refresh_tree();
+            sync_sketch_display();
+        }
         return;
-    add_imported_sketch(dlg.regions(), _L("Text"));
+    }
+    if (!have) {
+        m_doc.checkpoint();   // undo boundary: the new text (Cancel removes it)
+        m_feature_counter++;
+        CadFeature f;
+        f.type             = CadFeatureType::Sketch;
+        f.name             = feature_name(_L("Text"));
+        f.plane            = m_text_plane;
+        f.import_offset    = m_text_offset;          // the regions are centred on the origin
+        f.import_on_face   = m_text_face_body >= 0;
+        f.import_face_body = m_text_face_body;
+        m_doc.features.push_back(f);
+        m_text_feat = int(m_doc.features.size()) - 1;
+        refresh_tree();
+        set_tree_selection(m_text_feat);
+    }
+    CadFeature& f = m_doc.features[m_text_feat];
+    f.imported_regions = regions;
+    f.text_string      = std::string(sp.text.ToUTF8().data());
+    f.text_font        = sp.font;
+    f.text_height      = sp.height;
+    sync_sketch_display();   // the overlay draws the feature's regions: the canvas preview
+}
+
+void DesignPanel::text_dialog_done(bool accepted)
+{
+    DesignTextDialog* dlg = m_text_dlg;
+    m_text_dlg = nullptr;
+    if (dlg != nullptr) dlg->Destroy();
+    const int  feat    = m_text_feat;
+    const bool editing = m_text_editing;
+    m_text_feat    = -1;
+    m_text_editing = false;
+    const bool have = feat >= 0 && feat < int(m_doc.features.size());
+
+    if (!accepted) {
+        if (have) m_doc.undo();   // a new text leaves, an edited one gets its old outline back
+        refresh_tree();
+        sync_sketch_display();
+        set_status(StatusKind::Info, editing ? _L("Text unchanged") : _L("Text cancelled"));
+        return;
+    }
+    if (!have) return;
+    // Drop a solid-face pick now that the text sits on it, so the next Extrude acts on the text.
+    m_sel_solid_face = m_sel_solid_edge = m_sel_solid_body = -1;
+    m_doc.recompute();   // a lone sketch yields an empty body; that is expected
+    refresh_tree();
+    set_tree_selection(feat);
+    sync_sketch_display();
+    if (editing) {
+        set_status_ok();
+        return;
+    }
+    // A new text still has to be placed: the same move/scale gizmo and Confirm/Cancel card as
+    // any inserted art. Its Cancel undoes to the checkpoint taken when the text appeared.
+    on_transform_imported(feat);
+    m_insert_feat = feat;
+    open_insert_card(wxString::FromUTF8(m_doc.features[feat].name));
 }
 
 void DesignPanel::on_import_svg()
@@ -4630,6 +4757,7 @@ bool DesignPanel::mcp_busy(bool sketch_method, std::string& why) const
     // A GUI editor holds a candidate built from the document as it was when it opened; a
     // feature added or removed underneath it would be overwritten, or overwrite, on Confirm.
     if (m_active != Tool::None || m_edit_index >= 0) { why = "a feature card is open in the Design tab"; return true; }
+    if (m_text_dlg != nullptr) { why = "the Text dialog is open in the Design tab"; return true; }
     if (m_ui_mode == UiMode::Constrain) { why = "the Design tab is constraining a sketch"; return true; }
     // Sketch methods drive the live sketch session, which is the point of them; everything else
     // changes the feature list, which a live sketch session is about to commit into.
@@ -9323,7 +9451,12 @@ void DesignPanel::on_edit_feature()
 
     switch (f.type) {
     case CadFeatureType::Sketch:
-        // Imported Text/SVG art has no editable sketch dialog — edit means
+        // Text reopens its dialog: change the words, the font or the height in place.
+        if (f.is_text()) {
+            open_text_dialog(sel);
+            break;
+        }
+        // Imported SVG art has no editable sketch dialog — edit means
         // move / scale its placement instead, behind the same Confirm/Cancel gate as
         // the initial insert (Cancel = undo restores the prior placement).
         if (!f.imported_regions.empty()) {

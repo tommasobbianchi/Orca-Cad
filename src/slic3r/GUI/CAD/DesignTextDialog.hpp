@@ -6,7 +6,9 @@
 
 #include <wx/font.h>
 
+#include <functional>
 #include <memory>
+#include <string>
 
 class wxTextCtrl;
 class wxChoice;
@@ -18,18 +20,31 @@ namespace Slic3r {
 namespace Emboss { struct FontFile; }
 namespace GUI {
 
-// Text for the Design tab: the words, the font (face, bold, italic) and the height, with a
-// live outline of exactly what will be inserted and its size in millimetres. The outline IS
-// the result — the same vectorisation the sketch receives — so there is nothing to guess.
-// Enter inserts, Esc cancels (charter 4.2). The last font and height are remembered.
+// Text for the Design tab: the words, the font (face, bold, italic) and the height, with the
+// size in millimetres of exactly what will be inserted. MODELESS: the host draws the text in
+// the canvas as it is typed (on_change), so the dialog stays out of the way and can be moved —
+// a modal dialog is pinned over the middle of the window on GNOME. Enter or OK accepts, Esc,
+// Cancel or closing it cancels (charter 4.2); each fires its callback once and the host then
+// destroys the dialog. A new text starts from the last font and height used.
 class DesignTextDialog : public DPIDialog
 {
 public:
-    explicit DesignTextDialog(wxWindow* parent);
+    struct Spec {
+        wxString    text;
+        std::string font;       // WxFontUtils::store_wxFont descriptor (face, bold, italic)
+        double      height{10.0};
+    };
+    // `initial` reopens an existing text for editing; nullptr starts a new one.
+    DesignTextDialog(wxWindow* parent, const Spec* initial = nullptr);
 
-    // The vectorised text, centred on the origin, in mm. Empty unless the dialog ended wxID_OK.
+    // The vectorised text, centred on the origin, in mm. Empty when there is nothing to insert.
     const ImportRegions& regions() const { return m_regions; }
     wxString             text() const;
+    Spec                 spec() const;
+
+    std::function<void()> on_change;   // the outline changed (text, font or height)
+    std::function<void()> on_accept;   // Enter / OK with something to insert
+    std::function<void()> on_cancel;   // Esc / Cancel / closed
 
 protected:
     void on_dpi_changed(const wxRect& suggested_rect) override;
@@ -39,6 +54,9 @@ private:
     void     update_preview();     // text/font/height -> m_regions + size label
     wxFont   current_font() const;
     void     draw_preview(wxWindow* canvas);
+    void     accept();
+    void     cancel();
+    bool     m_done{false};        // accept/cancel fire once
 
     wxTextCtrl*       m_text{nullptr};
     wxChoice*         m_face{nullptr};

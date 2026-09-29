@@ -25,17 +25,21 @@ namespace Slic3r { namespace GUI {
 static const char* kFontKey   = "cad_text_font";     // WxFontUtils::store_wxFont descriptor
 static const char* kHeightKey = "cad_text_height";   // mm
 
-DesignTextDialog::DesignTextDialog(wxWindow* parent)
+DesignTextDialog::DesignTextDialog(wxWindow* parent, const Spec* initial)
     : DPIDialog(parent, wxID_ANY, _L("Text"), wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE)
 {
     SetFont(wxGetApp().normal_font());
     SetBackgroundColour(wxGetApp().dark_mode() ? wxColour(0x2d, 0x2d, 0x31) : *wxWHITE);
     const int em = em_unit();
 
-    // Last used font and height, else the system GUI font at 10 mm.
+    // The text being edited, else the last used font and height, else the GUI font at 10 mm.
     wxFont font = wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT);
     double height = 10.0;
-    if (AppConfig* cfg = wxGetApp().app_config) {
+    if (initial != nullptr) {
+        wxFont f = WxFontUtils::load_wxFont(initial->font);
+        if (f.IsOk()) font = f;
+        if (initial->height > 0.0) height = std::clamp(initial->height, 0.5, 500.0);
+    } else if (AppConfig* cfg = wxGetApp().app_config) {
         const std::string desc = cfg->get(kFontKey);
         if (!desc.empty()) {
             wxFont f = WxFontUtils::load_wxFont(desc);
@@ -50,8 +54,8 @@ DesignTextDialog::DesignTextDialog(wxWindow* parent)
     auto* form = new wxFlexGridSizer(2, em / 2, em);
     form->AddGrowableCol(1, 1);
 
-    m_text = new wxTextCtrl(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(30 * em, -1),
-                            wxTE_PROCESS_ENTER);
+    m_text = new wxTextCtrl(this, wxID_ANY, initial ? initial->text : wxString(), wxDefaultPosition,
+                            wxSize(30 * em, -1), wxTE_PROCESS_ENTER);
     m_text->SetHint(_L("Type the text to insert"));
     form->Add(new wxStaticText(this, wxID_ANY, _L("Text")), 0, wxALIGN_CENTER_VERTICAL);
     form->Add(m_text, 1, wxEXPAND);
@@ -84,7 +88,8 @@ DesignTextDialog::DesignTextDialog(wxWindow* parent)
     form->Add(m_height, 0);
 
     // The outline of what will be inserted, fitted to the box, with its real size under it.
-    m_preview = new wxWindow(this, wxID_ANY, wxDefaultPosition, wxSize(30 * em, 10 * em));
+    // A thumbnail only: the text itself is drawn in the canvas, where it will be.
+    m_preview = new wxWindow(this, wxID_ANY, wxDefaultPosition, wxSize(30 * em, 5 * em));
     m_preview->SetBackgroundStyle(wxBG_STYLE_PAINT);
     m_preview->Bind(wxEVT_PAINT, [this](wxPaintEvent&) { draw_preview(m_preview); });
     m_preview->Bind(wxEVT_SIZE, [this](wxSizeEvent& e) { m_preview->Refresh(); e.Skip(); });
@@ -100,9 +105,7 @@ DesignTextDialog::DesignTextDialog(wxWindow* parent)
     top->Add(buttons, 0, wxEXPAND);
 
     m_text->Bind(wxEVT_TEXT, [this](wxCommandEvent&) { update_preview(); });
-    m_text->Bind(wxEVT_TEXT_ENTER, [this](wxCommandEvent&) {
-        if (!m_regions.empty()) EndModal(wxID_OK);   // Enter = OK, as everywhere in the tab
-    });
+    m_text->Bind(wxEVT_TEXT_ENTER, [this](wxCommandEvent&) { accept(); });   // Enter = OK, as everywhere in the tab
     auto refont = [this](wxCommandEvent&) { load_font(); update_preview(); };
     m_face->Bind(wxEVT_CHOICE, refont);
     m_bold->Bind(wxEVT_CHECKBOX, refont);
@@ -110,18 +113,25 @@ DesignTextDialog::DesignTextDialog(wxWindow* parent)
     m_height->Bind(wxEVT_SPINCTRLDOUBLE, [this](wxSpinDoubleEvent&) { update_preview(); });
     m_height->Bind(wxEVT_TEXT, [this](wxCommandEvent&) { update_preview(); });
     Bind(wxEVT_BUTTON, [this](wxCommandEvent& e) {
-        if (e.GetId() != wxID_OK) { e.Skip(); return; }
-        if (m_regions.empty()) return;              // nothing to insert: the size line says why
-        if (AppConfig* cfg = wxGetApp().app_config) {
-            cfg->set(kFontKey, WxFontUtils::store_wxFont(current_font()));
-            cfg->set(kHeightKey, std::to_string(m_height->GetValue()));
-        }
-        EndModal(wxID_OK);
+        if (e.GetId() == wxID_OK)          accept();
+        else if (e.GetId() == wxID_CANCEL) cancel();
+        else                               e.Skip();
+    });
+    Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent&) { cancel(); });
+    Bind(wxEVT_CHAR_HOOK, [this](wxKeyEvent& e) {
+        if (e.GetKeyCode() == WXK_ESCAPE) cancel();
+        else                              e.Skip();
     });
 
     wxGetApp().UpdateDlgDarkUI(this);
     SetSizerAndFit(top);
-    CenterOnParent();
+    // Out of the middle of the window, where the text is being placed: top right of the parent.
+    if (parent != nullptr) {
+        const wxRect pr = parent->GetScreenRect();
+        SetPosition(wxPoint(std::max(pr.GetLeft(), pr.GetRight() - GetSize().x - 2 * em), pr.GetTop() + 8 * em));
+    } else {
+        CenterOnParent();
+    }
 
     load_font();
     update_preview();
@@ -129,6 +139,29 @@ DesignTextDialog::DesignTextDialog(wxWindow* parent)
 }
 
 wxString DesignTextDialog::text() const { return m_text->GetValue(); }
+
+DesignTextDialog::Spec DesignTextDialog::spec() const
+{
+    return { m_text->GetValue(), WxFontUtils::store_wxFont(current_font()), m_height->GetValue() };
+}
+
+void DesignTextDialog::accept()
+{
+    if (m_done || m_regions.empty()) return;        // nothing to insert: the size line says why
+    m_done = true;
+    if (AppConfig* cfg = wxGetApp().app_config) {
+        cfg->set(kFontKey, WxFontUtils::store_wxFont(current_font()));
+        cfg->set(kHeightKey, std::to_string(m_height->GetValue()));
+    }
+    if (on_accept) on_accept();
+}
+
+void DesignTextDialog::cancel()
+{
+    if (m_done) return;
+    m_done = true;
+    if (on_cancel) on_cancel();
+}
 
 wxFont DesignTextDialog::current_font() const
 {
@@ -175,6 +208,7 @@ void DesignTextDialog::update_preview()
     m_size->SetLabel(line);
     if (m_ok) m_ok->Enable(!m_regions.empty());
     m_preview->Refresh();
+    if (on_change) on_change();
 }
 
 void DesignTextDialog::draw_preview(wxWindow* canvas)

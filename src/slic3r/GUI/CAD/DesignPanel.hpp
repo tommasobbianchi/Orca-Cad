@@ -41,6 +41,8 @@ class ScalableButton;
 
 namespace Slic3r { namespace GUI {
 
+class DesignTextDialog;
+
 class DesignCanvas;
 
 // Design (CAD) tab: a sketch-first, Onshape-style form-driven CAD panel.
@@ -198,6 +200,11 @@ private:
     // imported_regions (no solver entities). on_add_text/on_import_svg gather
     // input; add_imported_sketch builds the feature, refreshes tree + display.
     void on_add_text();
+    // Text is its own feature ("Text N"), drawn in the canvas while its (modeless) dialog is
+    // open. feat < 0 starts a new one; otherwise the text feature `feat` is reopened for editing.
+    void open_text_dialog(int feat);
+    void text_dialog_changed();
+    void text_dialog_done(bool accepted);
     void on_import_svg();
     void on_import_step();   // STEP -> editable B-rep body (keeps the OCCT solid, not a mesh)
     void on_import_mesh();   // STL/OBJ -> B-rep body via GeometryEngine::mesh_to_brep
@@ -409,6 +416,15 @@ private:
     wxSizer*  m_box_insert{nullptr};   // Confirm/Cancel card for placing Text/SVG art
     wxSizer*  m_box_expr{nullptr};     // expression binding card (visible during edit only)
     int       m_insert_feat{-1};       // provisional imported-art feature awaiting Confirm
+    // The open Text dialog, the feature it draws into (-1 until there is text to draw) and,
+    // for a new text, where it goes: plane, offset in that plane, and the body of the face it
+    // sits on (-1 = not on a face).
+    DesignTextDialog* m_text_dlg{nullptr};
+    int               m_text_feat{-1};
+    bool              m_text_editing{false};
+    SketchPlane       m_text_plane;
+    Vec2d             m_text_offset{0, 0};
+    int               m_text_face_body{-1};
     // Move-body gizmo runs through the unified action bar too: Confirm keeps the placement,
     // Cancel reverts to the pose captured when the move started.
     int         m_move_body{-1};
