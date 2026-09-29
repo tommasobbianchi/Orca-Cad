@@ -4993,7 +4993,8 @@ void DesignPanel::add_imported_sketch(
     // DRAWING, not importing: if a sketch is open, the art belongs IN it. The outlines become
     // ordinary line entities, so they can be constrained, trimmed and extruded with everything
     // else on that plane. Committing a separate Sketch feature while the user is mid-sketch put
-    // the text on its own plane-origin feature and left the sketch they were drawing untouched.
+    // the art on its own plane-origin feature and left the sketch they were drawing untouched.
+    // (Text no longer comes through here: it is its own feature, see open_text_dialog.)
     if (m_viewport && m_viewport->is_sketching() && m_viewport->add_sketch_regions(regions)) {
         set_status(StatusKind::Info, wxString::Format(_L("%s added to the sketch — Confirm to commit it"),
                                             base_name));

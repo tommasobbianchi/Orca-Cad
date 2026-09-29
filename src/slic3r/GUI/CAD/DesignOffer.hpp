@@ -156,7 +156,7 @@ static const OfferVerb kOfferVerbs[] = {
     {"sk_poly_inscribed", L("Inscribed"), 0, nullptr, "btn:polyfit#0", nullptr, 0x000f8000u, 0, 0, false, true, L("Polygon"), "design_polygon", L("Measure the polygon to its corners (inscribed)")},
     {"sk_poly_circumscribed", L("Circumscribed"), 0, nullptr, "btn:polyfit#1", nullptr, 0x000f8000u, 0, 0, false, true, L("Polygon"), "design_polygon", L("Measure the polygon to its flats (circumscribed)")},
     {"sk_point_t", L("Point"), 0, "P", "key:P", nullptr, 0x000f8000u, 0, 0, false, true, nullptr, "design_point", L("Point — click to place")},
-    {"sk_text", L("Text"), 0, nullptr, "btn:text", nullptr, 0x000f8000u, 0, 0, false, true, nullptr, "design_text", L("Type text; its outline is added to this sketch as editable lines")},
+    {"sk_text", L("Text"), 0, nullptr, "btn:text", nullptr, 0x000f8000u, 0, 0, false, true, nullptr, "design_text", L("Type text; it becomes a Text feature on this sketch's plane, editable later")},
     {"sk_svg", L("SVG"), 0, nullptr, "btn:svg", nullptr, 0x000f8000u, 0, 0, false, true, nullptr, "design_svg", L("Import an SVG outline into this sketch as editable lines")},
     {"sk_offset", L("Offset"), 1, "O", "key:O", nullptr, 0x000b0000u, 0, 0, false, true, nullptr, "design_offset", L("Offset — pick an entity, drag the distance")},
     {"sk_trim", L("Trim"), 2, "T", "key:T", nullptr, 0x000b0000u, 0, 0, false, true, nullptr, "design_trim", L("Trim — click a segment to trim it")},
