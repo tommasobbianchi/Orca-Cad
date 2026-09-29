@@ -46,6 +46,7 @@ DesignCanvas::DesignCanvas(wxWindow* parent)
     // cannot be null. Borrow the plater's, as the editor canvases do.
     m_canvas->set_process(&wxGetApp().plater()->background_process());
     m_canvas->set_type(GLCanvas3D::ECanvasType::CanvasView3D);
+    m_canvas->set_studio_lighting(true);   // see GLCanvas3D::m_studio_lighting and phong.fs
 
     // CAD navigation, this canvas only: left-drag sweeps a selection rubber band, so orbit
     // moves to middle-drag and pan to right-drag. Design is a different modality from
@@ -1347,6 +1348,7 @@ void DesignCanvas::set_body_hidden(bool on)
 {
     if (m_body_hidden == on) return;
     m_body_hidden = on;
+    m_sketch_tool.set_body_edges_hidden(on);
     reload(true);   // hides/show base bodies + flips the ghost opaque/faint for preview-only mode
 }
 

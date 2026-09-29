@@ -8554,10 +8554,11 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
 
     const bool realistic_mode = wxGetApp().app_config != nullptr && wxGetApp().app_config->get_bool(SETTING_OPENGL_REALISTIC_MODE);
     const bool realistic_phong = wxGetApp().app_config != nullptr && wxGetApp().app_config->get_bool(SETTING_OPENGL_REALISTIC_PHONG);
-    const std::string shader_name = (realistic_mode && realistic_phong) ? "phong" : "gouraud";
+    const std::string shader_name = (m_studio_lighting || (realistic_mode && realistic_phong)) ? "phong" : "gouraud";
     GLShaderProgram* shader = wxGetApp().get_shader(shader_name);
     if (shader == nullptr && shader_name != "gouraud")
         shader = wxGetApp().get_shader("gouraud");
+    const bool studio = m_studio_lighting && shader != nullptr && shader->get_name() == "phong";
     ECanvasType canvas_type = this->m_canvas_type;
     bool                 partly_inside_enable = canvas_type == ECanvasType::CanvasAssembleView ? false : true;
     // The edited printer's per-extruder printable heights feed the object shader's
@@ -8570,6 +8571,13 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
 
         const bool phong_ssao = wxGetApp().app_config != nullptr && wxGetApp().app_config->get_bool(SETTING_OPENGL_PHONG_SSAO);
         shader->set_uniform("enable_ssao", phong_ssao);
+        // Set on every use: the program is shared, so a canvas that leaves it unset would inherit
+        // the last canvas's choice.
+        shader->set_uniform("lighting_model", studio ? 1 : 0);
+        if (studio) {
+            const Transform3d& view = wxGetApp().plater()->get_camera().get_view_matrix();
+            shader->set_uniform("world_up_eye", Vec3f((view.matrix().block<3, 3>(0, 0) * Vec3d::UnitZ()).cast<float>()));
+        }
 
         // Object-on-object and self shadows: sample the depth map built in _render_shadow_map_pass().
         // shadow_intensity == 0 disables the effect entirely (unchanged behavior when off / unsupported).
