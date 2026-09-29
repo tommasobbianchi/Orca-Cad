@@ -2348,11 +2348,12 @@ TEST_CASE("a truncated feature keeps what it could read", "[CadDocument][recipe]
 
     // Shorten feature 1 so it ends right after coordsys_face_kind: drop coordsys_face_edges
     // (4 bytes), the two flags appended after it (thread_major_nominal, pattern_inclusive:
-    // 1 byte each) and the empty dressup_edges list (its 8-byte size tag). Rewrite its length
-    // prefix and erase the tail bytes. The reader then runs out inside fa(f), throws, and keeps
-    // everything it had already assigned — that is the whole point of the try/catch. (Cut on a
-    // field boundary: a field cut in half is read as whatever half arrived.)
-    const size_t drop = sizeof(uint32_t) + 2 * sizeof(bool) + sizeof(cereal::size_type);
+    // 1 byte each), the empty dressup_edges list and the two empty text strings (an 8-byte size
+    // tag each) and text_height (a double). Rewrite its length prefix and erase the tail bytes.
+    // The reader then runs out inside fa(f), throws, and keeps everything it had already
+    // assigned — that is the whole point of the try/catch. (Cut on a field boundary: a field
+    // cut in half is read as whatever half arrived.)
+    const size_t drop = sizeof(uint32_t) + 2 * sizeof(bool) + 3 * sizeof(cereal::size_type) + sizeof(double);
     REQUIRE(f_len[1] > drop);
     std::string shortened = blob;
     shortened.erase(f_off[1] + 4 + f_len[1] - drop, drop);
@@ -2371,6 +2372,7 @@ TEST_CASE("a truncated feature keeps what it could read", "[CadDocument][recipe]
     REQUIRE_FALSE(loaded.features[1].thread_major_nominal);   // ...and so were the later flags
     REQUIRE_FALSE(loaded.features[1].pattern_inclusive);
     REQUIRE(loaded.features[1].dressup_edges.empty());
+    REQUIRE_FALSE(loaded.features[1].is_text());
     REQUIRE(loaded.features[0].name == doc.features[0].name);
     REQUIRE(loaded.features[2].name == doc.features[2].name);
 }
@@ -8077,6 +8079,31 @@ TEST_CASE("extrude: a profile that folds back on itself is refused with a reason
     const auto mp = GeometryEngine::mass_properties(good.bodies[0].shape);
     REQUIRE(mp.is_solid);
     REQUIRE(mp.volume > 0.0);
+}
+
+TEST_CASE("text feature: its string, font and height survive a save and load", "[CadDocument][recipe]")
+{
+    CadDocument doc;
+    CadFeature f;
+    f.type = CadFeatureType::Sketch;
+    f.name = "Text 1";
+    f.plane = SketchPlane::XY();
+    f.imported_regions = { { { Vec2d(0, 0), Vec2d(4, 0), Vec2d(4, 6), Vec2d(0, 6) } } };
+    f.text_string = "Ab ÷ 12";
+    f.text_font   = "Noto Sans;Bold";
+    f.text_height = 7.5;
+    doc.features.push_back(f);
+    REQUIRE(doc.recompute());
+
+    CadDocument back;
+    REQUIRE(back.deserialize_recipe(doc.serialize_recipe()));
+    REQUIRE(back.features.size() == 1);
+    const CadFeature& g = back.features[0];
+    REQUIRE(g.is_text());
+    REQUIRE(g.text_string == f.text_string);
+    REQUIRE(g.text_font == f.text_font);
+    REQUIRE(g.text_height == f.text_height);
+    REQUIRE(g.imported_regions == f.imported_regions);   // the outline is saved, not re-derived
 }
 
 // Several picked edges dressed by ONE feature: every id is resolved against the same body, so

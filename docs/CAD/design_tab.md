@@ -315,9 +315,22 @@ variable and the whole model follows.
 
 ## Import and export
 
-**Text** asks for the words, the font (any installed font, bold, italic) and the height, and
-shows the outline that will be inserted with its size in millimetres before anything is added.
-The last font and height are remembered.
+**Text** is a feature of its own, "Text N" in the tree. Its dialog asks for the words, the
+font (any installed font, bold, italic) and the height, and shows the size in millimetres. The
+dialog does not block the window and can be moved aside. As you type, the text is drawn in the
+view where it will go:
+- on the plane of the sketch that is open (a sketch holding anything is committed first);
+- else centred on the picked face;
+- else on the reference plane.
+
+Enter inserts the text; then drag or scale it and Confirm. Esc takes it out again. Editing
+a Text feature reopens the dialog with its words, font and height, and redraws it in place.
+The outlines are saved with the project, so it opens the same on a machine without that font.
+A new text starts from the last font and height used.
+
+To engrave or emboss, extrude the Text feature onto the solid, Cut or Join. A text is no
+longer loose lines inside another sketch, so it no longer acts as a hole in that sketch's
+profile.
 
 **Import STEP** brings in a real B-rep solid, not a mesh: its faces and edges can be filleted,
 shelled and cut like anything modelled here.

@@ -118,6 +118,14 @@ struct CadFeature {
     // one edge instead of falling back to the whole face group.
     std::vector<int> dressup_edges;
     // The edges this dress-up targets: the list, else the single edge, else none (face group).
+    // Text feature: a Sketch whose imported_regions were vectorised from this string in this font
+    // (a WxFontUtils descriptor, bold/italic included) at this cap height in mm. The regions are
+    // what gets built — they are saved too, so the project opens on a machine without the font —
+    // and these three are what an edit reopens the Text dialog with. Empty = not a text feature.
+    std::string text_string;
+    std::string text_font;
+    double      text_height{0.0};
+    bool is_text() const { return !text_string.empty(); }
     std::vector<int> dressup_edge_ids() const {
         if (!dressup_edges.empty()) return dressup_edges;
         if (dressup_edge >= 0) return { dressup_edge };
@@ -395,7 +403,8 @@ struct CadFeature {
                mate_kind, mate_cs_a, mate_cs_b, mate_offset, mate_angle, mate_flip,
                coordsys_face_kind, coordsys_face_edges,
                thread_major_nominal, pattern_inclusive,
-               dressup_edges);
+               dressup_edges,
+               text_string, text_font, text_height);
     }
     template<class Archive>
     void load(Archive& ar) {
@@ -436,7 +445,8 @@ struct CadFeature {
                mate_kind, mate_cs_a, mate_cs_b, mate_offset, mate_angle, mate_flip,
                coordsys_face_kind, coordsys_face_edges,
                thread_major_nominal, pattern_inclusive,
-               dressup_edges);
+               dressup_edges,
+               text_string, text_font, text_height);
         imported_solid = brep_from_string(brep);
     }
     // The pre-framing (v4) layout, FROZEN. A v4 recipe is one flat stream with no per-feature
