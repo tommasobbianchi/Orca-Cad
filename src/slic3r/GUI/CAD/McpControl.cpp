@@ -1500,9 +1500,13 @@ json sketch_report(DesignSketchTool& t)
     }
     json open_ends = json::array();
     for (const Vec2d& p : rep.open_ends) open_ends.push_back(json::array({p.x(), p.y()}));
-    // A profile is buildable when at least one loop closed and nothing is left dangling.
-    const bool buildable = !rep.loops.empty() && rep.open_ends.empty();
-    return json{{"closed_loops", loops}, {"open_ends", open_ends}, {"buildable", buildable}};
+    // A profile is buildable when at least one loop closed, nothing is left dangling and no loop
+    // crosses or folds back on itself.
+    json defects = json::array();
+    for (const auto& l : rep.loops)
+        if (l.defect) defects.push_back(json::array({l.defect_at.x(), l.defect_at.y()}));
+    const bool buildable = !rep.loops.empty() && rep.open_ends.empty() && defects.empty();
+    return json{{"closed_loops", loops}, {"open_ends", open_ends}, {"defects", defects}, {"buildable", buildable}};
 }
 
 json action_sketch_describe(DesignPanel* panel, const json& params)
