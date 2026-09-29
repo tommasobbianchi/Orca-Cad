@@ -149,6 +149,10 @@ public:
     static Vec3d face_normal_world(const TopoDS_Face& face);
     // Sample an edge into a world-space polyline (>=2 pts) for pick-distance + highlight.
     static std::vector<Vec3d> sample_edge_world(const TopoDS_Edge& edge, double chord_tol = 0.05);
+    // The edges a viewer draws over a body, each as a polyline: every edge of the shape once,
+    // without degenerate edges (a cone apex) and without the seam of a closed surface (the line
+    // down a cylinder's side), which is where OCCT closes the parameter space, not a real edge.
+    static std::vector<std::vector<Vec3d>> display_edges(const TopoDS_Shape& shape, double chord_tol);
     // 0-based edge index into TopExp::MapShapes(shape, TopAbs_EDGE, map).
     static int          edge_count(const TopoDS_Shape& shape);
     static TopoDS_Edge  edge_by_index(const TopoDS_Shape& shape, int index);

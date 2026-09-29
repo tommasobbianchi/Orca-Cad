@@ -32,6 +32,8 @@
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakeCone.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
@@ -8919,4 +8921,30 @@ TEST_CASE("CadDocument: a profile on a body face touches it, one in free space d
     CHECK(doc.body_touching_sketch(in_air) == -1);
     CHECK(doc.body_touching_sketch(-1) == -1);
     CHECK(doc.body_touching_sketch(base + 1) == -1);       // the extrude: not a sketch
+}
+
+TEST_CASE("display edges: every real edge once, no seams, no degenerate apex", "[CadDocument][display]")
+{
+    const auto box = GeometryEngine::display_edges(BRepPrimAPI_MakeBox(10., 20., 30.).Shape(), 0.01);
+    CHECK(box.size() == 12);
+    for (const auto& pl : box) {
+        REQUIRE(pl.size() >= 2);
+        const double len = (pl.back() - pl.front()).norm();
+        CHECK((std::abs(len - 10.) < 1e-6 || std::abs(len - 20.) < 1e-6 || std::abs(len - 30.) < 1e-6));
+    }
+
+    // A cylinder has three edges in OCCT: the two rims and the seam down its side. Only the rims
+    // are drawn, each sampled finely enough to look round and closed.
+    const auto cyl = GeometryEngine::display_edges(BRepPrimAPI_MakeCylinder(5., 8.).Shape(), 0.01);
+    REQUIRE(cyl.size() == 2);
+    for (const auto& pl : cyl) {
+        CHECK(pl.size() > 16);
+        CHECK((pl.front() - pl.back()).norm() < 1e-6);
+        for (const Vec3d& p : pl)
+            CHECK(std::abs(std::hypot(p.x(), p.y()) - 5.) < 0.02);
+    }
+
+    // A cone keeps its base rim; the apex is a degenerate edge and the side has a seam.
+    const auto cone = GeometryEngine::display_edges(BRepPrimAPI_MakeCone(5., 0., 8.).Shape(), 0.01);
+    CHECK(cone.size() == 1);
 }

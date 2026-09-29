@@ -14,6 +14,10 @@
 #include "slic3r/GUI/3DScene.hpp"
 #include "slic3r/GUI/GLShader.hpp"
 #include "libslic3r/CAD/GeometryEngine.hpp"
+
+#include <BRepBndLib.hxx>
+#include <Bnd_Box.hxx>
+#include <Standard_Failure.hxx>
 #include "libslic3r/TriangleMesh.hpp"
 
 #include <GL/glew.h>
@@ -3424,7 +3428,92 @@ void DesignSketchTool::set_solid_pick(const std::vector<CadBody>* bodies, const 
         m_solid_bodies = bodies; m_solid_mesh = mesh; m_solid_tri_face = tri_face; m_solid_tri_body = tri_body;
         m_solid_visible = visible; m_solid_xform = xform;
     }
+    refresh_body_edges();
     clear_solid_selection();
+}
+
+void DesignSketchTool::refresh_body_edges()
+{
+    const size_t n = m_solid_bodies != nullptr ? m_solid_bodies->size() : 0;
+    m_body_edges.resize(n);
+    m_body_edges_key.resize(n, nullptr);
+    for (size_t b = 0; b < n; ++b) {
+        const TopoDS_Shape& shape = (*m_solid_bodies)[b].shape;
+        const void* key = shape.IsNull() ? nullptr : shape.TShape().get();
+        if (key == m_body_edges_key[b] && key != nullptr)
+            continue;
+        m_body_edges_key[b] = key;
+        m_body_edges[b].clear();
+        if (key == nullptr)
+            continue;
+        // A thousandth of the body's size: round edges stay round at any zoom that shows the
+        // whole body, without sampling a large import into millions of segments.
+        Bnd_Box box;
+        BRepBndLib::Add(shape, box);
+        const double diag = box.IsVoid() ? 1.0 : std::sqrt(box.SquareExtent());
+        try {
+            m_body_edges[b] = GeometryEngine::display_edges(shape, std::max(1e-3 * diag, 0.005));
+        } catch (const Standard_Failure&) {
+            m_body_edges[b].clear();   // an unsampleable edge costs its body the lines, nothing else
+        }
+    }
+}
+
+void DesignSketchTool::render_body_edges()
+{
+    if (m_body_edges_hidden || m_solid_bodies == nullptr)
+        return;
+    using EPT = GLModel::Geometry::EPrimitiveType;
+    using EVL = GLModel::Geometry::EVertexLayout;
+    const Camera& cam = wxGetApp().plater()->get_camera();
+    const Vec3d vd = cam.get_dir_forward();
+    const double px = 1.0 / std::max(cam.get_zoom(), 1e-6);
+    const double hw = 0.75 * px;     // ~1.5 px wide
+    // Pulled toward the eye by a few pixels, so the line wins the depth test against the two
+    // faces meeting at the edge while a face in front of it still hides it.
+    const Vec3d pull = -vd * (3.0 * px);
+    // Two passes: the edges of a body faded by body focus are fainter, like the body itself.
+    for (int pass = 0; pass < 2; ++pass) {
+        GLModel::Geometry g; g.format = { EPT::Triangles, EVL::P3 };
+        unsigned int base = 0;
+        for (int b = 0; b < int(m_body_edges.size()); ++b) {
+            if (m_solid_visible != nullptr && b < int(m_solid_visible->size()) && !(*m_solid_visible)[b])
+                continue;
+            const bool faded = m_pick_only_body >= 0 && m_pick_only_body < int(m_body_edges.size())
+                               && b != m_pick_only_body;
+            if (faded != (pass == 1))
+                continue;
+            for (const std::vector<Vec3d>& pl : m_body_edges[b])
+                for (size_t s = 1; s < pl.size(); ++s) {
+                    const Vec3d a = body_xform_pt(b, pl[s - 1]) + pull, c = body_xform_pt(b, pl[s]) + pull;
+                    Vec3d dir = c - a; if (dir.norm() < 1e-9) continue; dir.normalize();
+                    Vec3d off = dir.cross(vd);
+                    if (off.norm() < 1e-9) continue;   // edge seen end-on: a point, nothing to draw
+                    off = off.normalized() * hw;
+                    g.add_vertex((Vec3f)(a + off).cast<float>());
+                    g.add_vertex((Vec3f)(c + off).cast<float>());
+                    g.add_vertex((Vec3f)(c - off).cast<float>());
+                    g.add_vertex((Vec3f)(a - off).cast<float>());
+                    g.add_triangle(base, base + 1, base + 2);
+                    g.add_triangle(base, base + 2, base + 3); base += 4;
+                }
+        }
+        if (base == 0)
+            continue;
+        glsafe(::glEnable(GL_DEPTH_TEST));
+        glsafe(::glDepthFunc(GL_LEQUAL));
+        glsafe(::glDepthMask(GL_FALSE));
+        glsafe(::glEnable(GL_BLEND));
+        glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+        m_body_edges_model.reset();
+        m_body_edges_model.init_from(std::move(g));
+        m_body_edges_model.set_color(ColorRGBA(0.08f, 0.09f, 0.11f, pass == 0 ? 0.85f : 0.25f));
+        m_body_edges_model.render();
+        glsafe(::glDepthMask(GL_TRUE));
+        glsafe(::glDepthFunc(GL_LESS));
+        glsafe(::glDisable(GL_BLEND));
+        glsafe(::glDisable(GL_DEPTH_TEST));
+    }
 }
 
 // Map a point sampled from the (untransformed) OCCT body shape through the body's display
@@ -8928,6 +9017,8 @@ void DesignSketchTool::render(GLCanvas3D& canvas)
     const Camera& camera = wxGetApp().plater()->get_camera();
     shader->set_uniform("view_model_matrix", camera.get_view_matrix());
     shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+
+    render_body_edges();
 
     // Persistent committed sketches (e.g. an un-consumed sketch left visible after its
     // extrude is removed): faces translucent, outlines orange. Each uses its own plane.

@@ -362,6 +362,13 @@ the plane, `F` flips which half is kept. **Place on Face** (`F`, when section is
 picked face flat on the bed. Origin planes (`P`) and world axes (`A`) can be toggled on while
 you orient yourself.
 
+Bodies are lit as in a studio, whatever the realistic-view preferences of the slicer: faces
+facing up read cooler and brighter than faces facing down, a key light from the upper left
+separates the sides of a part, and curved faces darken toward their outline. Every edge of a
+body is drawn as a thin dark line, except the seam OCCT puts down the side of a cylinder or
+cone; the edges of bodies faded by body focus are fainter, and a dress-up previewing its
+result alone hides them with the bodies.
+
 ---
 
 ## Known limitations

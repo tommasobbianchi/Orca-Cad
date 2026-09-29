@@ -198,6 +198,9 @@ public:
     // another solid is reachable without hiding anything. -1 = no restriction.
     // Survives set_solid_pick() — it is owned by the panel, not by the mesh feed.
     void set_pick_only_body(int b) { m_pick_only_body = b; }
+    // Off while the bodies themselves are hidden (a dress-up previewing its result alone), so
+    // their edges do not float over the preview.
+    void set_body_edges_hidden(bool h) { m_body_edges_hidden = h; }
     void clear_solid_selection();
     bool has_solid_selection() const { return m_solid_sel != SolidSel::None; }
     // Every picked edge when the selection is an edge set (Shift/Ctrl+click adds and removes
@@ -1204,6 +1207,14 @@ private:
     int m_pick_only_body{-1};        // >=0: only this body catches clicks (body-focus x-ray for CoordSys picking)
     const std::vector<Transform3d>* m_solid_xform{nullptr};  // per-body display transform (for edge sampling)
     Vec3d body_xform_pt(int body, const Vec3d& p) const;     // map an OCCT-shape point through the body xform
+    // The bodies' B-rep edges, drawn as dark lines over the solids so faces and features read
+    // apart. One polyline set per body in its own shape coordinates, resampled only for a body
+    // whose shape changed (keyed by the TShape), since set_solid_pick runs on every recompute.
+    std::vector<std::vector<std::vector<Vec3d>>> m_body_edges;
+    std::vector<const void*>                     m_body_edges_key;
+    bool                                         m_body_edges_hidden{false};
+    void refresh_body_edges();
+    void render_body_edges();
     bool body_pickable(int b) const;                    // false when the body is explicitly hidden
     SolidSel                m_solid_sel{SolidSel::None};
     int                     m_sel_body{-1};   // which body the face/edge selection is on
@@ -1269,6 +1280,7 @@ private:
     GLModel m_mc_fill_model;      // the face treatment's shaded facets
     GLModel m_solid_face_model;
     GLModel m_solid_edge_model;
+    GLModel m_body_edges_model;
     GLModel m_solid_vertex_model;
     int m_display_pick_region{-1}; // selected closed-region index within that feature (-1 none)
 

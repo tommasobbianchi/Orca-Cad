@@ -570,6 +570,9 @@ private:
 
     //BBS: add canvas type for assemble view usage
     ECanvasType m_canvas_type;
+    // Objects drawn with the phong shader's studio lighting whatever the realistic-view settings
+    // (the Design tab's canvas). Off for every canvas of the slicer, which render as before.
+    bool m_studio_lighting{false};
     std::array<ClippingPlane, 2> m_clipping_planes;
     ClippingPlane m_camera_clipping_plane;
     bool m_use_clipping_planes;
@@ -772,6 +775,7 @@ public:
 
     void set_context(wxGLContext* context) { m_context = context; }
     void set_type(ECanvasType type) { m_canvas_type = type; }
+    void set_studio_lighting(bool on) { m_studio_lighting = on; }
     ECanvasType get_canvas_type() { return m_canvas_type; }
 
     wxGLCanvas* get_wxglcanvas() { return m_canvas; }
