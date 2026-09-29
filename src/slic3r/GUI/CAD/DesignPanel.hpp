@@ -328,6 +328,7 @@ private:
     void       update_extrude_gizmo();
     void       update_fillet_gizmo();     // edge-anchored radius arrow (Dressup card)
     void       sync_dressup_target();     // Dressup card: show picked edge vs group, gate the combo
+    std::vector<int> dressup_edges() const; // the picked edge(s) a dress-up targets; empty = face group
     void       update_hole_gizmo();       // footprint circle + diameter/depth arrows (Hole card)
     // A FEATURE button whose tool needs bodies it may not have yet. Greyed with an explanatory
     // tooltip below min_bodies, rather than accepting the click and refusing afterwards.
@@ -715,6 +716,10 @@ private:
     int               m_sel_solid_body{-1};   // which body the face/edge selection is on
     int               m_sel_solid_face{-1};
     int               m_sel_solid_edge{-1};
+    // The picked edge set (Shift/Ctrl+click), m_sel_solid_edge last. Read through dressup_edges(),
+    // which drops it once m_sel_solid_edge moves on — the many places that reset the single edge
+    // then need not know the set exists.
+    std::vector<int>  m_sel_solid_edges;
     bool              m_sel_solid_vertex{false};   // a corner is picked (body+point, no face/edge)
     // The face actually under the last solid click, INDEPENDENT of the whole/face/edge cycle level.
     // The first click on a solid selects the WHOLE body, but the ray has already resolved which face

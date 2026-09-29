@@ -122,6 +122,7 @@ public:
                         const std::vector<bool>* visible = nullptr,
                         const std::vector<Transform3d>* xform = nullptr);
     void set_on_solid_selection_changed(std::function<void(int, int, int, int)> cb);
+    std::vector<int> selected_solid_edges() const;   // the Shift/Ctrl+click edge set, last-clicked at the end
     void select_body(int body);   // Parts-list -> highlight a whole body by index
     // Effective display colour of a body: the per-body override (Color tool) when set,
     // otherwise the auto body-index palette. Single source of truth shared with reload().

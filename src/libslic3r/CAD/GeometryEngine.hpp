@@ -120,6 +120,11 @@ public:
                                        FaceGroup faces = FaceGroup::All);
     static TopoDS_Shape apply_chamfer(const TopoDS_Shape& solid, double distance,
                                        int edge_id);
+    // Several edges in one operation, all ids resolved against `solid`.
+    static TopoDS_Shape apply_fillet(const TopoDS_Shape& solid, double radius,
+                                     const std::vector<int>& edge_ids);
+    static TopoDS_Shape apply_chamfer(const TopoDS_Shape& solid, double distance,
+                                       const std::vector<int>& edge_ids);
 
     static TriangleMesh tessellate(const TopoDS_Shape& shape,
                                    double linear_deflection = 0.003,

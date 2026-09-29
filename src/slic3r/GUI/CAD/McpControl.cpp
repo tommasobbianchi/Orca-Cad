@@ -156,15 +156,15 @@ json describe_tools()
                      json{{"name", "profile"}, {"type", "array"}, {"default", json::array()}, {"description", "optional closed contour [[x,y],...] in plane mm; overrides width/height"}},
                      json{{"name", "boolean"}, {"type", "string"}, {"enum", json::array({"new", "union", "subtract", "intersect"})}, {"default", "new"}},
                  })}},
-            json{{"name", "fillet"}, {"summary", "Round a measured edge of a body (edge id from query_topology on that body)."},
+            json{{"name", "fillet"}, {"summary", "Round measured edges of a body (edge ids from query_topology on that body)."},
                  {"params", json::array({
-                     json{{"name", "edge"},   {"type", "integer"}},
+                     json{{"name", "edge"},   {"type", "integer|array"}, {"description", "one edge id, or an array of ids rounded together in one feature"}},
                      json{{"name", "radius"}, {"type", "number"}, {"unit", "mm"}, {"default", 1}, {"min", 0.01}},
                      json{{"name", "body"},   {"type", "integer"}, {"default", -1}, {"description", "target body; omit for the last body. edge id is resolved against THIS body."}},
                  })}},
-            json{{"name", "chamfer"}, {"summary", "Chamfer a measured edge of a body (edge id from query_topology on that body)."},
+            json{{"name", "chamfer"}, {"summary", "Chamfer measured edges of a body (edge ids from query_topology on that body)."},
                  {"params", json::array({
-                     json{{"name", "edge"},     {"type", "integer"}},
+                     json{{"name", "edge"},     {"type", "integer|array"}, {"description", "one edge id, or an array of ids chamfered together in one feature"}},
                      json{{"name", "distance"}, {"type", "number"}, {"unit", "mm"}, {"default", 1}, {"min", 0.01}},
                      json{{"name", "body"},     {"type", "integer"}, {"default", -1}, {"description", "target body; omit for the last body. edge id is resolved against THIS body."}},
                  })}},
@@ -867,16 +867,30 @@ int target_body_arg(const json& params, const CadDocument& doc)
     return bi;   // <0 -> kernel uses the last body
 }
 
+// `edge` is one id or an array of ids; an array becomes ONE feature, every id resolved
+// against the same body (a chain of single-edge features would see the ids drift).
+std::vector<int> edge_ids_arg(const json& params, const char* verb)
+{
+    if (!params.contains("edge"))
+        throw std::runtime_error(std::string(verb) + " needs 'edge' (id or array of ids from query_topology)");
+    const json& e = params["edge"];
+    std::vector<int> ids;
+    if (e.is_array()) for (const json& v : e) ids.push_back(v.get<int>());
+    else              ids.push_back(e.get<int>());
+    if (ids.empty()) throw std::runtime_error(std::string(verb) + ": 'edge' is an empty array");
+    return ids;
+}
+
 json action_fillet(DesignPanel* panel, const json& params)
 {
-    if (!params.contains("edge")) throw std::runtime_error("fillet needs 'edge' (id from query_topology)");
+    const std::vector<int> edges = edge_ids_arg(params, "fillet");
     const double radius = params.value("radius", 1.0);
     if (radius <= 0) throw std::runtime_error("radius must be > 0");
     CadDocument& doc = panel->mcp_doc();
     if (doc.bodies.empty()) throw std::runtime_error("no body to fillet");
     int bi = target_body_arg(params, doc);
     doc.checkpoint();
-    int f = doc.add_fillet(radius, params["edge"].get<int>(), "Fillet");
+    int f = doc.add_fillet(radius, edges, "Fillet");
     if (bi >= 0) doc.features[f].target_body = bi;   // edge id resolved against THIS body's shape
     bool ok = doc.recompute();
     if (!ok) { const std::string why = doc.error; doc.undo(); doc.error = why; }
@@ -887,14 +901,14 @@ json action_fillet(DesignPanel* panel, const json& params)
 
 json action_chamfer(DesignPanel* panel, const json& params)
 {
-    if (!params.contains("edge")) throw std::runtime_error("chamfer needs 'edge' (id from query_topology)");
+    const std::vector<int> edges = edge_ids_arg(params, "chamfer");
     const double dist = params.value("distance", 1.0);
     if (dist <= 0) throw std::runtime_error("distance must be > 0");
     CadDocument& doc = panel->mcp_doc();
     if (doc.bodies.empty()) throw std::runtime_error("no body to chamfer");
     int bi = target_body_arg(params, doc);
     doc.checkpoint();
-    int c = doc.add_chamfer(dist, params["edge"].get<int>(), "Chamfer");
+    int c = doc.add_chamfer(dist, edges, "Chamfer");
     if (bi >= 0) doc.features[c].target_body = bi;   // edge id resolved against THIS body's shape
     bool ok = doc.recompute();
     if (!ok) { const std::string why = doc.error; doc.undo(); doc.error = why; }

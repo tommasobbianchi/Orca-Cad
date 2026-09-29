@@ -3445,10 +3445,20 @@ void DesignSketchTool::clear_solid_selection()
     m_solid_sel = SolidSel::None;
     m_sel_body = m_sel_face = m_sel_edge = -1;
     m_sel_edge_pts.clear();
+    m_sel_edges_more.clear();
+    m_sel_edges_more_pts.clear();
     // The pre-highlight names a face/edge/vertex by index into a shape that a recompute has just
     // rebuilt, so it expires with the selection it was a promise about. Left behind it would keep
     // glowing on whatever now sits at those indices — a real entity, but not the one meant.
     m_pre = SolidPick{};
+}
+
+std::vector<int> DesignSketchTool::selected_edges() const
+{
+    if (m_solid_sel != SolidSel::Edge || m_sel_edge < 0) return {};
+    std::vector<int> out = m_sel_edges_more;
+    out.push_back(m_sel_edge);
+    return out;
 }
 
 void DesignSketchTool::select_body(int body)
@@ -3463,6 +3473,8 @@ void DesignSketchTool::select_body(int body)
     m_sel_body  = body;
     m_sel_face  = m_sel_edge = -1;
     m_sel_edge_pts.clear();
+    m_sel_edges_more.clear();
+    m_sel_edges_more_pts.clear();
     m_solid_sel = SolidSel::Whole;   // render_solid_highlight tints just this body
 }
 
@@ -3683,6 +3695,42 @@ bool DesignSketchTool::handle_solid_click(GLCanvas3D& canvas, const wxMouseEvent
     const int      prev_body = m_sel_body, prev_face = m_sel_face, prev_edge = m_sel_edge;
     const Vec3d    prev_vtx  = m_sel_vertex_pt;
 
+    // SHIFT/CTRL+CLICK ON AN EDGE BUILDS AN EDGE SET, the same modifiers that extend a sketch
+    // selection. Only edges of the one body already picked: a dress-up acts on one body, and a
+    // set spanning two could not be applied. An edge already in the set leaves it; the last one
+    // leaving clears the selection. No escalation to the whole body here — a modified click is
+    // always about the set.
+    const bool extend = evt.ShiftDown() || evt.ControlDown() || evt.CmdDown();
+    if (extend && p.kind == SolidSel::Edge && prev_kind == SolidSel::Edge && p.body == prev_body) {
+        auto more = std::find(m_sel_edges_more.begin(), m_sel_edges_more.end(), p.edge);
+        if (p.edge == prev_edge) {
+            if (m_sel_edges_more.empty()) {
+                clear_solid_selection();
+            } else {                          // the previous pick becomes the current one
+                m_sel_edge     = m_sel_edges_more.back();
+                m_sel_edge_pts = std::move(m_sel_edges_more_pts.back());
+                m_sel_edges_more.pop_back();
+                m_sel_edges_more_pts.pop_back();
+            }
+        } else if (more != m_sel_edges_more.end()) {
+            const size_t k = size_t(more - m_sel_edges_more.begin());
+            m_sel_edges_more.erase(more);
+            m_sel_edges_more_pts.erase(m_sel_edges_more_pts.begin() + k);
+        } else {
+            m_sel_edges_more.push_back(prev_edge);
+            m_sel_edges_more_pts.push_back(std::move(m_sel_edge_pts));
+            m_sel_edge     = p.edge;
+            m_sel_edge_pts = std::move(p.edge_pts);
+            m_sel_face     = p.face;
+        }
+        dp_pick_trace("edge set -> %zu edge(s), current %d", selected_edges().size(), m_sel_edge);
+        if (on_solid_selection_changed)
+            on_solid_selection_changed(int(m_solid_sel), m_sel_body, m_sel_face, m_sel_edge);
+        return true;
+    }
+    m_sel_edges_more.clear();
+    m_sel_edges_more_pts.clear();
+
     m_sel_body      = p.body;
     m_sel_face      = p.face;
     m_sel_edge      = p.edge;
@@ -3871,6 +3919,9 @@ void DesignSketchTool::render_solid_highlight()
 
     render_solid_sel(m_solid_sel, m_sel_body, m_sel_face, m_sel_edge_pts, m_sel_vertex_pt,
                      sel_cyan, 1.0f);
+    if (m_solid_sel == SolidSel::Edge)
+        for (const std::vector<Vec3d>& pts : m_sel_edges_more_pts)
+            render_solid_sel(SolidSel::Edge, m_sel_body, -1, pts, Vec3d::Zero(), sel_cyan, 1.0f);
 }
 
 // Datum/reference planes (Plane feature) have no solid; draw each as a translucent indigo

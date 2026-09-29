@@ -938,6 +938,11 @@ void DesignCanvas::set_on_pattern_changed(std::function<void(double)> cb)
     m_sketch_tool.on_pattern_changed = std::move(cb);
 }
 
+std::vector<int> DesignCanvas::selected_solid_edges() const
+{
+    return m_sketch_tool.selected_edges();
+}
+
 void DesignCanvas::set_on_solid_selection_changed(std::function<void(int, int, int, int)> cb)
 {
     m_sketch_tool.on_solid_selection_changed = std::move(cb);

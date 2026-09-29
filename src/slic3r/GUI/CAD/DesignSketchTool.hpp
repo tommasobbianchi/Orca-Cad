@@ -200,6 +200,10 @@ public:
     void set_pick_only_body(int b) { m_pick_only_body = b; }
     void clear_solid_selection();
     bool has_solid_selection() const { return m_solid_sel != SolidSel::None; }
+    // Every picked edge when the selection is an edge set (Shift/Ctrl+click adds and removes
+    // edges of the same body): the earlier picks first, the last-clicked edge at the end.
+    // Empty unless the selection is at edge level.
+    std::vector<int> selected_edges() const;
     // Select a whole body by index (from the Parts list) — Whole-level highlight, no face/edge.
     // body < 0 or out of range clears the selection.
     void select_body(int body);
@@ -1194,6 +1198,11 @@ private:
     int                     m_sel_face{-1};
     int                     m_sel_edge{-1};
     std::vector<Vec3d>      m_sel_edge_pts;
+    // Edges picked BEFORE m_sel_edge in a Shift/Ctrl+click set, same body, with their world
+    // polylines for the highlight. m_sel_edge stays the last-clicked one, so everything that
+    // reads a single edge (the radius gizmo, the offer header) keeps working unchanged.
+    std::vector<int>                m_sel_edges_more;
+    std::vector<std::vector<Vec3d>> m_sel_edges_more_pts;
     Vec3d                   m_sel_vertex_pt{Vec3d::Zero()};   // world point of a picked vertex
     bool handle_solid_click(GLCanvas3D& canvas, const wxMouseEvent& evt);  // pick + notify
     // What a click at (mx,my) WOULD take, resolved without touching the selection. One

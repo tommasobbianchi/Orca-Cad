@@ -112,6 +112,17 @@ struct CadFeature {
     double      dressup_size{1.0};         // fillet radius or chamfer distance
     FaceGroup   face_group{FaceGroup::All};
     int         dressup_edge{-1};          // global edge id for edge-targeted fillet/chamfer; -1 = use face_group
+    // Several picked edges dressed in ONE operation, all resolved against the same body, so
+    // the ids cannot drift the way they do across a chain of single-edge features. When set,
+    // dressup_edge holds the first of them: a build that predates the list still dresses that
+    // one edge instead of falling back to the whole face group.
+    std::vector<int> dressup_edges;
+    // The edges this dress-up targets: the list, else the single edge, else none (face group).
+    std::vector<int> dressup_edge_ids() const {
+        if (!dressup_edges.empty()) return dressup_edges;
+        if (dressup_edge >= 0) return { dressup_edge };
+        return {};
+    }
 
     // Hole params (positioned circular cut into the current body)
     double      hole_diameter{5};
@@ -383,7 +394,8 @@ struct CadFeature {
                expr,
                mate_kind, mate_cs_a, mate_cs_b, mate_offset, mate_angle, mate_flip,
                coordsys_face_kind, coordsys_face_edges,
-               thread_major_nominal, pattern_inclusive);
+               thread_major_nominal, pattern_inclusive,
+               dressup_edges);
     }
     template<class Archive>
     void load(Archive& ar) {
@@ -423,7 +435,8 @@ struct CadFeature {
                expr,
                mate_kind, mate_cs_a, mate_cs_b, mate_offset, mate_angle, mate_flip,
                coordsys_face_kind, coordsys_face_edges,
-               thread_major_nominal, pattern_inclusive);
+               thread_major_nominal, pattern_inclusive,
+               dressup_edges);
         imported_solid = brep_from_string(brep);
     }
     // The pre-framing (v4) layout, FROZEN. A v4 recipe is one flat stream with no per-feature
@@ -596,8 +609,10 @@ public:
                           BooleanMode mode, const std::string& name);
     int  add_fillet(double radius, FaceGroup faces, const std::string& name);
     int  add_fillet(double radius, int edge_id, const std::string& name);
+    int  add_fillet(double radius, const std::vector<int>& edge_ids, const std::string& name);
     int  add_chamfer(double distance, FaceGroup faces, const std::string& name);
     int  add_chamfer(double distance, int edge_id, const std::string& name);
+    int  add_chamfer(double distance, const std::vector<int>& edge_ids, const std::string& name);
     int  add_hole(double diameter, double depth, bool through,
                   double x, double y, const SketchPlane& plane,
                   const std::string& name);

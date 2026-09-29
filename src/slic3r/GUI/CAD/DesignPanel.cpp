@@ -3663,6 +3663,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
         m_sel_solid_body = (level >= 1) ? body : -1;
         m_sel_solid_face = (level == 2) ? face : -1;   // 4 = Vertex: a corner is not its face
         m_sel_solid_edge = (level == 3) ? edge : -1;
+        m_sel_solid_edges = (level == 3) ? m_viewport->selected_solid_edges() : std::vector<int>();
         m_sel_solid_vertex = (level == 4);
         // Keep the hit face even at whole-body level: the cycle's first click means "this body",
         // but the user pointed AT a face and a sketch should be able to use it. 3a2.
@@ -3851,7 +3852,9 @@ DesignPanel::DesignPanel(wxWindow* parent)
         set_status(level == 4 ? bodytag + _L("vertex selected — click again for the whole body")
                          : level == 1 ? bodytag + _L("selected (whole body) — right-click for what applies to it")
                          : level == 2 ? bodytag + wxString::Format(_L("face %d selected — right-click to push/pull it, or click again for the whole body"), face)
-                         : level == 3 ? bodytag + wxString::Format(_L("edge %d selected — Fillet/Chamfer to dress it, or click again for the whole body"), edge)
+                         : level == 3 && m_sel_solid_edges.size() > 1
+                                      ? bodytag + wxString::Format(_L_PLURAL("%zu edge selected — Shift+click adds or removes one, Fillet/Chamfer dresses them all", "%zu edges selected — Shift+click adds or removes one, Fillet/Chamfer dresses them all", m_sel_solid_edges.size()), m_sel_solid_edges.size())
+                         : level == 3 ? bodytag + wxString::Format(_L("edge %d selected — Shift+click to add edges, or click again for the whole body"), edge)
                                       : _L("Nothing selected"));
         m_status->Refresh();
     });
@@ -5064,13 +5067,14 @@ void DesignPanel::on_add_dressup()
     bool      fillet = (m_dressup_type->GetSelection() == 0);
 
     m_feature_counter++;
-    // A click-selected solid edge targets THAT edge; otherwise dress the whole face-group.
+    // Click-selected solid edges are the target; otherwise dress the whole face-group.
     int didx = -1;
-    if (m_sel_solid_edge >= 0) {
+    const std::vector<int> edges = dressup_edges();
+    if (!edges.empty()) {
         if (fillet)
-            didx = m_doc.add_fillet(sz, m_sel_solid_edge, feature_name(_L("Fillet")));
+            didx = m_doc.add_fillet(sz, edges, feature_name(_L("Fillet")));
         else
-            didx = m_doc.add_chamfer(sz, m_sel_solid_edge, feature_name(_L("Chamfer")));
+            didx = m_doc.add_chamfer(sz, edges, feature_name(_L("Chamfer")));
     } else if (fillet)
         didx = m_doc.add_fillet(sz, fg, feature_name(_L("Fillet")));
     else
@@ -6383,8 +6387,13 @@ wxString DesignPanel::offer_header(int kind) const
     case OfferSel::FacePlanar: return wxString::Format(_L("Flat face %d of %s"), m_sel_solid_face, body());
     case OfferSel::FaceCyl:    return wxString::Format(_L("Cylindrical face %d of %s"), m_sel_solid_face, body());
     case OfferSel::FaceOther:  return wxString::Format(_L("Face %d of %s"), m_sel_solid_face, body());
-    case OfferSel::EdgeStr:    return wxString::Format(_L("Straight edge %d of %s"), m_sel_solid_edge, body());
-    case OfferSel::EdgeCirc:   return wxString::Format(_L("Circular edge %d of %s"), m_sel_solid_edge, body());
+    case OfferSel::EdgeStr:
+    case OfferSel::EdgeCirc:
+        if (dressup_edges().size() > 1)
+            return wxString::Format(_L_PLURAL("%zu edge of %s", "%zu edges of %s", dressup_edges().size()), dressup_edges().size(), body());
+        return OfferSel(kind) == OfferSel::EdgeStr
+            ? wxString::Format(_L("Straight edge %d of %s"), m_sel_solid_edge, body())
+            : wxString::Format(_L("Circular edge %d of %s"), m_sel_solid_edge, body());
     case OfferSel::Vertex:     return wxString::Format(_L("Vertex of %s"), body());
     case OfferSel::SkLoop:     return _L("Sketch profile");
     case OfferSel::SkNone:     return _L("Sketch — nothing selected");
@@ -8999,7 +9008,8 @@ void DesignPanel::load_feature_into_dialog(const CadFeature& f)
         m_dressup_type->SetSelection(f.type == CadFeatureType::Fillet ? 0 : 1);
         m_dressup_size->SetValue(f.dressup_size);
         m_face_group->SetSelection(static_cast<int>(f.face_group));
-        m_sel_solid_edge = f.dressup_edge;   // preserve edge-targeting on re-edit
+        m_sel_solid_edges = f.dressup_edge_ids();   // preserve edge-targeting on re-edit
+        m_sel_solid_edge  = m_sel_solid_edges.empty() ? -1 : m_sel_solid_edges.back();
         m_sel_solid_body = f.target_body;    // preserve which body on re-edit
         sync_dressup_target();               // and say which of the two the re-edit is targeting
         break;
@@ -9658,8 +9668,12 @@ CadFeature DesignPanel::build_candidate(Tool t) const
                                                                : CadFeatureType::Chamfer;
         f.dressup_size = m_dressup_size->GetValue();
         f.face_group   = static_cast<FaceGroup>(m_face_group->GetSelection());
-        // A click-selected solid edge overrides the face-group: dress THAT edge.
-        f.dressup_edge = m_sel_solid_edge;   // -1 when no edge picked
+        // Click-selected solid edges override the face-group: dress THOSE edges.
+        {
+            const std::vector<int> edges = dressup_edges();
+            f.dressup_edge  = edges.empty() ? -1 : edges.front();   // -1 when no edge picked
+            f.dressup_edges = edges.size() > 1 ? edges : std::vector<int>();
+        }
         break;
     case Tool::Hole:
         f.type          = CadFeatureType::Hole;
@@ -9928,12 +9942,21 @@ CadFeature DesignPanel::build_candidate(Tool t) const
 // user picked in the viewport, or the face-group. build_dressup reads m_sel_solid_edge first and
 // only falls back to the group, so when an edge is picked the group combo is inert — grey it out
 // rather than leave it showing a value it will not use.
+std::vector<int> DesignPanel::dressup_edges() const
+{
+    if (m_sel_solid_edge < 0) return {};
+    if (!m_sel_solid_edges.empty() && m_sel_solid_edges.back() == m_sel_solid_edge)
+        return m_sel_solid_edges;
+    return { m_sel_solid_edge };
+}
+
 void DesignPanel::sync_dressup_target()
 {
     if (m_dressup_edge_label == nullptr) return;
-    const bool have_edge = (m_sel_solid_edge >= 0);
-    m_dressup_edge_label->SetLabel(have_edge
-        ? wxString::Format(_L("Edge %d"), m_sel_solid_edge)
+    const size_t n = dressup_edges().size();
+    const bool have_edge = n > 0;
+    m_dressup_edge_label->SetLabel(n > 1 ? wxString::Format(_L_PLURAL("%zu edge", "%zu edges", n), n)
+        : have_edge ? wxString::Format(_L("Edge %d"), m_sel_solid_edge)
         : _L("(no edge picked — group below)"));
     if (m_face_group != nullptr) m_face_group->Enable(!have_edge);
     m_dressup_edge_label->Refresh();

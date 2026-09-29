@@ -362,28 +362,42 @@ TopoDS_Shape GeometryEngine::apply_chamfer(const TopoDS_Shape& solid, double dis
 
 TopoDS_Shape GeometryEngine::apply_fillet(const TopoDS_Shape& solid, double radius, int edge_id)
 {
-    if (radius <= 0.001) throw std::runtime_error("the fillet radius must be greater than 0");
+    return apply_fillet(solid, radius, std::vector<int>{ edge_id });
+}
 
-    TopoDS_Edge edge = edge_by_index(solid, edge_id);
-    if (edge.IsNull()) throw std::runtime_error("apply_fillet: invalid edge id");
+TopoDS_Shape GeometryEngine::apply_chamfer(const TopoDS_Shape& solid, double distance, int edge_id)
+{
+    return apply_chamfer(solid, distance, std::vector<int>{ edge_id });
+}
+
+TopoDS_Shape GeometryEngine::apply_fillet(const TopoDS_Shape& solid, double radius, const std::vector<int>& edge_ids)
+{
+    if (radius <= 0.001) throw std::runtime_error("the fillet radius must be greater than 0");
+    if (edge_ids.empty()) throw std::runtime_error("apply_fillet: no edge picked");
 
     BRepFilletAPI_MakeFillet mk(solid);
-    mk.Add(radius, edge);
+    for (int id : edge_ids) {
+        TopoDS_Edge edge = edge_by_index(solid, id);
+        if (edge.IsNull()) throw std::runtime_error("apply_fillet: invalid edge id");
+        mk.Add(radius, edge);
+    }
     mk.Build();
 
     if (!mk.IsDone()) throw std::runtime_error("apply_fillet: OCCT fillet failed");
     return mk.Shape();
 }
 
-TopoDS_Shape GeometryEngine::apply_chamfer(const TopoDS_Shape& solid, double distance, int edge_id)
+TopoDS_Shape GeometryEngine::apply_chamfer(const TopoDS_Shape& solid, double distance, const std::vector<int>& edge_ids)
 {
     if (distance <= 0.001) throw std::runtime_error("the chamfer distance must be greater than 0");
-
-    TopoDS_Edge edge = edge_by_index(solid, edge_id);
-    if (edge.IsNull()) throw std::runtime_error("apply_chamfer: invalid edge id");
+    if (edge_ids.empty()) throw std::runtime_error("apply_chamfer: no edge picked");
 
     BRepFilletAPI_MakeChamfer mk(solid);
-    mk.Add(distance, edge);
+    for (int id : edge_ids) {
+        TopoDS_Edge edge = edge_by_index(solid, id);
+        if (edge.IsNull()) throw std::runtime_error("apply_chamfer: invalid edge id");
+        mk.Add(distance, edge);
+    }
     mk.Build();
 
     if (!mk.IsDone()) throw std::runtime_error("apply_chamfer: OCCT chamfer failed");
