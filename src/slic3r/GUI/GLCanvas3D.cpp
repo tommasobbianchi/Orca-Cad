@@ -3305,63 +3305,10 @@ void GLCanvas3D::on_char(wxKeyEvent& evt)
         return;
     }
 
-    // Design tab: Delete/Backspace removes the selected sketch entities while a
-    // sketch tool is active and the canvas has focus (dialog text fields are separate
-    // wx controls, so this never eats their editing keys).
-#ifdef SLIC3R_CAD
-    if (m_design_sketch_tool != nullptr && m_design_sketch_tool->is_active()
-        && (keyCode == WXK_DELETE || keyCode == WXK_BACK)
-        && !m_design_sketch_tool->selection().empty()) {
-        m_design_sketch_tool->delete_selected();
-        m_dirty = true;
-        render();
-        return;
-    }
-#endif
-
-    // Esc exits the active sketch tool (Onshape-like, layered: abort in-progress entity ->
-    // drop to Select -> exit the session back to Feature mode).
-#ifdef SLIC3R_CAD
-    if (m_design_sketch_tool != nullptr && m_design_sketch_tool->is_active()
-        && keyCode == WXK_ESCAPE) {
-        m_design_sketch_tool->request_exit();
-        m_dirty = true;
-        render();
-        return;
-    }
-#endif
-
-    // Design tab: Ctrl+Z / Ctrl+Shift+Z (and Ctrl+Y) undo/redo the Design feature
-    // history. Scoped by m_design_sketch_tool — only the Design canvas owns one — so the
-    // main 3D editor's undo/redo (the CanvasView3D-gated cases further below) is untouched.
-    // Handled here, before the generic Ctrl block, so it takes precedence and early-returns.
-#ifdef SLIC3R_CAD
-    if (m_design_sketch_tool != nullptr && (evt.GetModifiers() & ctrlMask) != 0) {
-        const bool is_z = (keyCode == 'z' || keyCode == 'Z' || keyCode == WXK_CONTROL_Z);
-        const bool is_y = (keyCode == 'y' || keyCode == 'Y' || keyCode == WXK_CONTROL_Y);
-        if (is_z || is_y) {
-            const bool redo = is_y || ((evt.GetModifiers() & shiftMask) != 0);
-            m_design_sketch_tool->request_undo_redo(redo);
-            m_dirty = true;
-            render();
-            return;
-        }
-    }
-#endif
-
-    // Design tab: F = Place on Face (Prepare's lay-flat), when the Design viewport is up
-    // and a body face is selected. The tool forwards to DesignPanel::place_on_face; it returns
-    // false (no face picked) so F falls through to the default handler below.
-#ifdef SLIC3R_CAD
-    if (m_design_sketch_tool != nullptr && m_design_sketch_tool->has_display()
-        && (keyCode == 'f' || keyCode == 'F') && (evt.GetModifiers() & ctrlMask) == 0) {
-        if (m_design_sketch_tool->request_place_on_face()) {
-            m_dirty = true;
-            render();
-            return;
-        }
-    }
-#endif
+    // Design tab: Delete, Esc, Ctrl+Z/Y and F are NOT handled here. DesignPanel's CHAR_HOOK owns
+    // them (one route per key, whatever holds focus) and only lets a key through to this canvas
+    // when an in-canvas value field is open -- which is exactly when Backspace must edit the
+    // number rather than delete the geometry it measures.
 
     bool is_in_painting_mode = false;
     GLGizmoPainterBase *current_gizmo_painter = dynamic_cast<GLGizmoPainterBase *>(get_gizmos_manager().get_current());
@@ -3740,20 +3687,6 @@ public:
 
 void GLCanvas3D::on_key(wxKeyEvent& evt)
 {
-    // Design tab: Delete/Backspace removes selected sketch entities. GTK delivers
-    // these as KEY_DOWN rather than CHAR, so handle it here too.
-#ifdef SLIC3R_CAD
-    if (evt.GetEventType() == wxEVT_KEY_DOWN
-        && m_design_sketch_tool != nullptr && m_design_sketch_tool->is_active()
-        && (evt.GetKeyCode() == WXK_DELETE || evt.GetKeyCode() == WXK_BACK)
-        && !m_design_sketch_tool->selection().empty()) {
-        m_design_sketch_tool->delete_selected();
-        m_dirty = true;
-        render();
-        return;
-    }
-#endif
-
     static GLCanvas3D const * thiz = nullptr;
     static TranslationProcessor translationProcessor(nullptr, nullptr);
     if (thiz != this) {

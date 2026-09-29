@@ -1,6 +1,7 @@
 #include "slic3r/GUI/CAD/DesignPanel.hpp"
 #include "slic3r/GUI/CAD/DesignCanvas.hpp"
 #include "slic3r/GUI/CAD/DesignSketchTool.hpp"
+#include "slic3r/GUI/CAD/DesignTextDialog.hpp"           // Text: font, height, live outline
 #include "slic3r/GUI/CAD/DesignOffer.hpp"                // generated offer table — see docs/ux/tool_atlas.json
 #include "libslic3r/CAD/GeometryEngine.hpp"   // face_by_index for face-extrude gizmo anchor
 #include "libslic3r/TriangleMesh.hpp"     // mesh import: STL/OBJ -> indexed_triangle_set
@@ -276,25 +277,6 @@ static SketchPlane face_plane_inward(const TopoDS_Face& face)
     return p;
 }
 
-// Highest upward-facing planar face of a solid — the surface the user is looking down on.
-// Hole placement defaults here (instead of the z=0 datum) so the footprint sits on the top
-// face at the right depth, not on the model's underside where a top-view drag reads parallax-
-// shifted. Returns -1 if the shape has no clearly-upward face.
-static int top_face_index_of(const TopoDS_Shape& shape)
-{
-    int best = -1; double bestz = -1e30;
-    const int n = GeometryEngine::face_count(shape);
-    for (int i = 0; i < n; ++i) {
-        const TopoDS_Face f = GeometryEngine::face_by_index(shape, i);
-        if (f.IsNull()) continue;
-        const Vec3d nrm = GeometryEngine::face_normal_world(f);
-        if (nrm.z() < 0.5) continue;                 // only faces pointing substantially up
-        const Vec3d c = GeometryEngine::face_centroid_world(f);
-        if (c.z() > bestz) { bestz = c.z(); best = i; }
-    }
-    return best;
-}
-
 DesignPanel::DesignPanel(wxWindow* parent)
     : wxPanel(parent, wxID_ANY)
 {
@@ -393,23 +375,21 @@ DesignPanel::DesignPanel(wxWindow* parent)
             m_viewport->set_sketch_tool(mode);
         }
         m_viewport->set_sketch_construction(m_construction->GetValue());
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(m_sketch_on.IsEmpty() ? hint
+        set_status(StatusKind::Info, m_sketch_on.IsEmpty() ? hint
                            : wxString::Format(_L("%s  ·  on %s"), hint, m_sketch_on));
-        m_status->Refresh();
     };
 
     // Sketch-tool shortcuts (single letters, active only while a sketch is open). Family tools
     // bind to their default mode; the other modes stay in the toolbar flyout. Registered here
     // where select_tool is in scope; the closures run at key-press time (members are live by then).
     auto sk_key = [this, select_tool](int ch, DesignSketchTool::Mode m, const wxString& h) {
-        m_keys_sketch[ch] = [this, select_tool, m, h] { select_tool(m, h); };
+        m_keys_sketch[ch] = [select_tool, m, h] { select_tool(m, h); };
     };
     sk_key('L', DesignSketchTool::Mode::Line,         _L("Line — click start, then end"));
     sk_key('R', DesignSketchTool::Mode::CornerRect,   _L("Rectangle — click two opposite corners"));
     sk_key('C', DesignSketchTool::Mode::CenterCircle, _L("Circle — click center, then radius"));
     sk_key('A', DesignSketchTool::Mode::ThreePointArc,_L("Arc — click start, end, then a point"));
-    sk_key('S', DesignSketchTool::Mode::Slot,         _L("Slot — two centerline ends, then end radius"));
+    sk_key('S', DesignSketchTool::Mode::Slot,         _L("Slot — two centerline ends, then the width"));
     sk_key('E', DesignSketchTool::Mode::Ellipse,      _L("Ellipse — center, major end, minor point"));
     sk_key('B', DesignSketchTool::Mode::BSpline,      _L("Spline — click control points"));
     sk_key('P', DesignSketchTool::Mode::Point,        _L("Point — click to place"));
@@ -446,9 +426,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
     // exactly normal. Sketch map only: in Feature mode the navigator orb owns orientation.
     m_keys_sketch['N'] = [this] {
         if (m_viewport && m_viewport->view_normal_to_sketch()) {
-            m_status->SetForegroundColour(wxNullColour);
-            set_status(_L("Normal to the sketch plane"));
-            m_status->Refresh();
+            set_status(StatusKind::Info, _L("Normal to the sketch plane"));
         }
     };
     m_keys_sketch['Q'] = [this] {
@@ -474,9 +452,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
     // View toggles (single letters, active when no sketch is open): P origin planes, A world
     // axes, X section view (Alt+Wheel slides the cut). Distinct from Shift+P/Shift+X features.
     auto status_flag = [this](const wxString& on_msg, const wxString& off_msg, bool on) {
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(on ? on_msg : off_msg);
-        m_status->Refresh();
+        set_status(StatusKind::Info, on ? on_msg : off_msg);
     };
     m_keys_feature['P'] = [this, status_flag] {
         if (m_viewport) status_flag(_L("Origin planes shown"), _L("Origin planes hidden"),
@@ -487,6 +463,9 @@ DesignPanel::DesignPanel(wxWindow* parent)
                                     m_viewport->toggle_axes());
     };
     m_keys_feature['X'] = [this] { toggle_section_view(); };   // toggle the single section on/off
+    // F: Place on Face. Lives in this map, not in the canvas, so it works whatever holds focus
+    // (charter 6.2). While the section view is on, F flips the kept half instead (handled above).
+    m_keys_feature['F'] = [this] { place_on_face(); };
 
     // Home: axonometric view, fitted to the model.
     //
@@ -502,7 +481,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
     m_keys_feature[WXK_HOME] = [this] {
         if (!m_viewport) return;
         m_viewport->set_view("iso");
-        set_status(_L("Isometric view, fitted"));
+        set_status(_L("Axonometric view, fitted"));
     };
 
     // Commit to Plate and the bed toggle were mouse-only: a toolbar button and a checkbox with
@@ -640,11 +619,9 @@ DesignPanel::DesignPanel(wxWindow* parent)
             set_ui_mode(UiMode::Sketch);
             wxString where;
             const bool have_plane = sketch_plane_target(where);
-            m_status->SetForegroundColour(wxNullColour);
-            set_status(have_plane
+            set_status(StatusKind::Info, have_plane
                 ? wxString::Format(_L("Sketching on %s — pick a tool"), where)
                 : _L("Click a face or a reference plane in the viewport, then a sketch tool"));
-            m_status->Refresh();
             if (m_sketch_hint) {   // the card must agree with the status line, not argue with it
                 m_sketch_hint->SetLabel(have_plane
                     ? wxString::Format(_L("Drawing on %s.\nPick a tool, or press Menu for the list."), where)
@@ -678,9 +655,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
                 m_extrude_face_src   = -1;   // ordinary sketch/loop extrude
                 m_extrude_sketch_ref = resolve_extrude_sketch();
                 if (m_extrude_sketch_ref < 0) {
-                    m_status->SetForegroundColour(wxColour(235, 110, 110));
-                    set_status(_L("Create a sketch, or pick a solid face, first"));
-                    m_status->Refresh();
+                    set_status(StatusKind::Error, _L("Create a sketch, or pick a solid face, first"));
                     return;
                 }
                 open_tool(Tool::Extrude);
@@ -689,9 +664,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
              [this] {
                 m_revolve_sketch_ref = resolve_extrude_sketch();
                 if (m_revolve_sketch_ref < 0) {
-                    m_status->SetForegroundColour(wxColour(235, 110, 110));
-                    set_status(_L("Create a sketch profile to revolve first"));
-                    m_status->Refresh();
+                    set_status(StatusKind::Error, _L("Create a sketch profile to revolve first"));
                     return;
                 }
                 open_tool(Tool::Revolve);
@@ -701,9 +674,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
                 m_sweep_profile_ref = resolve_extrude_sketch();
                 m_sweep_path_ref    = -1;   // fresh sweep: default the picker to the first sketch
                 if (m_sweep_profile_ref < 0) {
-                    m_status->SetForegroundColour(wxColour(235, 110, 110));
-                    set_status(_L("Create a profile sketch to sweep first"));
-                    m_status->Refresh();
+                    set_status(StatusKind::Error, _L("Create a profile sketch to sweep first"));
                     return;
                 }
                 open_tool(Tool::Sweep);
@@ -715,9 +686,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
                 for (const auto& f : m_doc.features)
                     if (f.type == CadFeatureType::Sketch) ++n;
                 if (n < 2) {
-                    m_status->SetForegroundColour(wxColour(235, 110, 110));
-                    set_status(_L("Create at least two profile sketches to loft"));
-                    m_status->Refresh();
+                    set_status(StatusKind::Error, _L("Create at least two profile sketches to loft"));
                     return;
                 }
                 m_loft_refs.clear();   // fresh loft: nothing pre-checked
@@ -726,9 +695,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
             {"design_thicken", _L("Thicken"), _L("Offset a solid face into a thin plate (new body)"),
              [this] {
                 if (m_doc.bodies.empty()) {
-                    m_status->SetForegroundColour(wxColour(235, 110, 110));
-                    set_status(_L("Thicken needs a solid body — add or import one first"));
-                    m_status->Refresh();
+                    set_status(StatusKind::Error, _L("Thicken needs a solid body — add or import one first"));
                     return;
                 }
                 {
@@ -756,9 +723,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
             {"design_rib", _L("Rib"), _L("Grow a thin wall from an open sketch line, fused to a body"),
              [this] {
                 if (m_doc.bodies.empty()) {
-                    m_status->SetForegroundColour(wxColour(235, 110, 110));
-                    set_status(_L("Rib needs a solid body — add or import one first"));
-                    m_status->Refresh();
+                    set_status(StatusKind::Error, _L("Rib needs a solid body — add or import one first"));
                     return;
                 }
                 {
@@ -784,9 +749,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
                     }
                     if (m_rib_sketch->GetCount() > 0) m_rib_sketch->SetSelection(0);
                     else {
-                        m_status->SetForegroundColour(wxColour(235, 110, 110));
-                        set_status(_L("Create a sketch with an open line first"));
-                        m_status->Refresh();
+                        set_status(StatusKind::Error, _L("Create a sketch with an open line first"));
                         return;
                     }
                 }
@@ -801,9 +764,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
         std::function<void()> act_pattern = [this] {
             // Pattern replicates an existing body — needs at least one solid.
             if (m_doc.bodies.empty()) {
-                m_status->SetForegroundColour(wxColour(235, 110, 110));
-                set_status(_L("Create a solid body to pattern first"));
-                m_status->Refresh();
+                set_status(StatusKind::Error, _L("Create a solid body to pattern first"));
                 return;
             }
             open_tool(Tool::Pattern);
@@ -823,9 +784,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
              [this] {
                 m_surf_extrude_sketch_ref = resolve_extrude_sketch();
                 if (m_surf_extrude_sketch_ref < 0) {
-                    m_status->SetForegroundColour(wxColour(235, 110, 110));
-                    set_status(_L("Create a sketch first"));
-                    m_status->Refresh();
+                    set_status(StatusKind::Error, _L("Create a sketch first"));
                     return;
                 }
                 open_tool(Tool::SurfaceExtrude);
@@ -834,9 +793,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
              [this] {
                 m_surf_revolve_sketch_ref = resolve_extrude_sketch();
                 if (m_surf_revolve_sketch_ref < 0) {
-                    m_status->SetForegroundColour(wxColour(235, 110, 110));
-                    set_status(_L("Create a sketch profile to revolve first"));
-                    m_status->Refresh();
+                    set_status(StatusKind::Error, _L("Create a sketch profile to revolve first"));
                     return;
                 }
                 open_tool(Tool::SurfaceRevolve);
@@ -847,9 +804,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
                 for (const auto& f : m_doc.features)
                     if (f.type == CadFeatureType::Sketch) ++n;
                 if (n < 2) {
-                    m_status->SetForegroundColour(wxColour(235, 110, 110));
-                    set_status(_L("Create at least two profile sketches to loft"));
-                    m_status->Refresh();
+                    set_status(StatusKind::Error, _L("Create at least two profile sketches to loft"));
                     return;
                 }
                 m_surf_loft_refs.clear();
@@ -859,9 +814,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
              [this] {
                 m_surf_fill_sketch_ref = resolve_extrude_sketch();
                 if (m_surf_fill_sketch_ref < 0) {
-                    m_status->SetForegroundColour(wxColour(235, 110, 110));
-                    set_status(_L("Create a sketch profile to fill first"));
-                    m_status->Refresh();
+                    set_status(StatusKind::Error, _L("Create a sketch profile to fill first"));
                     return;
                 }
                 open_tool(Tool::SurfaceFill);
@@ -870,9 +823,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
              [this] {
                 populate_sheet_body_choices(m_surf_offset_body);
                 if (m_surf_offset_body->GetCount() == 0) {
-                    m_status->SetForegroundColour(wxColour(235, 110, 110));
-                    set_status(_L("No sheet body to offset — create a surface feature first"));
-                    m_status->Refresh();
+                    set_status(StatusKind::Error, _L("No sheet body to offset — create a surface feature first"));
                     return;
                 }
                 open_tool(Tool::SurfaceOffset);
@@ -881,9 +832,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
              [this] {
                 populate_sheet_body_choices(m_surf_thicken_body);
                 if (m_surf_thicken_body->GetCount() == 0) {
-                    m_status->SetForegroundColour(wxColour(235, 110, 110));
-                    set_status(_L("No sheet body to thicken — create a surface feature first"));
-                    m_status->Refresh();
+                    set_status(StatusKind::Error, _L("No sheet body to thicken — create a surface feature first"));
                     return;
                 }
                 open_tool(Tool::ThickenSurface);
@@ -904,7 +853,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
                  reset_axis_refs();
                  open_tool(Tool::Axis);
              }, SHIFT('A')},
-            {"design_point", _L("Coord Sys"), _L("Datum coordinate system (world point, or face + direction edge)"),
+            {"design_point", _L("Coordinate system"), _L("Datum coordinate system (world point, or face + direction edge)"),
              [this] {
                  reset_coordsys_refs();
                  open_tool(Tool::CoordSys);
@@ -919,9 +868,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
             {"design_sketch", _L("Project"), _L("Project body edges onto a plane as sketch entities"),
              [this] {
                 if (m_doc.bodies.empty()) {
-                    m_status->SetForegroundColour(wxColour(235, 110, 110));
-                    set_status(_L("Project needs a body — add or import one first"));
-                    m_status->Refresh();
+                    set_status(StatusKind::Error, _L("Project needs a body — add or import one first"));
                     return;
                 }
                 {
@@ -935,8 +882,14 @@ DesignPanel::DesignPanel(wxWindow* parent)
                                                        int(m_proj_source_body->GetCount()) - 1));
                 }
                 populate_plane_choices(m_proj_plane);
-                m_sel_solid_face = -1;
-                m_proj_face_label->SetLabel(_L("(all edges)"));
+                // Keep what the user pointed at (L3): a picked face on the source body is the
+                // face to project, exactly as the offer promised when it showed Project on it.
+                // Only a pick on ANOTHER body is dropped, since it cannot belong to this source.
+                const int src = m_proj_source_body->GetSelection();
+                if (m_sel_solid_face >= 0 && m_sel_solid_body != src) m_sel_solid_face = -1;
+                m_proj_face_label->SetLabel(m_sel_solid_face >= 0
+                    ? wxString::Format(_L("Face %d"), m_sel_solid_face)
+                    : _L("(all edges)"));
                 open_tool(Tool::Project);
              }, 0},
         });
@@ -952,9 +905,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
             {"design_move", _L("Transform"), _L("Move and/or rotate an existing body"),
              [this] {
                 if (m_doc.bodies.empty()) {
-                    m_status->SetForegroundColour(wxColour(235, 110, 110));
-                    set_status(_L("Transform needs a body — add or import one first"));
-                    m_status->Refresh();
+                    set_status(StatusKind::Error, _L("Transform needs a body — add or import one first"));
                     return;
                 }
                 {
@@ -972,9 +923,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
             {"design_mirror", _L("Mirror"), _L("Reflect a body about a plane"),
              [this] {
                 if (m_doc.bodies.empty()) {
-                    m_status->SetForegroundColour(wxColour(235, 110, 110));
-                    set_status(_L("Mirror needs a body — add or import one first"));
-                    m_status->Refresh();
+                    set_status(StatusKind::Error, _L("Mirror needs a body — add or import one first"));
                     return;
                 }
                 {
@@ -990,7 +939,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
                 populate_plane_choices(m_mirror_plane);
                 open_tool(Tool::Mirror);
              }, SHIFT('Z')},
-            {"design_c_coincident", _L("Mate"), _L("Assembly: align two CoordSys features (fastened, planar, revolute, slider, cylindrical)"),
+            {"design_c_coincident", _L("Mate"), _L("Assembly: align two coordinate systems (fastened, planar, revolute, slider, cylindrical)"),
              [this] {
                  open_tool(Tool::Mate);
              }, 0},
@@ -1008,9 +957,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
         std::function<void()> act_cut = [this] {
             // A plane cut needs at least one solid to slice.
             if (m_doc.bodies.empty()) {
-                m_status->SetForegroundColour(wxColour(235, 110, 110));
-                set_status(_L("Create a solid body to cut first"));
-                m_status->Refresh();
+                set_status(StatusKind::Error, _L("Create a solid body to cut first"));
                 return;
             }
             populate_plane_choices(m_cut_plane);
@@ -1024,7 +971,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
                                 _L("Cut — needs a solid body to slice")});
 
         // Color — override the selected body's display colour (per-body, survives recompute).
-        auto* b_color = icon_btn("color_palette", _L("Color — set the selected body's display colour"));
+        auto* b_color = icon_btn("color_palette", _L("Color — set the selected body's display color"));
         b_color->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_set_body_color(); });
         fadd("color", b_color);
         m_verb_actions["btn:colour"] = [this] { on_set_body_color(); };
@@ -1050,9 +997,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
                 const wxTreeItemId row = m_tree_items[sel];
                 CallAfter([this, row] { m_tree->SetFocus(); m_tree->EditLabel(row); });
             } else {
-                m_status->SetForegroundColour(wxNullColour);   // "nothing selected" is not an error
-                set_status(_L("Select a feature, or a body, first — then rename it"));
-                m_status->Refresh();
+                set_status(_L("Select a feature, or a body, first — then rename it"));   // not an error
             }
         };
         m_verb_actions["btn:rename"] = rename_feature;
@@ -1070,6 +1015,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
         m_verb_actions["btn:delete_body"] = [this] { on_delete_body(); };
         m_verb_actions["btn:edit"]   = [this] { on_edit_feature(); };
         m_verb_actions["btn:mass"]   = [this] { on_mass_properties(); };
+        m_verb_actions["btn:interference"] = [this] { on_check_interference(); };
         // Reachable from the offer menu on a SELECTED SKETCH, not only from the toolbar icon.
         // A user evaluating against Onshape reported that "adding constraints seems to be
         // missing" — with nineteen constraint types and a solver shipped. The only paths in
@@ -1093,9 +1039,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
             {"design_delete", _L("Delete Face"), _L("Remove faces from a body and heal the solid"),
              [this] {
                 if (m_doc.bodies.empty()) {
-                    m_status->SetForegroundColour(wxColour(235, 110, 110));
-                    set_status(_L("Delete Face needs a body — add or import one first"));
-                    m_status->Refresh();
+                    set_status(StatusKind::Error, _L("Delete Face needs a body — add or import one first"));
                     return;
                 }
                 {
@@ -1116,7 +1060,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
 
         // Hole / Thread — drilling into a solid (both face-aware)
         feat_dropdown("hole", "design_hole", _L("Hole / thread"), {
-            {"design_hole", _L("Hole"), _L("Drill a hole, centred on a picked face or placed on a plane"),
+            {"design_hole", _L("Hole"), _L("Drill a hole, centerd on a picked face or placed on a plane"),
              [this] {
                 // #2: drill on the picked solid face, centred on it (origin = face centroid,
                 // normal = inward). Otherwise fall back to the plane dropdown. m_hole_x/y then
@@ -1125,13 +1069,13 @@ DesignPanel::DesignPanel(wxWindow* parent)
                 m_hole_face_body = -1;
                 m_hole_has_bounds = false;
                 set_hole_target_label(-1);
-                // Use the explicitly-picked face; otherwise default to the top face of the
-                // selected (or first) body so the hole lands on the surface being viewed, not
-                // the z=0 datum under the model. The XY/XZ/YZ dropdown still overrides.
-                int hb = m_sel_solid_body, hf = m_sel_solid_face;
-                if (hf < 0 && !m_doc.bodies.empty()) {
-                    hb = (hb >= 0 && hb < int(m_doc.bodies.size())) ? hb : 0;
-                    hf = top_face_index_of(m_doc.bodies[hb].shape);
+                // The hole goes where the user pointed (L1): a picked face. The keyboard route
+                // used to invent one — the top face of the first body — while the offer refused
+                // the same verb with nothing picked; both routes now say the same thing.
+                const int hb = m_sel_solid_body, hf = m_sel_solid_face;
+                if (hf < 0 || hb < 0 || hb >= int(m_doc.bodies.size())) {
+                    set_status(StatusKind::Error, _L("Pick a face or a plane to drill into"));
+                    return;
                 }
                 if (hf >= 0 && hb >= 0 && hb < int(m_doc.bodies.size())) {
                     const TopoDS_Face face = GeometryEngine::face_by_index(
@@ -1185,15 +1129,16 @@ DesignPanel::DesignPanel(wxWindow* parent)
                     m_thread_face_body  = m_sel_solid_body;
                     set_thread_target_label(from_face ? m_sel_solid_face : -1,
                                             from_face ? -1 : m_sel_solid_edge);
-                    infer_thread_spec(2.0 * cf.radius);   // M diameter + pitch + depth from the cylinder
-                    if (m_thread_height && cf.height > 1e-6) m_thread_height->SetValue(cf.height);
                     if (m_thread_internal) m_thread_internal->SetValue(cf.internal);
+                    infer_thread_spec(2.0 * cf.radius, cf.internal);   // M size + pitch + depth from the cylinder
+                    if (m_thread_height && cf.height > 1e-6) m_thread_height->SetValue(cf.height);
                     if (m_thread_x) m_thread_x->SetValue(0.0);   // on the axis
                     if (m_thread_y) m_thread_y->SetValue(0.0);
                 } else if (m_sel_solid_face >= 0 || m_sel_solid_edge >= 0) {
-                    m_status->SetForegroundColour(wxColour(235, 110, 110));
-                    set_status(_L("Pick a cylindrical surface (bore / outer) or a circular edge for a thread"));
-                    m_status->Refresh();
+                    // Refuse and stay closed: opening the card anyway overwrote this reason with
+                    // the preview's status one line later, and left a thread card with no target.
+                    set_status(StatusKind::Error, _L("Pick a cylindrical surface (bore / outer) or a circular edge for a thread"));
+                    return;
                 }
                 open_tool(Tool::Thread);
              }, SHIFT('T')},
@@ -1323,7 +1268,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
         // (separator dropped: the group it divided is now reached from the offer)
         dropdown("design_line", _L("Line / polyline"), {
             {"design_line",     DesignSketchTool::Mode::Line,     _L("Line"),     _L("Click start, then end — then set the exact length")},
-            {"design_polyline", DesignSketchTool::Mode::Polyline, _L("Polyline"), _L("Click points; click first / right-click to close the loop")} });
+            {"design_polyline", DesignSketchTool::Mode::Polyline, _L("Polyline"), _L("Click points; click the first point to close the loop, right-click or Enter to end the chain")} });
         dropdown("design_rect", _L("Rectangle"), {
             {"design_rect",         DesignSketchTool::Mode::CornerRect,  _L("Corner rectangle"),  _L("Click two opposite corners")},
             {"design_crect",        DesignSketchTool::Mode::CenterRect,  _L("Center rectangle"),  _L("Click center, then a corner")},
@@ -1338,13 +1283,13 @@ DesignPanel::DesignPanel(wxWindow* parent)
             {"design_tangentarc", DesignSketchTool::Mode::TangentArc,    _L("Tangent arc"),      _L("Click start (on the last entity) then end")},
             {"design_arc_center", DesignSketchTool::Mode::CenterArc,     _L("Center-point arc"), _L("Click center, then start, then a point for the end angle")} });
         dropdown("design_slot", _L("Slot"), {
-            {"design_slot",     DesignSketchTool::Mode::Slot,    _L("Slot"),     _L("Click two centerline ends, then a point for the end radius")},
+            {"design_slot",     DesignSketchTool::Mode::Slot,    _L("Slot"),     _L("Click two centerline ends, then a point for the width")},
             {"design_slot_arc", DesignSketchTool::Mode::ArcSlot, _L("Arc slot"), _L("Click center, start, end, then a point for the width")} });
         dropdown("design_ellipse", _L("Ellipse"), {
             {"design_ellipse",     DesignSketchTool::Mode::Ellipse,    _L("Ellipse"),        _L("Click center, a major-axis end, then a point for the minor axis")},
             {"design_ellipse_arc", DesignSketchTool::Mode::EllipseArc, _L("Elliptical arc"), _L("Click center, major-axis end, minor point, then arc start and end")} });
         skbtn("design_bspline", DesignSketchTool::Mode::BSpline, _L("Spline"),
-              _L("Click control points; double-click or right-click to finish"));
+              _L("Click control points; double-click, right-click or Enter to finish"));
         skbtn("design_point",   DesignSketchTool::Mode::Point,   _L("Point"),
               _L("Click to place a point"));
         // (separator dropped: the group it divided is now reached from the offer)
@@ -1391,9 +1336,9 @@ DesignPanel::DesignPanel(wxWindow* parent)
         // Trim / Extend scissors — standalone sketch tools (NOT inside Constrain): click a
         // segment to cut it back to / out to its nearest intersection. One cut per click.
         skbtn("design_trim",   DesignSketchTool::Mode::Trim,   _L("Trim"),
-              _L("Click a segment to trim it back to its nearest intersection; right-click exits"));
+              _L("Click a segment to trim it back to its nearest intersection; Esc exits"));
         skbtn("design_extend", DesignSketchTool::Mode::Extend, _L("Extend"),
-              _L("Click a line or arc to extend it to the nearest entity; right-click exits"));
+              _L("Click a line or arc to extend it to the nearest entity; Esc exits"));
         // Constrain — grouped with the edit tools so it's easy to find (nde #13: it was buried
         // far-right next to Construction and went unnoticed). Commits the live sketch in place
         // and drops into Constrain mode (geometric/dimensional palette).
@@ -1445,17 +1390,21 @@ DesignPanel::DesignPanel(wxWindow* parent)
         // Choose FIRST, then open: open_tool() titles the card from m_dressup_type, so setting
         // it afterwards left the header reading "Fillet 1" over a chamfer. Nothing in the
         // opener resets the combo, so this order is safe.
-        m_verb_actions["btn:dress#0"] = [this, open_feature, k_dress] {
+        m_verb_actions["btn:dress#0"] = [this, open_feature] {
             if (m_dressup_type) m_dressup_type->SetSelection(0); open_feature(k_dress); };
-        m_verb_actions["btn:dress#1"] = [this, open_feature, k_dress] {
+        m_verb_actions["btn:dress#1"] = [this, open_feature] {
             if (m_dressup_type) m_dressup_type->SetSelection(1); open_feature(k_dress); };
+        // Same order for all three families: choose the variant, then open, so the card, its
+        // header and the first preview are built for the variant that was picked (a circular
+        // pattern used to open showing the linear ghost and gizmo).
         for (int op = 0; op < 3; ++op)
-            m_verb_actions["btn:bool#" + std::to_string(op)] = [this, open_feature, k_bool, op] {
-                open_feature(k_bool);
-                if (m_bool_op) { m_bool_op->SetSelection(op); refresh_preview(); } };
+            m_verb_actions["btn:bool#" + std::to_string(op)] = [this, open_feature, op] {
+                if (m_bool_op) m_bool_op->SetSelection(op);
+                open_feature(k_bool); };
         for (int t = 0; t < 2; ++t)
-            m_verb_actions["btn:pat#" + std::to_string(t)] = [this, open_feature, k_pat, t] {
-                open_feature(k_pat); if (m_pattern_type) m_pattern_type->SetSelection(t); };
+            m_verb_actions["btn:pat#" + std::to_string(t)] = [this, open_feature, t] {
+                if (m_pattern_type) m_pattern_type->SetSelection(t);
+                open_feature(k_pat); };
 
         auto* b_poly = icon_btn("design_polygon", _L("Polygon"));
         b_poly->Bind(wxEVT_BUTTON, [arm_polygon](wxCommandEvent&) { arm_polygon(); });
@@ -1482,11 +1431,9 @@ DesignPanel::DesignPanel(wxWindow* parent)
                         ? m_viewport->toggle_sketch_construction_selection() : 0;
             if (n > 0) {
                 m_construction->SetValue(!m_construction->GetValue());   // the mode did not move
-                m_status->SetForegroundColour(wxNullColour);
-                set_status(wxString::Format(
+                set_status(StatusKind::Info, wxString::Format(
                     _L("Converted %d entit%s between construction and real geometry"),
                     n, n == 1 ? "y" : "ies"));
-                m_status->Refresh();
                 return;
             }
             m_viewport->set_sketch_construction(m_construction->GetValue()); });
@@ -1777,7 +1724,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
         mform->Add(m_move_axis, 0, wxEXPAND);
 
         m_move_angle = make_spin(m_cards, 0.0, -360.0, 360.0);
-        mform->Add(new wxStaticText(m_cards, wxID_ANY, _L("Angle °")), 0, wxALIGN_CENTER_VERTICAL);
+        mform->Add(new wxStaticText(m_cards, wxID_ANY, _L("Angle (°)")), 0, wxALIGN_CENTER_VERTICAL);
         mform->Add(spin_frame(m_move_angle), 0, wxEXPAND);
 
         for (wxSpinCtrlDouble* sp : { m_move_dx, m_move_dy, m_move_dz, m_move_angle })
@@ -1833,7 +1780,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
         eform->Add(spin_frame(m_distance2), 0, wxEXPAND);
 
         m_taper = make_spin(m_cards, 0.0, -89.0, 89.0);       // draft angle (deg)
-        eform->Add(new wxStaticText(m_cards, wxID_ANY, _L("Taper °")), 0, wxALIGN_CENTER_VERTICAL);
+        eform->Add(new wxStaticText(m_cards, wxID_ANY, _L("Taper (°)")), 0, wxALIGN_CENTER_VERTICAL);
         eform->Add(spin_frame(m_taper), 0, wxEXPAND);
 
         m_mode = make_combo(m_cards);
@@ -1996,8 +1943,9 @@ DesignPanel::DesignPanel(wxWindow* parent)
 
     m_thread_internal = new CheckBox(m_cards);
     m_thread_internal->SetValue(false);
-    // External rod uses the major radius; an internal tapped bore uses the minor
-    // (tap-drill) radius — re-derive the nominal radius when the role flips.
+    // The diameter field is the NOMINAL (major) diameter either way; what the role changes is
+    // the depth — an internal thread's groove runs from the tap-drill (minor) diameter out to
+    // the major one, an external one's from the major in to the root — so re-derive it.
     m_thread_internal->Bind(wxEVT_TOGGLEBUTTON, [this](wxCommandEvent& e) {
         apply_thread_standard();
         e.Skip();
@@ -2025,7 +1973,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
         auto* rform = two_col_form();
 
         m_revolve_angle = make_spin(m_cards, 360.0, 1.0, 360.0);
-        rform->Add(new wxStaticText(m_cards, wxID_ANY, _L("Angle °")), 0, wxALIGN_CENTER_VERTICAL);
+        rform->Add(new wxStaticText(m_cards, wxID_ANY, _L("Angle (°)")), 0, wxALIGN_CENTER_VERTICAL);
         rform->Add(spin_frame(m_revolve_angle), 0, wxEXPAND);
 
         m_revolve_axis = make_combo(m_cards);
@@ -2036,12 +1984,12 @@ DesignPanel::DesignPanel(wxWindow* parent)
         rform->Add(m_revolve_axis, 0, wxEXPAND);
 
         m_revolve_mode = make_combo(m_cards);
-        m_revolve_mode->Append(_L("New"));
-        m_revolve_mode->Append(_L("Add"));
+        m_revolve_mode->Append(_L("New body"));   // same four words as Extrude
+        m_revolve_mode->Append(_L("Join"));
         m_revolve_mode->Append(_L("Cut"));
         m_revolve_mode->Append(_L("Intersect"));
         m_revolve_mode->SetSelection(0);
-        rform->Add(new wxStaticText(m_cards, wxID_ANY, _L("Mode")), 0, wxALIGN_CENTER_VERTICAL);
+        rform->Add(new wxStaticText(m_cards, wxID_ANY, _L("Result")), 0, wxALIGN_CENTER_VERTICAL);
         rform->Add(m_revolve_mode, 0, wxEXPAND);
 
         m_revolve_flip = new CheckBox(m_cards);
@@ -2066,12 +2014,12 @@ DesignPanel::DesignPanel(wxWindow* parent)
         sform->Add(m_sweep_path, 0, wxEXPAND);
 
         m_sweep_mode = make_combo(m_cards);
-        m_sweep_mode->Append(_L("New"));
-        m_sweep_mode->Append(_L("Add"));
+        m_sweep_mode->Append(_L("New body"));   // same four words as Extrude
+        m_sweep_mode->Append(_L("Join"));
         m_sweep_mode->Append(_L("Cut"));
         m_sweep_mode->Append(_L("Intersect"));
         m_sweep_mode->SetSelection(0);
-        sform->Add(new wxStaticText(m_cards, wxID_ANY, _L("Mode")), 0, wxALIGN_CENTER_VERTICAL);
+        sform->Add(new wxStaticText(m_cards, wxID_ANY, _L("Result")), 0, wxALIGN_CENTER_VERTICAL);
         sform->Add(m_sweep_mode, 0, wxEXPAND);
 
         m_box_sweep->Add(sform, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 12);
@@ -2108,7 +2056,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
         pform->Add(m_pattern_dir, 0, wxEXPAND);
 
         m_pattern_angle = make_spin(m_cards, 360.0, 1.0, 360.0);
-        pform->Add(new wxStaticText(m_cards, wxID_ANY, _L("Total angle°")), 0, wxALIGN_CENTER_VERTICAL);
+        pform->Add(new wxStaticText(m_cards, wxID_ANY, _L("Total angle (°)")), 0, wxALIGN_CENTER_VERTICAL);
         pform->Add(spin_frame(m_pattern_angle), 0, wxEXPAND);
 
         m_box_pattern->Add(pform, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 12);
@@ -2123,8 +2071,8 @@ DesignPanel::DesignPanel(wxWindow* parent)
         auto* bform = two_col_form();
 
         m_bool_op = make_combo(m_cards);
-        m_bool_op->Append(_L("Union (join)"));
-        m_bool_op->Append(_L("Subtract (cut)"));
+        m_bool_op->Append(_L("Join"));   // the Extrude result word; the offer row says the same
+        m_bool_op->Append(_L("Subtract"));
         m_bool_op->Append(_L("Intersect"));
         m_bool_op->SetSelection(0);
         m_bool_op->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent&) { refresh_preview(); });
@@ -2194,7 +2142,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
     m_box_insert->Add(card_header(m_cards, "design_text", _L("Insert"), m_hdr_insert), 0, wxLEFT | wxRIGHT | wxTOP, 12);
     m_box_insert->Add(new wxStaticLine(m_cards), 0, wxEXPAND | wxALL, 8);
     m_box_insert->Add(new wxStaticText(m_cards, wxID_ANY,
-        _L("Drag a corner to size, the centre to move.\nConfirm or Cancel in the toolbar above.")),
+        _L("Drag a corner to size, the center to move.\nConfirm or Cancel in the toolbar above.")),
         0, wxLEFT | wxRIGHT | wxBOTTOM, 12);
     cards->Add(m_box_insert, 0, wxEXPAND);
 
@@ -2230,7 +2178,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
         plform->Add(spin_frame(m_plane_offset), 0, wxEXPAND);
 
         m_plane_tilt = make_spin(m_cards, 0.0, -180.0, 180.0);
-        plform->Add(new wxStaticText(m_cards, wxID_ANY, _L("Angle°")), 0, wxALIGN_CENTER_VERTICAL);
+        plform->Add(new wxStaticText(m_cards, wxID_ANY, _L("Angle (°)")), 0, wxALIGN_CENTER_VERTICAL);
         plform->Add(spin_frame(m_plane_tilt), 0, wxEXPAND);
 
         m_plane_tilt_axis = make_combo(m_cards);
@@ -2277,12 +2225,12 @@ DesignPanel::DesignPanel(wxWindow* parent)
         auto* lform = two_col_form();
 
         m_loft_mode = make_combo(m_cards);
-        m_loft_mode->Append(_L("New"));
-        m_loft_mode->Append(_L("Add"));
+        m_loft_mode->Append(_L("New body"));   // same four words as Extrude
+        m_loft_mode->Append(_L("Join"));
         m_loft_mode->Append(_L("Cut"));
         m_loft_mode->Append(_L("Intersect"));
         m_loft_mode->SetSelection(0);
-        lform->Add(new wxStaticText(m_cards, wxID_ANY, _L("Mode")), 0, wxALIGN_CENTER_VERTICAL);
+        lform->Add(new wxStaticText(m_cards, wxID_ANY, _L("Result")), 0, wxALIGN_CENTER_VERTICAL);
         lform->Add(m_loft_mode, 0, wxEXPAND);
 
         m_box_loft->Add(lform, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 12);
@@ -2321,7 +2269,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
     {
         auto* rform = two_col_form();
         m_surf_revolve_angle = make_spin(m_cards, 360.0, 1.0, 360.0);
-        rform->Add(new wxStaticText(m_cards, wxID_ANY, _L("Angle °")), 0, wxALIGN_CENTER_VERTICAL);
+        rform->Add(new wxStaticText(m_cards, wxID_ANY, _L("Angle (°)")), 0, wxALIGN_CENTER_VERTICAL);
         rform->Add(spin_frame(m_surf_revolve_angle), 0, wxEXPAND);
         m_surf_revolve_axis = make_combo(m_cards);
         m_surf_revolve_axis->Append(_L("Plane X"));
@@ -2644,17 +2592,13 @@ DesignPanel::DesignPanel(wxWindow* parent)
             // Say why nothing happened. Clicking with no face picked used to be a silent no-op,
             // which is indistinguishable from the button being broken.
             if (m_sel_solid_face < 0) {
-                m_status->SetForegroundColour(wxColour(235, 110, 110));
-                set_status(_L("Click a face on the body first, then Add picked face"));
-                m_status->Refresh();
+                set_status(StatusKind::Error, _L("Click a face on the body first, then Add picked face"));
                 return;
             }
             // Adding the same face twice puts a duplicate id in delete_faces, which the
             // defeaturing algorithm has no reason to cope with. Re-clicking is a no-op, not an error.
             if (std::find(m_del_faces.begin(), m_del_faces.end(), m_sel_solid_face) != m_del_faces.end()) {
-                m_status->SetForegroundColour(wxNullColour);
-                set_status(wxString::Format(_L("Face %d is already in the list"), m_sel_solid_face));
-                m_status->Refresh();
+                set_status(StatusKind::Info, wxString::Format(_L("Face %d is already in the list"), m_sel_solid_face));
                 return;
             }
             {
@@ -2662,7 +2606,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
                 wxString s;
                 for (size_t i = 0; i < m_del_faces.size(); ++i) {
                     if (i > 0) s += ", ";
-                    s += wxString::Format("Face %d", m_del_faces[i]);
+                    s += wxString::Format(_L("Face %d"), m_del_faces[i]);
                 }
                 m_del_face_list->SetLabel(s.empty() ? _L("(none)") : s);
                 m_del_face_list->GetParent()->Layout();
@@ -2785,7 +2729,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
 
     // --- CoordSys (datum coordinate system: point + orthonormal frame) ---
     m_box_coordsys = new wxBoxSizer(wxVERTICAL);
-    m_box_coordsys->Add(card_header(m_cards, "design_point", _L("Coord Sys"), m_hdr_coordsys), 0, wxLEFT | wxRIGHT | wxTOP, 12);
+    m_box_coordsys->Add(card_header(m_cards, "design_point", _L("Coordinate system"), m_hdr_coordsys), 0, wxLEFT | wxRIGHT | wxTOP, 12);
     m_box_coordsys->Add(new wxStaticLine(m_cards), 0, wxEXPAND | wxALL, 8);
     {
         m_coordsys_type = make_combo(m_cards);
@@ -2855,7 +2799,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
     }
     cards->Add(m_box_coordsys, 0, wxEXPAND);
 
-    // --- Mate (assembly: align two CoordSys features) ---
+    // --- Mate (assembly: align two coordinate systems) ---
     m_box_mate = new wxBoxSizer(wxVERTICAL);
     m_box_mate->Add(card_header(m_cards, "design_c_coincident", _L("Mate"), m_hdr_mate), 0, wxLEFT | wxRIGHT | wxTOP, 12);
     m_box_mate->Add(new wxStaticLine(m_cards), 0, wxEXPAND | wxALL, 8);
@@ -2874,11 +2818,11 @@ DesignPanel::DesignPanel(wxWindow* parent)
 
         // Populate the CoordSys pickers on open; show "A (fixed)" and "B (moves)" combos.
         m_mate_cs_a = make_combo(m_cards);
-        mform->Add(new wxStaticText(m_cards, wxID_ANY, _L("CS A (fixed)")), 0, wxALIGN_CENTER_VERTICAL);
+        mform->Add(new wxStaticText(m_cards, wxID_ANY, _L("A (fixed)")), 0, wxALIGN_CENTER_VERTICAL);
         mform->Add(m_mate_cs_a, 0, wxEXPAND);
 
         m_mate_cs_b = make_combo(m_cards);
-        mform->Add(new wxStaticText(m_cards, wxID_ANY, _L("CS B (moves)")), 0, wxALIGN_CENTER_VERTICAL);
+        mform->Add(new wxStaticText(m_cards, wxID_ANY, _L("B (moves)")), 0, wxALIGN_CENTER_VERTICAL);
         mform->Add(m_mate_cs_b, 0, wxEXPAND);
 
         m_offset_label = new wxStaticText(m_cards, wxID_ANY, _L("Offset"));
@@ -3109,16 +3053,12 @@ DesignPanel::DesignPanel(wxWindow* parent)
         // one click away on a row the user has just selected — the message points at it instead
         // of describing a problem with no way out.
         if (const std::string* why = (sel >= 0) ? mate_conflict_reason(sel) : nullptr) {
-            m_status->SetForegroundColour(wxColour(235, 110, 110));
-            set_status(wxString::FromUTF8(*why) + _L(" — the eye suppresses this mate"));
-            m_status->Refresh();
+            set_status(StatusKind::Error, wxString::FromUTF8(*why) + _L(" — the eye suppresses this mate"));
         } else if (sel >= 0 && sel < int(m_doc.features.size())) {
             // Name the two gestures the row supports, because neither is visible on it.
-            m_status->SetForegroundColour(wxNullColour);
-            set_status(wxString::Format(
+            set_status(StatusKind::Info, wxString::Format(
                 _L("%s selected — F2 or right-click renames it, double-click edits it"),
                 wxString::FromUTF8(m_doc.features[sel].name)));
-            m_status->Refresh();
         }
     });
 
@@ -3298,9 +3238,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
             if (m_sel_solid_body >= 0 && m_sel_solid_body < int(m_doc.bodies.size())) {
                 on_move_body();
             } else {
-                m_status->SetForegroundColour(wxNullColour);
-                set_status(_L("Select a body row first, then move it"));
-                m_status->Refresh();
+                set_status(StatusKind::Info, _L("Select a body row first, then move it"));
             }
         });
         // Boolean lives here as well as on the toolbar: combining two bodies is a body action,
@@ -3311,7 +3249,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
         bvis->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_toggle_visibility(); });
         auto* bdel  = body_btn("design_delete", _L("Delete"));
         bdel->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_delete_body(); });
-        auto* bcol  = body_btn("color_palette", _L("Colour"));
+        auto* bcol  = body_btn("color_palette", _L("Color"));
         bcol->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_set_body_color(); });
         const int bgap = FromDIP(SidebarProps::ElementSpacing());
         m_parts_hdr->AddStretchSpacer(1);
@@ -3355,9 +3293,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
         m_sel_solid_face   = m_sel_solid_edge = -1;
         m_sel_solid_vertex = false;
         m_pick_face = m_pick_face_body = -1;   // chosen from the list, no face was pointed at
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(wxString::Format(_L("Body %d selected — right-click for what applies to it"), b + 1));
-        m_status->Refresh();
+        set_status(StatusKind::Info, wxString::Format(_L("Body %d selected — right-click for what applies to it"), b + 1));
     };
     m_parts->Bind(wxEVT_TREE_SEL_CHANGED, [this, apply_body_row](wxTreeEvent&) {
         apply_body_row(tree_body_selection());
@@ -3531,10 +3467,9 @@ DesignPanel::DesignPanel(wxWindow* parent)
     m_viewport->set_on_sketch_commit([this](const SketchProfile& prof, const SketchPlane& plane) {
         m_doc.checkpoint();   // undo boundary: committing a sketch
         m_feature_counter++;
-        m_doc.add_sketch_profile(prof, plane, "Sketch" + std::to_string(m_feature_counter));
+        m_doc.add_sketch_profile(prof, plane, feature_name(_L("Sketch")));
         m_doc.recompute();
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(_L("Sketch created — select it, then right-click to Extrude"));
+        set_status(StatusKind::Info, _L("Sketch created — select it, then right-click to Extrude"));
         refresh_tree();
     });
 
@@ -3543,9 +3478,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
                const std::vector<SketchEntityConstraintDef>& cons,
                const SketchPlane& plane) {
             if (ents.empty()) {
-                m_status->SetForegroundColour(wxColour(235, 110, 110));
-                set_status(_L("Sketch empty — nothing committed"));
-                m_status->Refresh();
+                set_status(StatusKind::Error, _L("Sketch empty — nothing committed"));
                 return;
             }
             m_doc.checkpoint();   // undo boundary: committing / re-editing an entity sketch
@@ -3560,8 +3493,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
                 if (m_doc.replace_feature(m_edit_index, edited)) {
                     if (!cons.empty()) m_doc.solve_sketch_feature(m_edit_index);
                     m_doc.recompute();
-                    m_status->SetForegroundColour(wxNullColour);
-                    set_status(_L("Sketch updated"));
+                    set_status(StatusKind::Info, _L("Sketch updated"));
                     m_edit_index = -1;
                     refresh_tree();
                     sync_sketch_display();
@@ -3570,11 +3502,10 @@ DesignPanel::DesignPanel(wxWindow* parent)
             }
             m_feature_counter++;
             const int sk = m_doc.add_sketch_entities(ents, plane,
-                               "Sketch" + std::to_string(m_feature_counter), cons);
+                               feature_name(_L("Sketch")), cons);
             if (!cons.empty()) m_doc.solve_sketch_feature(sk);   // enforce driving dimensions
             m_doc.recompute();
-            m_status->SetForegroundColour(wxNullColour);
-            set_status(cons.empty()
+            set_status(StatusKind::Info, cons.empty()
                 ? _L("Sketch created — select it, then right-click to Extrude")
                 : wxString::Format(_L("Sketch created (%zu driving dims) — select it, then right-click to Extrude"),
                                    cons.size()));
@@ -3585,12 +3516,11 @@ DesignPanel::DesignPanel(wxWindow* parent)
     // Live length/angle readout while drawing a Line/Polyline segment.
     m_viewport->set_on_cursor_metrics([this](double len, double ang_deg, bool locked) {
         double a = ang_deg; if (a < 0.0) a += 360.0;   // show bearing 0..360
-        m_status->SetForegroundColour(wxNullColour);
         // APPENDED to the step guidance, never in place of it. This fires on every mouse move
         // while a segment is being dragged, so replacing the line wiped the instruction for the
         // step the user is in the middle of — one mouse move after the click that armed it.
-        const wxString metrics = wxString::Format(L"L %.2f mm   %.1f°%s",
-                                                  len, a, locked ? L"  (locked)" : L"");
+        wxString metrics = wxString::Format(_L("Length %.2f mm, angle %.1f°"), len, a);
+        if (locked) metrics += "  " + _L("(locked)");
         set_status(m_sketch_step.IsEmpty() ? metrics
                                            : m_sketch_step + L"   ·   " + metrics);
         m_status->Refresh();
@@ -3617,6 +3547,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
         // Constrain to read stays blank until they happen to change something.
         m_dof_last = dof; m_dof_last_ok = ok; m_dof_last_has = has_constraints;
         apply_dof_status(dof, ok, has_constraints);
+        update_undo_redo_buttons();   // every edit of the live sketch re-solves, so this tracks it
     });
 
     // Selection no longer writes the status line: on_sketch_step owns it, says the same thing
@@ -3631,9 +3562,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
         m_viewport->finish_sketch();                 // commit live sketch (synchronous)
         m_extrude_sketch_ref = resolve_extrude_sketch();
         if (m_extrude_sketch_ref < 0) {
-            m_status->SetForegroundColour(wxColour(235, 110, 110));
-            set_status(_L("Could not resolve the sketch to extrude"));
-            m_status->Refresh();
+            set_status(StatusKind::Error, _L("Could not resolve the sketch to extrude"));
             return;
         }
         set_ui_mode(UiMode::Feature);
@@ -3645,9 +3574,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
         m_sel_solid_face = m_sel_solid_edge = -1;
         m_pick_face = m_pick_face_body = -1;
         m_viewport->set_loop_pick(m_extrude_sketch_ref, region);
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(_L("Face selected — set the depth and Confirm"));
-        m_status->Refresh();
+        set_status(StatusKind::Info, _L("Face selected — set the depth and Confirm"));
     });
 
     // Clicking a committed sketch loop on the plate (no live session) selects THAT loop:
@@ -3705,13 +3632,11 @@ DesignPanel::DesignPanel(wxWindow* parent)
             }
         }
         set_tree_selection(feat);
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(region >= 0
+        set_status(StatusKind::Info, region >= 0
             // "Region", not "Loop": what is selected — and what Extrude will consume — is the
             // bounded area including any holes in it, not a single closed curve.
             ? _L("Region selected — right-click to Extrude, or double-click to edit")
             : _L("Sketch selected — right-click to Extrude, or double-click to edit"));
-        m_status->Refresh();
     });
 
     // Double-click a committed sketch stroke: open THAT sketch for editing, where its entities
@@ -3728,7 +3653,6 @@ DesignPanel::DesignPanel(wxWindow* parent)
     // F key (Prepare's Place on Face): the tool forwards it here when the Design viewport
     // has focus; we lay the selected body face on the bed. Returns false when no face is
     // selected so the key can fall through to the default handler.
-    m_viewport->set_on_place_on_face([this]() { return place_on_face(); });
 
     // Clicking a solid cycles whole -> face -> edge. The tool draws the cyan overlay for ALL
     // levels now (per-body, so other bodies stay untinted) — no whole-compound set_body_highlight.
@@ -3857,9 +3781,9 @@ DesignPanel::DesignPanel(wxWindow* parent)
                 m_thread_on_face    = true;
                 m_thread_face_body  = m_sel_solid_body;
                 set_thread_target_label(from_face ? face : -1, from_face ? -1 : edge);
-                infer_thread_spec(2.0 * cf.radius);   // M diameter + pitch + depth from the cylinder
-                if (m_thread_height && cf.height > 1e-6) m_thread_height->SetValue(cf.height);
                 if (m_thread_internal) m_thread_internal->SetValue(cf.internal);
+                infer_thread_spec(2.0 * cf.radius, cf.internal);   // M size + pitch + depth from the cylinder
+                if (m_thread_height && cf.height > 1e-6) m_thread_height->SetValue(cf.height);
                 refresh_preview();
             }
         }
@@ -3911,7 +3835,6 @@ DesignPanel::DesignPanel(wxWindow* parent)
             }
             if (got && m_viewport) m_viewport->set_escalate_on_repick(true);
         }
-        m_status->SetForegroundColour(wxNullColour);
         const int nb = int(m_doc.bodies.size());
         const wxString bodytag = (nb > 1) ? wxString::Format(_L("Body %d "), body + 1) : wxString();
         // Each sub-element line ends by naming the NEXT click (gem). Escalation to the
@@ -4019,11 +3942,10 @@ DesignPanel::DesignPanel(wxWindow* parent)
                     m_viewport->set_sketch_plane(plane_from_choice(m_ref_plane));
             }
             const char* nm = (base == 0) ? "XY" : (base == 1) ? "XZ" : (base == 2) ? "YZ" : "datum";
-            m_status->SetForegroundColour(wxColour(120, 210, 120));
             // Both halves named the TOOLBAR, which no longer carries either button: the tools
             // moved to the offer. Name the gesture that actually works in each mode, and say
             // what a plain click does, since the two are easy to confuse on a plane.
-            set_status(m_ui_mode == UiMode::Sketch
+            set_status(StatusKind::Ok, m_ui_mode == UiMode::Sketch
                 ? wxString::Format(_L("%s plane selected — right-click for the drawing tools"), nm)
                 : wxString::Format(_L("%s plane selected — right-click to sketch on it, "
                                       "or click an object to select it"), nm));
@@ -4062,10 +3984,8 @@ DesignPanel::DesignPanel(wxWindow* parent)
         const int nb = int(m_doc.bodies.size());
         const wxString tag = (nb > 1) ? wxString::Format(_L("Body %d "), body + 1) : wxString();
         const Vec3d t = xform.translation();
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(tag + wxString::Format(_L("placed (%.1f, %.1f, %.1f) mm — drag arrows to move, rings to rotate"),
+        set_status(StatusKind::Info, tag + wxString::Format(_L("placed (%.1f, %.1f, %.1f) mm — drag arrows to move, rings to rotate"),
                                                   t.x(), t.y(), t.z()));
-        m_status->Refresh();
     });
 
     // Fillet/Chamfer radius gizmo: dragging (or editing) the edge-anchored arrow writes the
@@ -4141,23 +4061,21 @@ DesignPanel::DesignPanel(wxWindow* parent)
         set_ui_mode(UiMode::Feature);
         sync_sketch_display();
         refresh_tree();
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(_L("Tool exited"));
-        m_status->Refresh();
+        set_status(StatusKind::Info, _L("Tool exited"));
     });
 
     // The tool declined to leave because the session holds geometry. There is no "press it again"
     // any more — the answer is a deliberate Finish or Cancel — so this is a plain statement of
     // where you are, not a warning shot. Only the STATUS LINE lives here; the tool reports via
     // this callback instead of writing text itself.
+    m_viewport->set_on_sketch_notice([this](const std::string& msg, bool error) {
+        set_status(error ? StatusKind::Error : StatusKind::Info, wxString::FromUTF8(msg));
+    });
     m_viewport->set_on_sketch_exit_refused([this]() {
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(_L("Sketch kept — Finish to commit it, Cancel to discard"));
-        m_status->Refresh();
+        set_status(StatusKind::Info, _L("Sketch kept — Finish to commit it, Cancel to discard"));
     });
 
     // Ctrl+Z / Ctrl+Shift+Z (Ctrl+Y) from the viewport → feature-history undo/redo.
-    m_viewport->set_on_undo_redo([this](bool redo) { do_undo_redo(redo); });
 
     // Esc = the unified Cancel everywhere. Feature cards had no key exit (only the button);
     // CHAR_HOOK on the panel catches Esc from the card or viewport and routes to tool_cancel.
@@ -4230,6 +4148,22 @@ DesignPanel::DesignPanel(wxWindow* parent)
         // acts on that one only; see DesignInteraction.hpp for the ladder and its invariant.
         if (key == WXK_ESCAPE) { escape(); return; }
 
+        // Enter mirrors the ✓ as Esc mirrors the ✗ (charter 4.2, L9): a ready sketch edit-op or
+        // transform first, else whatever the ✓ would confirm — gated exactly as the greyed button
+        // is, so a broken candidate cannot be committed from the keyboard either. An open value
+        // field keeps its own Enter (handled above or inside the field).
+        // Inside a sketch, Enter first ends what is in progress — applies a ready edit-op or
+        // transform, finishes a polyline/spline chain — then ends the armed draw tool (a
+        // continuous tool is ended, not confirmed, charter 4.2); only from Select does it finish
+        // the sketch, exactly as the ✓ does.
+        if (!in_text && !ctrl && (key == WXK_RETURN || key == WXK_NUMPAD_ENTER)) {
+            if (sketch_mode && m_viewport && m_viewport->is_sketching()) {
+                if (m_viewport->sketch_confirm_pending()) { update_undo_redo_buttons(); return; }
+                if (m_viewport->sketch_disarm_tool()) { set_status(_L("Select")); return; }
+            }
+            if (confirm_enabled()) { tool_confirm(); return; }
+        }
+
         // The offer from the keyboard (charter 4.1): the Menu key, or Shift+F10 for keyboards that
         // do not have one. Same menu the right-click opens — show_offer_menu already decides which
         // half of the map applies via sketch_map_applies(), so nothing about the content is decided
@@ -4249,16 +4183,21 @@ DesignPanel::DesignPanel(wxWindow* parent)
         if (!in_text && ctrl && (key == 'Z' || key == 'z' || key == WXK_CONTROL_Z ||
                                  key == 'Y' || key == 'y' || key == WXK_CONTROL_Y)) {
             const bool redo = (key == 'Y' || key == 'y' || key == WXK_CONTROL_Y) || e.ShiftDown();
-            if (sketching) { if (!redo) m_viewport->undo_last_sketch_entity(); }
-            else           { do_undo_redo(redo); }
+            do_undo_redo(redo);   // the same route as the Undo/Redo buttons
             return;
         }
-        // Delete — the selected sketch entities (or the last drawn one if none is selected), or the
-        // selected feature in Feature mode. Focus-independent, same reason as undo above.
+        // Delete — the selected sketch entities, or the selected feature in Feature mode. Only
+        // an explicit selection is ever destroyed (DesignInteraction.hpp): with nothing picked
+        // the key says so instead of deleting whatever happened to be drawn last.
+        // Focus-independent, same reason as undo above.
         // WXK_BACK too: on a keyboard whose Del is a chord (every laptop this runs on), Del is
         // the one destructive key nobody can reach, and Backspace is what users press. oql1.
         if (!in_text && (key == WXK_DELETE || (key == WXK_BACK && sketching))) {
-            if (sketching) { m_viewport->delete_selected_or_last_sketch_entity(); return; }
+            if (sketching) {
+                if (!m_viewport->delete_selected_sketch_entities())
+                    set_status(_L("Select something to delete"));
+                return;
+            }
             if (m_ui_mode == UiMode::Feature && m_active == Tool::None
                 && tree_selection() != wxNOT_FOUND) { on_delete_feature(); return; }
         }
@@ -4311,10 +4250,6 @@ DesignPanel::DesignPanel(wxWindow* parent)
         }
         e.Skip();
     });
-
-    // Right-click finishes the move gizmo in the viewport; mirror that on the panel so the
-    // action bar (shown while moving) hides and the move state clears.
-    m_viewport->set_on_move_exit([this]() { m_move_body = -1; show_move_card(false); update_action_bar(); });
 
     // The offer (§4.1): right-click the geometry, get the verbs that apply to it. Left-click
     // still only selects, so pointing at things stays quiet.
@@ -4628,15 +4563,12 @@ void DesignPanel::sync_sketch_display()
 
 void DesignPanel::on_add_text()
 {
-    wxTextEntryDialog dlg(this, _L("Text to insert:"), _L("Text"), wxEmptyString);
-    if (dlg.ShowModal() != wxID_OK)
+    // Font, height and a live outline with its size are chosen up front; the bbox handles
+    // (Move/Scale) still resize the art in the canvas afterwards.
+    DesignTextDialog dlg(this);
+    if (dlg.ShowModal() != wxID_OK || dlg.regions().empty())
         return;
-    const wxString text = dlg.GetValue();
-    if (text.empty())
-        return;
-    const std::string utf8(text.ToUTF8().data());
-    // Insert at a default height; resize in-canvas via the bbox handles (Move/Scale).
-    add_imported_sketch(text_to_regions(utf8, 10.0), _L("Text"));
+    add_imported_sketch(dlg.regions(), _L("Text"));
 }
 
 void DesignPanel::on_import_svg()
@@ -4656,8 +4588,14 @@ void DesignPanel::on_import_svg()
 // app unresponsive and nothing repainted. The dialog is app-modal, so the document cannot be
 // touched while the worker owns it. Exceptions must not escape the worker: `work` is expected
 // to swallow them (OCCT throws Standard_Failure, which is not a std::exception).
+// True while a worker owns the document. wxYield below runs pending events — and a queued MCP
+// request is one — so the control socket must check this and refuse rather than change the
+// document under the worker (DesignPanel::mcp_busy).
+static std::atomic<int> s_doc_worker_busy{0};
+
 static void run_off_ui_thread(wxWindow* parent, const wxString& message, const std::function<void()>& work)
 {
+    struct Busy { Busy() { ++s_doc_worker_busy; } ~Busy() { --s_doc_worker_busy; } } busy;
     std::atomic<bool> done{false};
     std::thread worker([&work, &done]() {
         work();
@@ -4681,6 +4619,19 @@ static void run_off_ui_thread(wxWindow* parent, const wxString& message, const s
         elapsed_ms += 30;
     }
     worker.join();
+}
+
+bool DesignPanel::mcp_busy(bool sketch_method, std::string& why) const
+{
+    if (s_doc_worker_busy.load() > 0) { why = "the model is being rebuilt; try again when it finishes"; return true; }
+    // A GUI editor holds a candidate built from the document as it was when it opened; a
+    // feature added or removed underneath it would be overwritten, or overwrite, on Confirm.
+    if (m_active != Tool::None || m_edit_index >= 0) { why = "a feature card is open in the Design tab"; return true; }
+    if (m_ui_mode == UiMode::Constrain) { why = "the Design tab is constraining a sketch"; return true; }
+    // Sketch methods drive the live sketch session, which is the point of them; everything else
+    // changes the feature list, which a live sketch session is about to commit into.
+    if (!sketch_method && m_ui_mode == UiMode::Sketch) { why = "a sketch is open in the Design tab"; return true; }
+    return false;
 }
 
 // Rebuild the document off the UI thread. Every feature op (fillet, cut, shell, boolean, ...)
@@ -4761,10 +4712,8 @@ void DesignPanel::on_import_step()
         }
     });
     if (solids.empty()) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(err.empty() ? _L("No solids found in STEP")
-                                       : (_L("STEP import failed: ") + wxString::FromUTF8(err)));
-        m_status->Refresh();
+        set_status(StatusKind::Error, err.empty() ? _L("No solids found in STEP")
+                                       : (wxString::Format(_L("STEP import failed: %s"), kernel_error_text(err))));
         return;
     }
     m_doc.checkpoint();   // undo boundary: importing STEP solids
@@ -4772,7 +4721,7 @@ void DesignPanel::on_import_step()
         m_feature_counter++;
         CadFeature f;
         f.type           = CadFeatureType::Import;
-        f.name           = std::string("STEP") + std::to_string(m_feature_counter);
+        f.name           = feature_name("STEP");
         f.imported_solid = s;
         f.mode           = BooleanMode::New;   // each solid is its own coexisting body
         m_doc.features.push_back(f);
@@ -4789,20 +4738,16 @@ void DesignPanel::on_import_step()
         }
     });
     if (!rebuilt) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("STEP import failed: ") + wxString::FromUTF8(m_doc.error));
-        m_status->Refresh();
+        set_status(StatusKind::Error, wxString::Format(_L("STEP import failed: %s"), kernel_error_text(m_doc.error)));
         return;
     }
     set_ui_mode(UiMode::Feature);   // imported solids live in the feature timeline
     refresh_tree();
     set_tree_selection(int(m_doc.features.size()) - 1);
     set_status_ok();                // canonical post-recompute viewport/pick/parts refresh
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(wxString::Format(
+    set_status(StatusKind::Info, wxString::Format(
         _L("Imported %d solid(s) — pick a face or edge, then Fillet / Cut / Shell to modify"),
         int(solids.size())));
-    m_status->Refresh();
 }
 
 // Import a triangle mesh as a real B-rep body: the triangles are rebuilt into OCCT faces with
@@ -4819,9 +4764,7 @@ void DesignPanel::on_import_mesh()
     const std::string path(dlg.GetPath().ToUTF8().data());
 
     auto fail = [this](const wxString& msg) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(msg);
-        m_status->Refresh();
+        set_status(StatusKind::Error, msg);
     };
 
     // Load the triangles with the slicer's own readers — no new mesh dependency.
@@ -4834,7 +4777,7 @@ void DesignPanel::on_import_mesh()
         ObjInfo     obj_info;
         std::string obj_err;
         if (!load_obj(path.c_str(), &mesh, obj_info, obj_err)) {
-            fail(_L("Could not read the OBJ file: ") + wxString::FromUTF8(obj_err));
+            fail(wxString::Format(_L("Could not read the OBJ file: %s"), wxString::FromUTF8(obj_err)));
             return;
         }
     } else {
@@ -4863,11 +4806,11 @@ void DesignPanel::on_import_mesh()
         shape = GeometryEngine::mesh_to_brep(mesh.its, MESH_IMPORT_TOLERANCE,
                                              MESH_IMPORT_MERGE_ANGLE_DEG, stats);
     } catch (const std::exception& e) {
-        fail(_L("Mesh conversion failed: ") + wxString::FromUTF8(e.what()));
+        fail(wxString::Format(_L("Mesh conversion failed: %s"), kernel_error_text(e.what())));
         return;
     } catch (const Standard_Failure& e) {   // OCCT throws outside std::exception
-        fail(_L("Mesh conversion failed: ") + wxString::FromUTF8(
-                 e.GetMessageString() ? e.GetMessageString() : "OCCT error"));
+        fail(wxString::Format(_L("Mesh conversion failed: %s"),
+                              kernel_error_text(e.GetMessageString() ? e.GetMessageString() : "")));
         return;
     }
     if (shape.IsNull()) { fail(_L("Mesh conversion produced no geometry")); return; }
@@ -4876,13 +4819,13 @@ void DesignPanel::on_import_mesh()
     m_feature_counter++;
     CadFeature f;
     f.type           = CadFeatureType::Import;
-    f.name           = std::string("Mesh") + std::to_string(m_feature_counter);
+    f.name           = feature_name(_L("Mesh"));
     f.imported_solid = shape;
     f.mode           = BooleanMode::New;   // its own coexisting body, like a STEP solid
     m_doc.features.push_back(f);
 
     if (!recompute_guarded(_L("Rebuilding model…"))) {
-        fail(_L("Mesh import failed: ") + wxString::FromUTF8(m_doc.error));
+        fail(wxString::Format(_L("Mesh import failed: %s"), kernel_error_text(m_doc.error)));
         return;
     }
     set_ui_mode(UiMode::Feature);
@@ -4894,14 +4837,12 @@ void DesignPanel::on_import_mesh()
     // watertight, say so and say why (boundary vs non-manifold edges) — that is a defect in the
     // source mesh the user needs to know about before they start cutting features into it.
     if (stats.is_solid) {
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(wxString::Format(
+        set_status(StatusKind::Info, wxString::Format(
             _L("Imported solid — %d triangles → %d faces, volume %.2f mm³. Pick a face or edge, "
                "then Fillet / Cut / Shell to modify"),
             stats.kept_tris, stats.faces_final, stats.volume));
     } else {
-        m_status->SetForegroundColour(wxColour(220, 160, 60));   // warning, not an error
-        set_status(wxString::Format(
+        set_status(StatusKind::Warning, wxString::Format(
             _L("Imported as an open shell (not watertight): %d boundary edge(s), %d non-manifold "
                "edge(s) — %d triangles → %d faces. The source mesh has holes or duplicated "
                "geometry; boolean features may fail on it"),
@@ -4915,9 +4856,7 @@ void DesignPanel::add_imported_sketch(
     const wxString& base_name)
 {
     if (regions.empty()) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("No importable geometry found"));
-        m_status->Refresh();
+        set_status(StatusKind::Error, _L("No importable geometry found"));
         return;
     }
     // DRAWING, not importing: if a sketch is open, the art belongs IN it. The outlines become
@@ -4925,17 +4864,15 @@ void DesignPanel::add_imported_sketch(
     // else on that plane. Committing a separate Sketch feature while the user is mid-sketch put
     // the text on its own plane-origin feature and left the sketch they were drawing untouched.
     if (m_viewport && m_viewport->is_sketching() && m_viewport->add_sketch_regions(regions)) {
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(wxString::Format(_L("%s added to the sketch — Confirm to commit it"),
+        set_status(StatusKind::Info, wxString::Format(_L("%s added to the sketch — Confirm to commit it"),
                                             base_name));
-        m_status->Refresh();
         return;
     }
     m_doc.checkpoint();   // undo boundary: importing Text/SVG art
     m_feature_counter++;
     CadFeature f;
     f.type            = CadFeatureType::Sketch;
-    f.name            = std::string(base_name.ToUTF8().data()) + std::to_string(m_feature_counter);
+    f.name            = feature_name(base_name);
     f.imported_regions = regions;
 
     // #4: when a solid face is selected, drop the art ON that face, centred on it (ready to
@@ -4989,9 +4926,7 @@ void DesignPanel::open_insert_card(const wxString& base_name)
     update_cards_frame(); m_form->Layout();
     m_form->FitInside();
     update_action_bar();   // surface the unified ✓/✗
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(base_name + _L(" — drag to place/size, then Confirm"));
-    m_status->Refresh();
+    set_status(StatusKind::Info, base_name + _L(" — drag to place/size, then Confirm"));
 }
 
 // Confirm: keep the placed art and leave the placement gizmo. The feature is already in
@@ -5019,9 +4954,7 @@ void DesignPanel::cancel_insert()
     set_ui_mode(UiMode::Feature);
     sync_sketch_display();
     refresh_tree();
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(_L("Insert cancelled"));
-    m_status->Refresh();
+    set_status(StatusKind::Info, _L("Insert cancelled"));
 }
 
 void DesignPanel::on_transform_imported(int feat_idx)
@@ -5035,9 +4968,7 @@ void DesignPanel::on_transform_imported(int feat_idx)
     // the centre to move. Values stream back via set_on_imported_transform.
     m_viewport->begin_imported_transform(feat_idx, f.imported_regions, f.plane,
                                          f.import_offset, f.import_scale_x, f.import_scale_y);
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(_L("Drag a corner to scale, the centre to move — right-click when done"));
-    m_status->Refresh();
+    set_status(StatusKind::Info, _L("Drag a corner to scale, the center to move — Enter or ✓ when done, Esc to discard"));
 }
 
 void DesignPanel::on_add_sketch()
@@ -5048,10 +4979,9 @@ void DesignPanel::on_add_sketch()
     SketchPlane plane = sketch_plane_from_selection(where);    // picked face, else the 3D plane click
     m_feature_counter++;
     m_doc.add_sketch(shape, plane, m_width->GetValue(), m_height->GetValue(),
-                     m_radius->GetValue(), "Sketch" + std::to_string(m_feature_counter));
+                     m_radius->GetValue(), feature_name(_L("Sketch")));
     m_doc.recompute();  // a lone sketch yields an empty body; that is expected
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(wxString::Format(_L("Sketch added on %s — select it, then right-click to Extrude"), where));
+    set_status(StatusKind::Info, wxString::Format(_L("Sketch added on %s — select it, then right-click to Extrude"), where));
     refresh_tree();
 }
 
@@ -5067,11 +4997,18 @@ bool DesignPanel::extrude_uses_loop() const
         && !m_viewport->selected_loop_entities().empty();
 }
 
+// Default name of the feature being added: the card's own header word and number ("Extrude 3"),
+// so the tree row and the card title that preceded it read the same, in the user's language.
+std::string DesignPanel::feature_name(const wxString& kind) const
+{
+    return std::string((kind + wxString::Format(" %d", m_feature_counter)).ToUTF8().data());
+}
+
 void DesignPanel::on_add_extrude()
 {
     BooleanMode mode = static_cast<BooleanMode>(m_mode->GetSelection());  // New/Add/Cut/Intersect
     m_feature_counter++;
-    const std::string name = "Extrude" + std::to_string(m_feature_counter);
+    const std::string name = feature_name(_L("Extrude"));
     int idx = -1;
     if (m_extrude_face_src >= 0) {
         // Onshape face-extrude: the picked solid face is the profile (no sketch wire).
@@ -5101,7 +5038,8 @@ void DesignPanel::on_add_extrude()
         f.taper_deg   = m_taper->GetValue();
         f.flip        = m_flip->GetValue();
         f.up_to_face  = (f.extrude_end == ExtrudeEnd::UpToFace) ? m_sel_solid_face : -1;
-        f.target_body = m_sel_solid_body;   // multi-body: act on the picked body (-1 = last)
+        // multi-body: act on the picked body, else the body the profile touches (-1 = last)
+        f.target_body = m_sel_solid_body >= 0 ? m_sel_solid_body : m_extrude_auto_body;
         // On-face Text/SVG remembers its host body even after the face pick was cleared by
         // the placement recompute, so the engraving Cut hits the right solid.
         if (m_extrude_sketch_ref >= 0 && m_extrude_sketch_ref < int(m_doc.features.size())
@@ -5109,7 +5047,7 @@ void DesignPanel::on_add_extrude()
             f.target_body = m_doc.features[m_extrude_sketch_ref].import_face_body;
     }
     if (!recompute_guarded(_L("Rebuilding model…")))
-        set_status(_L("Recompute error: ") + wxString::FromUTF8(m_doc.error));
+        set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
         set_status_ok();
     refresh_tree();
@@ -5130,19 +5068,19 @@ void DesignPanel::on_add_dressup()
     int didx = -1;
     if (m_sel_solid_edge >= 0) {
         if (fillet)
-            didx = m_doc.add_fillet(sz, m_sel_solid_edge, "Fillet" + std::to_string(m_feature_counter));
+            didx = m_doc.add_fillet(sz, m_sel_solid_edge, feature_name(_L("Fillet")));
         else
-            didx = m_doc.add_chamfer(sz, m_sel_solid_edge, "Chamfer" + std::to_string(m_feature_counter));
+            didx = m_doc.add_chamfer(sz, m_sel_solid_edge, feature_name(_L("Chamfer")));
     } else if (fillet)
-        didx = m_doc.add_fillet(sz, fg, "Fillet" + std::to_string(m_feature_counter));
+        didx = m_doc.add_fillet(sz, fg, feature_name(_L("Fillet")));
     else
-        didx = m_doc.add_chamfer(sz, fg, "Chamfer" + std::to_string(m_feature_counter));
+        didx = m_doc.add_chamfer(sz, fg, feature_name(_L("Chamfer")));
     // Dress the picked body (its face/edge ids are body-local). -1 = last body.
     if (didx >= 0 && didx < int(m_doc.features.size()))
         m_doc.features[didx].target_body = m_sel_solid_body;
 
     if (!recompute_guarded(_L("Rebuilding model…")))
-        set_status(_L("Recompute error: ") + wxString::FromUTF8(m_doc.error));
+        set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
         set_status_ok();
 
@@ -5198,13 +5136,13 @@ void DesignPanel::on_add_hole()
 
     m_feature_counter++;
     const int hidx = m_doc.add_hole(dia, depth, through, px, py, plane,
-                                    "Hole" + std::to_string(m_feature_counter));
+                                    feature_name(_L("Hole")));
     // On-face holes drill the body the face belongs to (even after the pick was cleared).
     if (m_hole_on_face && hidx >= 0 && hidx < int(m_doc.features.size()))
         m_doc.features[hidx].target_body = m_hole_face_body;
 
     if (!recompute_guarded(_L("Rebuilding model…")))
-        set_status(_L("Recompute error: ") + wxString::FromUTF8(m_doc.error));
+        set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
         set_status_ok();
 
@@ -5229,47 +5167,45 @@ void DesignPanel::apply_thread_standard()
         m_thread_std->GetString(sel).utf8_string());
     if (!s) return;
 
-    // Pitch and depth are the defining "measures" of the standard — always apply.
+    // Pitch and depth are the defining "measures" of the standard — always apply. The field
+    // holds the NOMINAL (major) diameter for both roles; the kernel bores an internal thread to
+    // major - 2 x depth, so its depth is the tapped one, (major - minor) / 2.
+    const bool internal = m_thread_internal && m_thread_internal->GetValue();
     if (m_thread_pitch) m_thread_pitch->SetValue(s->pitch_mm);
-    if (m_thread_depth) m_thread_depth->SetValue(s->thread_depth_mm());
-
-    // Nominal diameter: external rod = major diameter; internal tapped bore = minor (tap-drill)
-    // diameter. On a picked cylindrical surface/edge the diameter comes from the real geometry,
-    // so don't override it there. (The field holds DIAMETER.)
-    if (!m_thread_on_face && m_thread_radius) {
-        const bool internal = m_thread_internal && m_thread_internal->GetValue();
-        const double d = internal ? s->minor_diameter_mm() : s->major_diameter_mm;
-        m_thread_radius->SetValue(d);
-    }
+    if (m_thread_depth) m_thread_depth->SetValue(internal ? s->internal_depth_mm() : s->thread_depth_mm());
+    if (m_thread_radius) m_thread_radius->SetValue(s->major_diameter_mm);
 
     if (m_status)
         set_status(wxString::Format(_L("Thread standard: %s  (pitch %.3g mm)"),
                                             m_thread_std->GetString(sel), s->pitch_mm));
 }
 
-void DesignPanel::infer_thread_spec(double diameter)
+void DesignPanel::infer_thread_spec(double diameter, bool internal)
 {
-    // Snap to the nearest standard thread by nominal (major) diameter, so picking a Ø9.9 boss
-    // gives M10 — the M diameter, pitch AND depth all follow from the cylinder's base diameter.
+    // Snap to the nearest standard thread, so picking a Ø9.9 boss gives M10 and a Ø5 tap-drill
+    // hole gives M6 — the M diameter, pitch AND depth all follow from the cylinder. A boss is
+    // matched on the MAJOR diameter; a hole on the MINOR one, since a hole to be tapped is
+    // drilled at the tap-drill size.
     const auto& stds = thread_standards();
     int best = -1; double bestErr = 1e30;
     for (int i = 0; i < int(stds.size()); ++i) {
-        const double e = std::abs(stds[i].major_diameter_mm - diameter);
+        const double ref = internal ? stds[i].minor_diameter_mm() : stds[i].major_diameter_mm;
+        const double e = std::abs(ref - diameter);
         if (e < bestErr) { bestErr = e; best = i; }
     }
     if (best < 0) { if (m_thread_radius) m_thread_radius->SetValue(diameter); return; }
     const ThreadSpec& s = stds[best];
     if (m_thread_std)    m_thread_std->SetSelection(best + 1);    // row 0 is "Custom"
-    if (m_thread_radius) m_thread_radius->SetValue(s.major_diameter_mm);  // field = DIAMETER
+    if (m_thread_radius) m_thread_radius->SetValue(s.major_diameter_mm);  // field = NOMINAL diameter
     if (m_thread_pitch)  m_thread_pitch->SetValue(s.pitch_mm);
-    if (m_thread_depth)  m_thread_depth->SetValue(s.thread_depth_mm());
+    if (m_thread_depth)  m_thread_depth->SetValue(internal ? s.internal_depth_mm() : s.thread_depth_mm());
 }
 
 void DesignPanel::on_add_thread()
 {
     bool internal = m_thread_internal->GetValue();
     if (internal && m_doc.body.IsNull()) {
-        set_status(_L("Thread needs a solid body — add or import one first"));
+        set_status(StatusKind::Warning, _L("Thread needs a solid body — add or import one first"));
         return;
     }
     SketchPlane plane = thread_plane();
@@ -5278,13 +5214,13 @@ void DesignPanel::on_add_thread()
     const int tidx = m_doc.add_thread(m_thread_radius->GetValue() * 0.5, m_thread_pitch->GetValue(),
                      m_thread_height->GetValue(), m_thread_depth->GetValue(),
                      internal, m_thread_x->GetValue(), m_thread_y->GetValue(),
-                     plane, "Thread" + std::to_string(m_feature_counter));
+                     plane, feature_name(_L("Thread")));
     // On-surface internal thread taps the body the cylindrical face belongs to.
     if (m_thread_on_face && tidx >= 0 && tidx < int(m_doc.features.size()))
         m_doc.features[tidx].target_body = m_thread_face_body;
 
     if (!recompute_guarded(_L("Rebuilding model…")))
-        set_status(_L("Recompute error: ") + wxString::FromUTF8(m_doc.error));
+        set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
         set_status_ok();
 
@@ -5299,16 +5235,16 @@ void DesignPanel::on_add_revolve()
     }
     const BooleanMode mode = static_cast<BooleanMode>(m_revolve_mode->GetSelection());
     if (mode != BooleanMode::New && m_doc.body.IsNull()) {
-        set_status(_L("Revolve needs a solid body — add or import one first"));
+        set_status(StatusKind::Warning, _L("Revolve needs a solid body — add or import one first"));
         return;
     }
     m_feature_counter++;
     m_doc.add_revolve(m_revolve_sketch_ref, m_revolve_angle->GetValue(),
                       m_revolve_axis->GetSelection(), m_revolve_flip->GetValue(),
-                      mode, "Revolve" + std::to_string(m_feature_counter));
+                      mode, feature_name(_L("Revolve")));
 
     if (!recompute_guarded(_L("Rebuilding model…")))
-        set_status(_L("Recompute error: ") + wxString::FromUTF8(m_doc.error));
+        set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
         set_status_ok();
 
@@ -5330,15 +5266,15 @@ void DesignPanel::on_add_sweep()
     }
     const BooleanMode mode = static_cast<BooleanMode>(m_sweep_mode->GetSelection());
     if (mode != BooleanMode::New && m_doc.body.IsNull()) {
-        set_status(_L("Sweep needs a solid body — add or import one first"));
+        set_status(StatusKind::Warning, _L("Sweep needs a solid body — add or import one first"));
         return;
     }
     m_feature_counter++;
     m_doc.add_sweep(m_sweep_profile_ref, path_ref, mode,
-                    "Sweep" + std::to_string(m_feature_counter));
+                    feature_name(_L("Sweep")));
 
     if (!recompute_guarded(_L("Rebuilding model…")))
-        set_status(_L("Recompute error: ") + wxString::FromUTF8(m_doc.error));
+        set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
         set_status_ok();
 
@@ -5358,15 +5294,15 @@ void DesignPanel::on_add_loft()
     }
     const BooleanMode mode = static_cast<BooleanMode>(m_loft_mode->GetSelection());
     if (mode != BooleanMode::New && m_doc.body.IsNull()) {
-        set_status(_L("Loft needs a solid body — add or import one first"));
+        set_status(StatusKind::Warning, _L("Loft needs a solid body — add or import one first"));
         return;
     }
     m_feature_counter++;
     m_doc.add_loft(refs, m_loft_ruled->GetValue(), mode,
-                   "Loft" + std::to_string(m_feature_counter));
+                   feature_name(_L("Loft")));
 
     if (!recompute_guarded(_L("Rebuilding model…")))
-        set_status(_L("Recompute error: ") + wxString::FromUTF8(m_doc.error));
+        set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
         set_status_ok();
 
@@ -5381,9 +5317,9 @@ void DesignPanel::on_add_surface_extrude()
     }
     m_feature_counter++;
     m_doc.add_surface_extrude(m_surf_extrude_sketch_ref, m_surf_extrude_distance->GetValue(),
-                              "SurfaceExtrude" + std::to_string(m_feature_counter));
+                              feature_name(_L("Surface Extrude")));
     if (!recompute_guarded(_L("Rebuilding model…")))
-        set_status(_L("Recompute error: ") + wxString::FromUTF8(m_doc.error));
+        set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
         set_status_ok();
     refresh_tree();
@@ -5398,9 +5334,9 @@ void DesignPanel::on_add_surface_revolve()
     m_feature_counter++;
     m_doc.add_surface_revolve(m_surf_revolve_sketch_ref, m_surf_revolve_angle->GetValue(),
                               m_surf_revolve_axis->GetSelection(),
-                              "SurfaceRevolve" + std::to_string(m_feature_counter));
+                              feature_name(_L("Surface Revolve")));
     if (!recompute_guarded(_L("Rebuilding model…")))
-        set_status(_L("Recompute error: ") + wxString::FromUTF8(m_doc.error));
+        set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
         set_status_ok();
     refresh_tree();
@@ -5418,9 +5354,9 @@ void DesignPanel::on_add_surface_loft()
     }
     m_feature_counter++;
     m_doc.add_surface_loft(refs, m_surf_loft_ruled->GetValue(),
-                           "SurfaceLoft" + std::to_string(m_feature_counter));
+                           feature_name(_L("Surface Loft")));
     if (!recompute_guarded(_L("Rebuilding model…")))
-        set_status(_L("Recompute error: ") + wxString::FromUTF8(m_doc.error));
+        set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
         set_status_ok();
     refresh_tree();
@@ -5434,9 +5370,9 @@ void DesignPanel::on_add_surface_fill()
     }
     m_feature_counter++;
     m_doc.add_surface_fill(m_surf_fill_sketch_ref,
-                           "SurfaceFill" + std::to_string(m_feature_counter));
+                           feature_name(_L("Surface Fill")));
     if (!recompute_guarded(_L("Rebuilding model…")))
-        set_status(_L("Recompute error: ") + wxString::FromUTF8(m_doc.error));
+        set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
         set_status_ok();
     refresh_tree();
@@ -5451,9 +5387,9 @@ void DesignPanel::on_add_surface_offset()
     }
     m_feature_counter++;
     m_doc.add_surface_offset(sel, m_surf_offset_distance->GetValue(),
-                             "SurfaceOffset" + std::to_string(m_feature_counter));
+                             feature_name(_L("Surface Offset")));
     if (!recompute_guarded(_L("Rebuilding model…")))
-        set_status(_L("Recompute error: ") + wxString::FromUTF8(m_doc.error));
+        set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
         set_status_ok();
     refresh_tree();
@@ -5469,9 +5405,9 @@ void DesignPanel::on_add_thicken_surface()
     m_feature_counter++;
     m_doc.add_thicken_surface(sel, m_surf_thicken_thickness->GetValue(),
                               m_surf_thicken_flip->GetValue(),
-                              "ThickenSurface" + std::to_string(m_feature_counter));
+                              feature_name(_L("Thicken Surface")));
     if (!recompute_guarded(_L("Rebuilding model…")))
-        set_status(_L("Recompute error: ") + wxString::FromUTF8(m_doc.error));
+        set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
         set_status_ok();
     refresh_tree();
@@ -5554,7 +5490,7 @@ void DesignPanel::on_add_transform()
         m_move_body     = -1;
     }
     if (m_doc.bodies.empty()) {
-        set_status(_L("Transform needs a body — add or import one first"));
+        set_status(StatusKind::Warning, _L("Transform needs a body — add or import one first"));
         return;
     }
     const int sel = m_xf_body->GetSelection();
@@ -5565,9 +5501,9 @@ void DesignPanel::on_add_transform()
     const Vec3d pivot(m_xf_pivot_x->GetValue(), m_xf_pivot_y->GetValue(), m_xf_pivot_z->GetValue());
     m_feature_counter++;
     m_doc.add_transform(target, trans, axis, pivot, m_xf_angle->GetValue(), m_xf_copy->GetValue(),
-                        "Transform" + std::to_string(m_feature_counter));
+                        feature_name(_L("Transform")));
     if (!recompute_guarded(_L("Rebuilding model…")))
-        set_status(_L("Recompute error: ") + wxString::FromUTF8(m_doc.error));
+        set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
         set_status_ok();
     refresh_tree();
@@ -5576,7 +5512,7 @@ void DesignPanel::on_add_transform()
 void DesignPanel::on_add_mirror()
 {
     if (m_doc.bodies.empty()) {
-        set_status(_L("Mirror needs a body — add or import one first"));
+        set_status(StatusKind::Warning, _L("Mirror needs a body — add or import one first"));
         return;
     }
     const int sel = m_mirror_body->GetSelection();
@@ -5584,9 +5520,9 @@ void DesignPanel::on_add_mirror()
     const BooleanMode mode = m_mirror_keep->GetValue() ? BooleanMode::New : BooleanMode::Add;
     m_feature_counter++;
     m_doc.add_mirror(plane_from_choice(m_mirror_plane->GetSelection()), target, mode,
-                     "Mirror" + std::to_string(m_feature_counter));
+                     feature_name(_L("Mirror")));
     if (!recompute_guarded(_L("Rebuilding model…")))
-        set_status(_L("Recompute error: ") + wxString::FromUTF8(m_doc.error));
+        set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
         set_status_ok();
     refresh_tree();
@@ -5595,22 +5531,20 @@ void DesignPanel::on_add_mirror()
 void DesignPanel::on_add_thicken()
 {
     if (m_doc.bodies.empty()) {
-        set_status(_L("Thicken needs a solid body — add or import one first"));
+        set_status(StatusKind::Warning, _L("Thicken needs a solid body — add or import one first"));
         return;
     }
     if (m_sel_solid_face < 0) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("Pick a solid face to thicken first"));
-        m_status->Refresh();
+        set_status(StatusKind::Error, _L("Pick a solid face to thicken first"));
         return;
     }
     const int sel = m_thicken_body->GetSelection();
     const int target = (sel != wxNOT_FOUND) ? sel : -1;
     m_feature_counter++;
     m_doc.add_thicken(target, m_sel_solid_face, m_thicken_thickness->GetValue(),
-                      m_thicken_flip->GetValue(), "Thicken" + std::to_string(m_feature_counter));
+                      m_thicken_flip->GetValue(), feature_name(_L("Thicken")));
     if (!recompute_guarded(_L("Rebuilding model…")))
-        set_status(_L("Recompute error: ") + wxString::FromUTF8(m_doc.error));
+        set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
         set_status_ok();
     refresh_tree();
@@ -5619,7 +5553,7 @@ void DesignPanel::on_add_thicken()
 void DesignPanel::on_add_rib()
 {
     if (m_doc.bodies.empty()) {
-        set_status(_L("Rib needs a solid body — add or import one first"));
+        set_status(StatusKind::Warning, _L("Rib needs a solid body — add or import one first"));
         return;
     }
     const int bsel = m_rib_body->GetSelection();
@@ -5633,9 +5567,9 @@ void DesignPanel::on_add_rib()
     }
     m_feature_counter++;
     m_doc.add_rib(sketch_ref, m_rib_entity->GetValue(), m_rib_thickness->GetValue(),
-                  m_rib_depth->GetValue(), target, "Rib" + std::to_string(m_feature_counter));
+                  m_rib_depth->GetValue(), target, feature_name(_L("Rib")));
     if (!recompute_guarded(_L("Rebuilding model…")))
-        set_status(_L("Recompute error: ") + wxString::FromUTF8(m_doc.error));
+        set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
         set_status_ok();
     refresh_tree();
@@ -5644,7 +5578,7 @@ void DesignPanel::on_add_rib()
 void DesignPanel::on_add_project()
 {
     if (m_doc.bodies.empty()) {
-        set_status(_L("Project needs a body — add or import one first"));
+        set_status(StatusKind::Warning, _L("Project needs a body — add or import one first"));
         return;
     }
     const int sel = m_proj_source_body->GetSelection();
@@ -5653,9 +5587,9 @@ void DesignPanel::on_add_project()
     m_feature_counter++;
     m_doc.add_project_edges(src_body, {}, face,
                             plane_from_choice(m_proj_plane->GetSelection()),
-                            "Project" + std::to_string(m_feature_counter));
+                            feature_name(_L("Project")));
     if (!recompute_guarded(_L("Rebuilding model…")))
-        set_status(_L("Recompute error: ") + wxString::FromUTF8(m_doc.error));
+        set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
         set_status_ok();
     refresh_tree();
@@ -5664,22 +5598,20 @@ void DesignPanel::on_add_project()
 void DesignPanel::on_add_delete_face()
 {
     if (m_doc.bodies.empty()) {
-        set_status(_L("Delete Face needs a body — add or import one first"));
+        set_status(StatusKind::Warning, _L("Delete Face needs a body — add or import one first"));
         return;
     }
     if (m_del_faces.empty()) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("Add at least one face to delete first"));
-        m_status->Refresh();
+        set_status(StatusKind::Error, _L("Add at least one face to delete first"));
         return;
     }
     const int sel = m_del_face_body->GetSelection();
     const int target = (sel != wxNOT_FOUND) ? sel : -1;
     m_feature_counter++;
-    m_doc.add_delete_face(target, m_del_faces, "DeleteFace" + std::to_string(m_feature_counter));
+    m_doc.add_delete_face(target, m_del_faces, feature_name(_L("Delete Face")));
     m_del_faces.clear();  // consumed; fresh state for the next use
     if (!recompute_guarded(_L("Rebuilding model…")))
-        set_status(_L("Recompute error: ") + wxString::FromUTF8(m_doc.error));
+        set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
         set_status_ok();
     refresh_tree();
@@ -5691,9 +5623,9 @@ void DesignPanel::on_add_helix()
     m_doc.add_helix(plane_from_choice(m_helix_plane->GetSelection()),
                     m_helix_radius->GetValue(), m_helix_pitch->GetValue(),
                     m_helix_height->GetValue(), m_helix_left_handed->GetValue(),
-                    m_helix_taper->GetValue(), "Helix" + std::to_string(m_feature_counter));
+                    m_helix_taper->GetValue(), feature_name(_L("Helix")));
     if (!recompute_guarded(_L("Rebuilding model…")))
-        set_status(_L("Recompute error: ") + wxString::FromUTF8(m_doc.error));
+        set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
         set_status_ok();
     refresh_tree();
@@ -5704,32 +5636,26 @@ void DesignPanel::on_add_mate()
     const int sel_a = m_mate_cs_a->GetSelection();
     const int sel_b = m_mate_cs_b->GetSelection();
     if (sel_a == wxNOT_FOUND || sel_b == wxNOT_FOUND) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("Mate needs two CoordSys features — create them first"));
-        m_status->Refresh();
+        set_status(StatusKind::Warning, _L("Mate needs two coordinate systems — create them first"));
         return;
     }
     const int cs_a = int(reinterpret_cast<intptr_t>(m_mate_cs_a->GetClientData(sel_a)));
     const int cs_b = int(reinterpret_cast<intptr_t>(m_mate_cs_b->GetClientData(sel_b)));
     if (cs_a == cs_b) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("Mate: CS A and CS B must be different CoordSys features"));
-        m_status->Refresh();
+        set_status(StatusKind::Error, _L("Mate: A and B must be different coordinate systems"));
         return;
     }
     m_feature_counter++;
     int idx = m_doc.add_mate(m_mate_kind->GetSelection(), cs_a, cs_b,
                              m_mate_offset->GetValue(), m_mate_angle->GetValue(),
                              m_mate_flip->GetValue(),
-                             "Mate" + std::to_string(m_feature_counter));
+                             feature_name(_L("Mate")));
     if (idx < 0) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("Mate rejected"));
-        m_status->Refresh();
+        set_status(StatusKind::Error, _L("Mate rejected"));
         return;
     }
     if (!recompute_guarded(_L("Rebuilding model…")))
-        set_status(_L("Recompute error: ") + wxString::FromUTF8(m_doc.error));
+        set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
         set_status_ok();
     refresh_tree();
@@ -5738,86 +5664,60 @@ void DesignPanel::on_add_mate()
 void DesignPanel::on_check_interference()
 {
     if (m_doc.bodies.size() < 2) {
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(_L("No interference — need at least two solid bodies to check"));
-        m_status->Refresh();
+        set_status(StatusKind::Info, _L("Interference needs at least two bodies"));
         return;
     }
     const auto pairs = m_doc.check_interference();
     if (pairs.empty()) {
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(_L("No interference found"));
-        m_status->Refresh();
+        set_status(StatusKind::Ok, _L("No interference found"));
         return;
     }
-    double worst = 0;
-    for (const auto& p : pairs)
-        if (p.volume > worst) worst = p.volume;
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(wxString::Format(_L("%zu interference pairs, worst %.2f mm³"),
-                                        pairs.size(), worst));
-    m_status->Refresh();
-    wxString msg = _L("Interference pairs:\n\n");
-    for (const auto& p : pairs) {
-        // 1-based, like every other body label in this panel and in the parts tree:
-        // reporting "Body 1" for what the tree calls "Body 2" is worse than no name.
-        wxString na = wxString::Format(_L("Body %d"), p.body_a + 1);
-        wxString nb = wxString::Format(_L("Body %d"), p.body_b + 1);
-        if (p.body_a >= 0 && p.body_a < int(m_doc.bodies.size()) && !m_doc.bodies[p.body_a].name.empty())
-            na = wxString::FromUTF8(m_doc.bodies[p.body_a].name);
-        if (p.body_b >= 0 && p.body_b < int(m_doc.bodies.size()) && !m_doc.bodies[p.body_b].name.empty())
-            nb = wxString::FromUTF8(m_doc.bodies[p.body_b].name);
-        msg += wxString::Format("%s <-> %s: %.4f mm³\n", na, nb, p.volume);
-    }
-    wxMessageBox(msg, _L("Interference"), wxOK, this);
+    // A report, so it goes to the status line like every other report — no modal to dismiss.
+    // Worst overlap first; 1-based names, the wording the parts tree uses.
+    auto body_name = [this](int b) {
+        if (b >= 0 && b < int(m_doc.bodies.size()) && !m_doc.bodies[b].name.empty())
+            return wxString::FromUTF8(m_doc.bodies[b].name);
+        return wxString::Format(_L("Body %d"), b + 1);
+    };
+    auto sorted = pairs;
+    std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.volume > b.volume; });
+    wxString list;
+    const size_t shown = std::min<size_t>(sorted.size(), 3);
+    for (size_t k = 0; k < shown; ++k)
+        list += (k ? ", " : "") + wxString::Format(_L("%s ↔ %s %.2f mm³"), body_name(sorted[k].body_a),
+                                                   body_name(sorted[k].body_b), sorted[k].volume);
+    if (sorted.size() > shown)
+        list += ", …";
+    set_status(StatusKind::Warning, wxString::Format(_L("%zu overlapping pairs: %s"), sorted.size(), list));
 }
 
-// Mass properties of the selected solid. A report, not a feature: it never checkpoints, never
-// recomputes and never opens a card, which is why it sits beside the interference check rather
-// than in the on_add_* family. The caller only reaches us with m_sel_solid_body in range.
+// Volume and surface area of the selected body. A report, not a feature: it never checkpoints,
+// never recomputes and never opens a card, which is why it sits beside the interference check
+// rather than in the on_add_* family. It reports geometry only — there is no density, so no mass.
 void DesignPanel::on_mass_properties()
 {
     // This bounds check is not defensive padding — it is what makes the verb safe to fire from
-    // the socket, which has no offer menu to grey the row out. The menu-only route never reached
-    // here with nothing selected; run_verb does. Nothing selected is not an error, hence the
-    // neutral colour, not the error red.
+    // the socket, which has no offer menu to grey the row out.
     if (m_sel_solid_body < 0 || m_sel_solid_body >= int(m_doc.bodies.size())) {
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(_L("Select a solid body first — its mass properties are what is reported"));
-        m_status->Refresh();
+        set_status(StatusKind::Info, _L("Select a body to measure it"));
         return;
     }
     const auto mp = GeometryEngine::mass_properties(m_doc.bodies[m_sel_solid_body].shape);
     if (!mp.valid) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("Mass properties could not be computed for this body"));
-        m_status->Refresh();
+        set_status(StatusKind::Error, _L("This body could not be measured"));
         return;
     }
-    // 1-based, and the body's own name when it has one — the same wording the parts list uses.
     wxString name = wxString::Format(_L("Body %d"), m_sel_solid_body + 1);
     if (!m_doc.bodies[m_sel_solid_body].name.empty())
         name = wxString::FromUTF8(m_doc.bodies[m_sel_solid_body].name);
-    if (!mp.is_solid) {
+    // Same units and precision as the interference report: mm³ and mm², two decimals.
+    if (!mp.is_solid)
         // Sheet body: quoting a volume here would be inventing material that is not there.
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(wxString::Format(_L("%s: sheet body — %.2f cm² of surface, no volume"),
-                                    name, mp.surface_area / 100.0));
-        m_status->Refresh();
-        wxMessageBox(wxString::Format(_L("%s\n\nSheet body (open shell)\nSurface area: %.2f cm²\n\n"
-                                         "A sheet encloses no material, so it has no volume. "
-                                         "Thicken it into a solid to get one."),
-                                      name, mp.surface_area / 100.0),
-                     _L("Mass properties"), wxOK, this);
-        return;
-    }
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(wxString::Format(_L("%s: %.3f cm³, %.2f cm²"),
-                                        name, mp.volume / 1000.0, mp.surface_area / 100.0));
-    m_status->Refresh();
-    wxMessageBox(wxString::Format(_L("%s\n\nVolume: %.3f cm³\nSurface area: %.2f cm²"),
-                                  name, mp.volume / 1000.0, mp.surface_area / 100.0),
-                 _L("Mass properties"), wxOK, this);
+        set_status(StatusKind::Info, wxString::Format(_L("%s: sheet body, area %.2f mm², no volume — thicken it to get one"),
+                                                      name, mp.surface_area));
+    else
+        set_status(StatusKind::Info, wxString::Format(_L("%s: volume %.2f mm³, area %.2f mm²"),
+                                                      name, mp.volume, mp.surface_area));
 }
 
 // The rows are only the SHEET bodies, so a row index is NOT a body index — with a solid at 0
@@ -5863,7 +5763,7 @@ void DesignPanel::select_sheet_choice(ComboBox* c, int body)
 void DesignPanel::on_add_pattern()
 {
     if (m_doc.bodies.empty()) {
-        set_status(_L("Pattern needs a solid body — add or import one first"));
+        set_status(StatusKind::Warning, _L("Pattern needs a solid body — add or import one first"));
         return;
     }
     const bool circular = (m_pattern_type->GetSelection() == 1);
@@ -5873,10 +5773,10 @@ void DesignPanel::on_add_pattern()
     m_doc.add_pattern(circular, int(m_pattern_count->GetValue()),
                       m_pattern_spacing->GetValue(), m_pattern_dir->GetSelection(),
                       m_pattern_angle->GetValue(), target,
-                      "Pattern" + std::to_string(m_feature_counter));
+                      feature_name(_L("Pattern")));
 
     if (!recompute_guarded(_L("Rebuilding model…")))
-        set_status(_L("Recompute error: ") + wxString::FromUTF8(m_doc.error));
+        set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
         set_status_ok();
 
@@ -5948,7 +5848,7 @@ void DesignPanel::fill_body_choice(ComboBox* c, int as_of_feature, int want)
 void DesignPanel::on_add_boolean()
 {
     if (m_doc.bodies.size() < 2) {
-        set_status(_L("Boolean needs two solid bodies — add or import a second one"));
+        set_status(StatusKind::Warning, _L("Boolean needs two bodies — add or import a second one"));
         return;
     }
     const int sel = m_bool_op->GetSelection();
@@ -5958,9 +5858,9 @@ void DesignPanel::on_add_boolean()
     m_feature_counter++;
     m_doc.add_boolean(op, m_bool_target->GetSelection(), m_bool_tool->GetSelection(),
                       m_bool_keep->GetValue(), m_bool_tol->GetValue(), -1, -1,
-                      "Boolean" + std::to_string(m_feature_counter));
+                      feature_name(_L("Boolean")));
     if (!recompute_guarded(_L("Rebuilding model…")))
-        set_status(_L("Recompute error: ") + wxString::FromUTF8(m_doc.error));
+        set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
         set_status_ok();
     refresh_tree();
@@ -5969,15 +5869,15 @@ void DesignPanel::on_add_boolean()
 void DesignPanel::on_add_cut()
 {
     if (m_doc.bodies.empty()) {
-        set_status(_L("Cut needs a solid body — add or import one first"));
+        set_status(StatusKind::Warning, _L("Cut needs a solid body — add or import one first"));
         return;
     }
     m_feature_counter++;
     m_doc.add_cut(plane_from_choice(m_cut_plane->GetSelection()), m_cut_offset->GetValue(),
                   /*flip*/ false, /*keep_upper*/ true, /*keep_lower*/ true,
-                  m_cut_target->GetSelection(), "Cut" + std::to_string(m_feature_counter));
+                  m_cut_target->GetSelection(), feature_name(_L("Cut")));
     if (!recompute_guarded(_L("Rebuilding model…")))
-        set_status(_L("Recompute error: ") + wxString::FromUTF8(m_doc.error));
+        set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
         set_status_ok();
     refresh_tree();
@@ -6195,9 +6095,52 @@ wxPoint DesignPanel::offer_anchor() const
 // One place that writes the status line, so every hint wraps instead of clipping at the panel
 // edge. wxStaticText::Wrap() is destructive, which is fine here: the label is replaced whole
 // each time, never appended to.
-void DesignPanel::set_status(const wxString& text)
+// Kernel and OCCT messages are written for developers ("fuse failed", "BRep_API: command not
+// done", an empty string). The status line is for the person modelling, so the recurring ones
+// are said in the drawing office's words; anything unrecognised is still shown rather than
+// hidden, because a vague sentence that hides the only clue is worse than a terse one.
+wxString DesignPanel::kernel_error_text(const std::string& err)
+{
+    struct Map { const char* needle; const char* sentence; };
+    static const Map kMap[] = {
+        { "fuse failed",                  L("the new shape could not be joined to the body") },
+        { "cut failed",                   L("the new shape could not be cut from the body") },
+        { "intersect failed",             L("the shapes could not be intersected") },
+        { "no solid-producing features",  L("nothing in the history makes a solid yet") },
+        { "sketch profile wire failed",   L("the sketch profile is not a clean closed loop") },
+        { "does not intersect",           L("the tool does not touch the body") },
+        { "unknown identifier",           L("an expression uses a variable that does not exist") },
+        { "division by zero",             L("an expression divides by zero") },
+        { "variable cycle",               L("two variables are defined in terms of each other") },
+    };
+    if (err.empty())
+        return _L("a geometry operation failed");
+    for (const Map& m : kMap)
+        if (err.find(m.needle) != std::string::npos)
+            return _(m.sentence);
+    if (err.find("OCCT") != std::string::npos || err.find("BRep") != std::string::npos
+        || err.find("Standard_") != std::string::npos || err.find("StdFail") != std::string::npos)
+        return _L("a geometry operation failed");
+    return wxString::FromUTF8(err);
+}
+
+void DesignPanel::set_status(StatusKind kind, const wxString& body)
 {
     if (m_status == nullptr) return;
+    wxColour colour;
+    const wchar_t* glyph = nullptr;
+    switch (kind) {
+    case StatusKind::Info:    colour = wxNullColour;              break;
+    case StatusKind::Ok:      colour = wxColour(120, 210, 120);   glyph = L"\u2713 "; break;   // ✓
+    case StatusKind::Warning: colour = wxColour(220, 160, 60);    glyph = L"\u26A0 "; break;   // ⚠
+    case StatusKind::Error:   colour = wxColour(235, 110, 110);   glyph = L"\u2717 "; break;   // ✗
+    }
+    m_status->SetForegroundColour(colour);
+    // Callers that already lead with a glyph (the DOF line) keep theirs.
+    wxString text = body;
+    if (glyph != nullptr && !text.IsEmpty() && !text.StartsWith(L"\u2713") && !text.StartsWith(L"\u2717")
+        && !text.StartsWith(L"\u26A0"))
+        text = wxString(glyph) + text;
     m_status->SetLabel(text);   // the ONE place that may call SetLabel directly
     // m_status is HIDDEN and kept only as the owner of the text and its colour — every caller
     // sets the colour on it just before calling here, so this stays the one place that knows
@@ -6225,8 +6168,9 @@ void DesignPanel::set_status(const wxString& text)
 // apply); `picks` = the size of the set the gesture accumulates.
 //
 // It is deliberately explicit about the gesture that ENDS each tool, because none of them is
-// discoverable: a click on empty space applies an edit-op or a transform, right-click cancels it,
-// and Esc downgrades an armed tool to Select before it ever exits the sketch.
+// discoverable: Enter (or ✓) applies an edit-op or a transform, Esc drops it, and a second Esc
+// downgrades the armed tool to Select before it ever exits the sketch. Right-click only abandons
+// the gesture in progress; with nothing in progress it opens the offer.
 static wxString sketch_step_prompt(DesignSketchTool::Mode m, int step, int picks)
 {
     using Mode = DesignSketchTool::Mode;
@@ -6239,7 +6183,7 @@ static wxString sketch_step_prompt(DesignSketchTool::Mode m, int step, int picks
         return picks > 0
             ? wxString::Format(_L("%d selected  ·  Del removes them  ·  Shift-click adds  ·  "
                                   "double-click takes the whole loop"), picks)
-            : _L("Select — click an entity to pick it  ·  drag an endpoint or centre to move it  ·  "
+            : _L("Select — click an entity to pick it  ·  drag an endpoint or center to move it  ·  "
                  "Shift-click adds  ·  Del removes");
     case Mode::Constrain:
         return picks > 0
@@ -6251,17 +6195,17 @@ static wxString sketch_step_prompt(DesignSketchTool::Mode m, int step, int picks
                          : _L("Dimension — click the second point");
     case Mode::Line:
         return step == 0 ? _L("Line — click the start point")
-                         : _L("Line — click the end point, or type the length");
+                         : _L("Line — click the end point; its length and angle can then be typed");
     case Mode::Polyline:
         return step == 0 ? _L("Polyline — click the first point")
                          : pick_more(_L("Polyline — click the next point  ·  click the start point "
-                                        "to close it  ·  right-click to end the chain"), step);
+                                        "to close it  ·  right-click, double-click or Enter ends the chain"), step);
     case Mode::CornerRect:
         return step == 0 ? _L("Rectangle — click one corner")
                          : _L("Rectangle — click the opposite corner");
     case Mode::CenterRect:
-        return step == 0 ? _L("Centre rectangle — click the centre")
-                         : _L("Centre rectangle — click a corner");
+        return step == 0 ? _L("Center rectangle — click the center")
+                         : _L("Center rectangle — click a corner");
     case Mode::ObliqueRect:
         return step == 0 ? _L("Oblique rectangle — click the start of the base edge")
              : step == 1 ? _L("Oblique rectangle — click the end of the base edge (this sets the angle)")
@@ -6271,8 +6215,8 @@ static wxString sketch_step_prompt(DesignSketchTool::Mode m, int step, int picks
              : step == 1 ? _L("Rounded rectangle — click the opposite corner")
                          : _L("Rounded rectangle — click to set the corner radius");
     case Mode::CenterCircle:
-        return step == 0 ? _L("Circle — click the centre")
-                         : _L("Circle — click to set the radius, or type it");
+        return step == 0 ? _L("Circle — click the center")
+                         : _L("Circle — click to set the radius; it can then be typed");
     case Mode::TwoPointCircle:
         return step == 0 ? _L("Circle (2 points) — click one end of the diameter")
                          : _L("Circle (2 points) — click the other end of the diameter");
@@ -6288,87 +6232,87 @@ static wxString sketch_step_prompt(DesignSketchTool::Mode m, int step, int picks
         return step == 0 ? _L("Tangent arc — click the endpoint it leaves from")
                          : _L("Tangent arc — click its far end");
     case Mode::CenterArc:
-        return step == 0 ? _L("Centre arc — click the centre")
-             : step == 1 ? _L("Centre arc — click the start point (this sets the radius)")
-                         : _L("Centre arc — click the end point");
+        return step == 0 ? _L("Center arc — click the center")
+             : step == 1 ? _L("Center arc — click the start point (this sets the radius)")
+                         : _L("Center arc — click the end point");
     case Mode::Slot:
-        return step == 0 ? _L("Slot — click one end of the centreline")
-             : step == 1 ? _L("Slot — click the other end of the centreline")
+        return step == 0 ? _L("Slot — click one end of the centerline")
+             : step == 1 ? _L("Slot — click the other end of the centerline")
                          : _L("Slot — click to set the width");
     case Mode::ArcSlot:
-        return step == 0 ? _L("Arc slot — click the centre the slot curves about")
-             : step == 1 ? _L("Arc slot — click the start of the centreline (this sets the radius)")
-             : step == 2 ? _L("Arc slot — click the end of the centreline")
+        return step == 0 ? _L("Arc slot — click the center the slot curves about")
+             : step == 1 ? _L("Arc slot — click the start of the centerline (this sets the radius)")
+             : step == 2 ? _L("Arc slot — click the end of the centerline")
                          : _L("Arc slot — click to set the width");
     case Mode::Polygon:
-        return step == 0 ? _L("Polygon — click the centre")
+        return step == 0 ? _L("Polygon — click the center")
                          : _L("Polygon — click a vertex (this sets size and orientation)");
     case Mode::Ellipse:
-        return step == 0 ? _L("Ellipse — click the centre")
+        return step == 0 ? _L("Ellipse — click the center")
              : step == 1 ? _L("Ellipse — click the end of the major axis")
                          : _L("Ellipse — click a point on the minor axis");
     case Mode::EllipseArc:
-        return step == 0 ? _L("Elliptical arc — click the centre")
+        return step == 0 ? _L("Elliptical arc — click the center")
              : step == 1 ? _L("Elliptical arc — click the end of the major axis")
              : step == 2 ? _L("Elliptical arc — click a point on the minor axis")
              : step == 3 ? _L("Elliptical arc — click where the arc starts")
                          : _L("Elliptical arc — click where the arc ends");
     case Mode::BSpline:
         return step == 0 ? _L("Spline — click the first control point")
-                         : pick_more(_L("Spline — click the next control point  ·  right-click to "
-                                        "finish the curve"), step);
+                         : pick_more(_L("Spline — click the next control point  ·  right-click, "
+                                        "double-click or Enter finishes the curve"), step);
     case Mode::Point:
         return _L("Point — click to place one; the tool stays armed for more");
     case Mode::Trim:
-        return _L("Trim — click a segment where it crosses another entity  ·  right-click to exit");
+        return _L("Trim — click a segment where it crosses another entity  ·  Esc to exit");
     case Mode::Extend:
         return _L("Extend — click a line or arc to grow it out to the nearest entity  ·  "
-                  "right-click to exit");
+                  "Esc to exit");
     case Mode::Fillet:
         return step == 0 ? _L("Fillet — click the first of two lines that meet")
              : step == 1 ? _L("Fillet — click the second line")
                          : _L("Fillet — drag the arrow, or click the number to type the radius  ·  "
-                              "click empty space to apply  ·  right-click cancels");
+                              "Enter applies  ·  Esc cancels");
     case Mode::Chamfer:
         return step == 0 ? _L("Chamfer — click the first of two lines that meet")
              : step == 1 ? _L("Chamfer — click the second line")
                          : _L("Chamfer — drag the arrow, or click the number to type the setback  ·  "
-                              "click empty space to apply  ·  right-click cancels");
+                              "Enter applies  ·  Esc cancels");
     case Mode::Offset:
         return step == 0 ? _L("Offset — click the entity to offset")
                          : _L("Offset — drag the arrow to either side, or click the number to type "
-                              "the distance  ·  click empty space to apply  ·  right-click cancels");
+                              "the distance  ·  Enter applies  ·  Esc cancels");
     case Mode::Mirror:
         // The two-phase pick is the one gesture users reported as unguided: nothing said the
-        // AXIS comes first, and nothing said an empty click is what applies it.
+        // AXIS comes first, and nothing said how it is applied.
         return step == 0
             ? _L("Mirror — first click the LINE to mirror about (a construction line works)")
             : picks == 0
-                ? _L("Mirror — axis set  ·  now click the entities to mirror  ·  right-click cancels")
+                ? _L("Mirror — axis set  ·  now click the entities to mirror  ·  Esc cancels")
                 : wxString::Format(_L("Mirror — axis set  ·  %d to mirror  ·  click another to add or "
-                                      "remove it  ·  click empty space to apply"), picks);
+                                      "remove it  ·  Enter applies"), picks);
     case Mode::Move:
         return step == 0 ? _L("Move — click the entities to move")
                          : pick_more(_L("Move — drag the handle, or click the number to type the "
-                                        "distance  ·  click empty space to apply"), picks);
+                                        "distance  ·  Enter applies"), picks);
     case Mode::Rotate:
         return step == 0 ? _L("Rotate — click the entities to rotate")
                          : pick_more(_L("Rotate — drag the handle, or click the number to type the "
-                                        "angle  ·  click empty space to apply"), picks);
+                                        "angle  ·  Enter applies"), picks);
     case Mode::Scale:
         return step == 0 ? _L("Scale — click the entities to scale")
                          : pick_more(_L("Scale — drag the handle, or click the number to type the "
-                                        "factor  ·  click empty space to apply"), picks);
+                                        "factor  ·  Enter applies"), picks);
     case Mode::Array:
         return step == 0 ? _L("Array — click the entities to repeat")
                          : pick_more(_L("Array — drag the handle to set the step, click the count to "
-                                        "type it  ·  click empty space to apply"), picks);
+                                        "type it  ·  Enter applies"), picks);
     case Mode::PolarArray:
         return step == 0 ? _L("Polar array — click the entities to repeat")
                          : pick_more(_L("Polar array — drag the handle to set the sweep, click the "
-                                        "count to type it  ·  click empty space to apply"), picks);
+                                        "count to type it  ·  Enter applies"), picks);
     case Mode::TransformArt:
-        return _L("Drag a corner to scale, the centre to move  ·  right-click when done");
+        return _L("Drag a corner to scale, the center to move  ·  Enter or ✓ when done, Esc to discard");
     }
     return wxString();
 }
@@ -6391,9 +6335,7 @@ void DesignPanel::on_sketch_step(int mode, int step, int picks)
         text += _L("  ·  click a constraint badge to remove it");
     m_sketch_step = text;
     if (text.IsEmpty() || m_status == nullptr) return;
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(text);
-    m_status->Refresh();
+    set_status(StatusKind::Info, text);
 }
 
 wxMenuItem* DesignPanel::append_offer_item(wxMenu* menu, int id, const wxString& text,
@@ -6423,6 +6365,38 @@ static void offer_trace(const char* fmt, ...)
     fprintf(stderr, "\n");
     va_end(ap);
     fflush(stderr);
+}
+
+// The offer menu's title line for selection `kind` (an OfferSel), or empty for none.
+wxString DesignPanel::offer_header(int kind) const
+{
+    const int nb = int(m_doc.bodies.size());
+    auto body = [&]() {
+        if (m_sel_solid_body < 0 || m_sel_solid_body >= nb) return wxString();
+        const std::string& n = m_doc.bodies[m_sel_solid_body].name;
+        return n.empty() ? wxString::Format(_L("Body %d"), m_sel_solid_body + 1) : wxString::FromUTF8(n);
+    };
+    switch (OfferSel(kind)) {
+    case OfferSel::None:       return _L("Nothing selected");
+    case OfferSel::BodySolid:  return wxString::Format(_L("%s — solid body"), body());
+    case OfferSel::BodySheet:  return wxString::Format(_L("%s — surface body"), body());
+    case OfferSel::FacePlanar: return wxString::Format(_L("Flat face %d of %s"), m_sel_solid_face, body());
+    case OfferSel::FaceCyl:    return wxString::Format(_L("Cylindrical face %d of %s"), m_sel_solid_face, body());
+    case OfferSel::FaceOther:  return wxString::Format(_L("Face %d of %s"), m_sel_solid_face, body());
+    case OfferSel::EdgeStr:    return wxString::Format(_L("Straight edge %d of %s"), m_sel_solid_edge, body());
+    case OfferSel::EdgeCirc:   return wxString::Format(_L("Circular edge %d of %s"), m_sel_solid_edge, body());
+    case OfferSel::Vertex:     return wxString::Format(_L("Vertex of %s"), body());
+    case OfferSel::SkLoop:     return _L("Sketch profile");
+    case OfferSel::SkNone:     return _L("Sketch — nothing selected");
+    case OfferSel::SkLine:     return _L("Sketch line");
+    case OfferSel::SkArc:      return _L("Sketch curve");
+    case OfferSel::SkPoint:    return _L("Sketch point");
+    case OfferSel::Sk2Ent: {
+        const int n = m_viewport ? m_viewport->sketch_selection_count() : 0;
+        return wxString::Format(_L("%d sketch entities"), n);
+    }
+    default:                   return wxString();
+    }
 }
 
 void DesignPanel::show_offer_menu(const wxPoint& screen_pos)
@@ -6476,6 +6450,17 @@ void DesignPanel::show_offer_menu(const wxPoint& screen_pos)
     std::vector<const OfferVerb*> bound;      // menu id offset -> verb
     const int base = wxID_HIGHEST + 4200;
 
+    // Header: WHAT the rows below act on, named the way the tree and the cards name it. The rows
+    // only make sense against the selection, and the selection is not always visible under the
+    // cursor that opened the menu. Greyed, so it reads as a title and cannot be run.
+    {
+        const wxString head = offer_header(kind);
+        if (!head.empty()) {
+            menu.Append(wxID_ANY, head)->Enable(false);
+            menu.AppendSeparator();
+        }
+    }
+
     for (int row = 0; row < kOfferRowCount; ++row) {
         std::vector<const OfferVerb*> live, family;
         for (int i = 0; i < kOfferVerbCount; ++i) {
@@ -6512,7 +6497,8 @@ void DesignPanel::show_offer_menu(const wxPoint& screen_pos)
                         why ? why : "no verb accepts this selection");
             menu.Append(base + int(bound.size()), s)->Enable(false);
             bound.push_back(nullptr);
-        } else if (live.size() == 1) {
+        } else if (live.size() == 1 && std::none_of(family.begin(), family.end(), [&](const OfferVerb* v) {
+                       return (v->accepts & bit) && !applies(*v); })) {
             offer_trace("row=%d %s -> %s%s", row, kOfferRowNames[row], live[0]->id,
                         live[0]->action ? "" : " (no GUI route)");
             append_offer_item(&menu, base + int(bound.size()), label(*live[0]), *live[0])
@@ -6523,9 +6509,15 @@ void DesignPanel::show_offer_menu(const wxPoint& screen_pos)
             // (Rectangle -> corner / centre / oblique / rounded); one without sits directly in
             // the row. Families keep the order of their first member, so the row's layout is
             // stable across selections — the whole point of a fixed address.
+            // A verb that is about THIS selection but blocked by the document (no body yet, no
+            // second sketch) stays in its place, greyed, with its reason (charter 4.1: disabled
+            // in place, never removed). Verbs that do not accept this selection at all are not
+            // about it and stay out.
             auto* sub = new wxMenu();
             std::vector<std::pair<std::string, wxMenu*>> groups;   // insertion-ordered
-            for (const OfferVerb* v : live) {
+            for (const OfferVerb* v : family) {
+                const bool ok = applies(*v);
+                if (!ok && !(v->accepts & bit)) continue;
                 wxMenu* target = sub;
                 if (v->family && *v->family) {
                     auto it = std::find_if(groups.begin(), groups.end(),
@@ -6538,6 +6530,14 @@ void DesignPanel::show_offer_menu(const wxPoint& screen_pos)
                     } else {
                         target = it->second;
                     }
+                }
+                if (!ok) {
+                    offer_trace("row=%d %s ~ %s BLOCKED", row, kOfferRowNames[row], v->id);
+                    wxString s = tr(v->name);
+                    if (v->refusal) s += wxString::FromUTF8("   —   ") + tr(v->refusal);
+                    append_offer_item(target, base + int(bound.size()), s, *v)->Enable(false);
+                    bound.push_back(nullptr);
+                    continue;
                 }
                 offer_trace("row=%d %s > %s%s%s%s", row, kOfferRowNames[row],
                             (v->family && *v->family) ? v->family : "",
@@ -6625,7 +6625,7 @@ void DesignPanel::show_offer_menu(const wxPoint& screen_pos)
             mate_ghost = false;
         };
         menu.Bind(wxEVT_MENU_HIGHLIGHT,
-                  [this, cs_a, cs_b, opts, mate_base, &mate_ghost, drop_ghost](wxMenuEvent& e) {
+                  [this, cs_a, cs_b, opts, &mate_ghost, drop_ghost](wxMenuEvent& e) {
             const int i = e.GetMenuId() - (mate_base + 1);
             // Off the palette (a verb row, the header, or nothing) — a stale ghost from the row
             // you just left is worse than none, so it goes as soon as the cursor does.
@@ -6635,7 +6635,7 @@ void DesignPanel::show_offer_menu(const wxPoint& screen_pos)
             m_viewport->repaint_now();   // synchronous: the popup owns the loop, a queued repaint is never serviced
         });
 
-        menu.Bind(wxEVT_MENU, [this, cs_a, cs_b, opts, mate_base, drop_ghost](wxCommandEvent& e) {
+        menu.Bind(wxEVT_MENU, [this, cs_a, cs_b, opts, drop_ghost](wxCommandEvent& e) {
             const int i = e.GetId() - (mate_base + 1);
             if (i < 0 || i >= int(opts.size()) || !opts[i].viable) return;
             drop_ghost();         // the real bodies are about to become the ghost's pose
@@ -6643,13 +6643,11 @@ void DesignPanel::show_offer_menu(const wxPoint& screen_pos)
             int idx = m_doc.add_mate(opts[i].kind, cs_a, cs_b, 0.0, 0.0, false,
                                      "Mate" + std::to_string(++m_feature_counter));
             if (idx < 0) {
-                m_status->SetForegroundColour(wxColour(235, 110, 110));
-                set_status(_L("Mate rejected"));
-                m_status->Refresh();
+                set_status(StatusKind::Error, _L("Mate rejected"));
                 return;
             }
             if (!recompute_guarded(_L("Rebuilding model…")))
-                set_status(_L("Recompute error: ") + wxString::FromUTF8(m_doc.error));
+                set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
             else
                 set_status_ok();
             refresh_tree();
@@ -6666,15 +6664,14 @@ void DesignPanel::show_offer_menu(const wxPoint& screen_pos)
     // status message on screen, and clicking one created nothing at all. The whole mate palette
     // enumerated perfectly and fired nothing. Restricting the range keeps each half to its own ids
     // regardless of bind order.
-    menu.Bind(wxEVT_MENU_HIGHLIGHT, [this, &bound, base](wxMenuEvent& e) {
+    menu.Bind(wxEVT_MENU_HIGHLIGHT, [this, &bound](wxMenuEvent& e) {
         const int i = e.GetMenuId() - base;
         if (i < 0 || i >= int(bound.size()) || bound[i] == nullptr || bound[i]->hint == nullptr)
             return;
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(wxGetTranslation(wxString::FromUTF8(bound[i]->hint)));
+        set_status(StatusKind::Info, wxGetTranslation(wxString::FromUTF8(bound[i]->hint), SLIC3R_APP_KEY));
         m_status->Update();   // the popup owns the loop; without this the line repaints late
     }, base, base + 499);   // 499: the mate section starts at base + 500 (see mate_base)
-    menu.Bind(wxEVT_MENU, [this, &bound, base](wxCommandEvent& e) {
+    menu.Bind(wxEVT_MENU, [this, &bound](wxCommandEvent& e) {
         const int i = e.GetId() - base;
         if (i >= 0 && i < int(bound.size()) && bound[i])
             run_offer_action(bound[i]->action);
@@ -6729,10 +6726,8 @@ void DesignPanel::arm_plane_pick(PlanePick target)
     // and reset_plane_refs() restores it when the pick is abandoned; only the arm side was missing.
     if (m_viewport) m_viewport->set_escalate_on_repick(false);
     const bool face = (target == PlanePick::FaceA || target == PlanePick::FaceB);
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(face ? _L("Click a solid FACE in the viewport")
+    set_status(StatusKind::Info, face ? _L("Click a solid FACE in the viewport")
                             : _L("Click a solid EDGE in the viewport"));
-    m_status->Refresh();
 }
 
 // --- Axis helpers ---
@@ -6769,10 +6764,8 @@ void DesignPanel::arm_axis_pick(AxisPick target)
 {
     m_axis_pick = target;
     if (m_viewport) m_viewport->set_escalate_on_repick(false);   // same as arm_plane_pick
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(target == AxisPick::Face ? _L("Click a solid FACE in the viewport")
+    set_status(StatusKind::Info, target == AxisPick::Face ? _L("Click a solid FACE in the viewport")
                                                 : _L("Click a solid EDGE in the viewport"));
-    m_status->Refresh();
 }
 
 // --- CoordSys helpers ---
@@ -6837,10 +6830,8 @@ void DesignPanel::arm_coordsys_pick(CoordSysPick target)
     // escalation is off: clicking the face the card is pointing at is the ANSWER here, not a
     // request for its body.
     if (m_viewport) m_viewport->set_escalate_on_repick(false);
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(target == CoordSysPick::Face ? _L("Click a solid FACE in the viewport")
+    set_status(StatusKind::Info, target == CoordSysPick::Face ? _L("Click a solid FACE in the viewport")
                                                     : _L("Click a solid EDGE in the viewport"));
-    m_status->Refresh();
 }
 
 bool DesignPanel::on_add_plane()
@@ -6851,9 +6842,7 @@ bool DesignPanel::on_add_plane()
     // a success — the user asks for one construction and silently receives another. The kernel
     // keeps its fallback (it must return SOMETHING), but no user gesture should reach it.
     auto refuse = [this](const wxString& why) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(why);
-        m_status->Refresh();
+        set_status(StatusKind::Error, why);
     };
     switch ((PlaneType)m_plane_type->GetSelection()) {
     case PlaneType::Angle:
@@ -6881,11 +6870,10 @@ bool DesignPanel::on_add_plane()
     m_feature_counter++;
     int idx = m_doc.add_plane(m_plane_base->GetSelection(), m_plane_offset->GetValue(),
                     m_plane_tilt->GetValue(), m_plane_tilt_axis->GetSelection(),
-                    "Plane" + std::to_string(m_feature_counter));
+                    feature_name(_L("Plane")));
     if (idx >= 0 && idx < int(m_doc.features.size())) apply_plane_refs(m_doc.features[idx]);
     m_doc.recompute();   // datum-only docs yield no body; that is expected/benign
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(_L("Plane added — pick it as a sketch plane"));
+    set_status(StatusKind::Info, _L("Plane added — pick it as a sketch plane"));
     refresh_tree();
     return true;
 }
@@ -6894,11 +6882,10 @@ void DesignPanel::on_add_axis()
 {
     m_feature_counter++;
     int idx = m_doc.add_axis((AxisType)m_axis_type->GetSelection(),
-                             "Axis" + std::to_string(m_feature_counter));
+                             feature_name(_L("Axis")));
     if (idx >= 0 && idx < int(m_doc.features.size())) apply_axis_refs(m_doc.features[idx]);
     m_doc.recompute();
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(_L("Axis added"));
+    set_status(StatusKind::Info, _L("Axis added"));
     refresh_tree();
 }
 
@@ -6907,28 +6894,27 @@ void DesignPanel::on_add_coordsys()
     m_feature_counter++;
     Vec3d pt(m_cs_x->GetValue(), m_cs_y->GetValue(), m_cs_z->GetValue());
     int idx = m_doc.add_coordsys((CoordSysType)m_coordsys_type->GetSelection(), pt,
-                                 "Coord" + std::to_string(m_feature_counter));
+                                 feature_name(_L("Coordinate system")));
     if (idx >= 0 && idx < int(m_doc.features.size())) apply_coordsys_refs(m_doc.features[idx]);
     m_doc.recompute();
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(_L("Coord Sys added"));
+    set_status(StatusKind::Info, _L("Coordinate system added"));
     refresh_tree();
 }
 
 void DesignPanel::on_add_shell()
 {
     if (m_doc.body.IsNull()) {
-        set_status(_L("Shell needs a solid body — add or import one first"));
+        set_status(StatusKind::Warning, _L("Shell needs a solid body — add or import one first"));
         return;
     }
     const int face = (m_sel_solid_face >= 0) ? m_sel_solid_face : -1;
 
     m_feature_counter++;
     m_doc.add_shell(m_shell_thickness->GetValue(), face, m_sel_solid_body,
-                    "Shell" + std::to_string(m_feature_counter));
+                    feature_name(_L("Shell")));
 
     if (!recompute_guarded(_L("Rebuilding model…")))
-        set_status(_L("Recompute error: ") + wxString::FromUTF8(m_doc.error));
+        set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
         set_status_ok();
 
@@ -6938,22 +6924,20 @@ void DesignPanel::on_add_shell()
 void DesignPanel::on_add_draft()
 {
     if (m_doc.body.IsNull()) {
-        set_status(_L("Draft needs a solid body — add or import one first"));
+        set_status(StatusKind::Warning, _L("Draft needs a solid body — add or import one first"));
         return;
     }
     if (m_sel_solid_face < 0) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("Draft needs a picked face — click a side face first"));
-        m_status->Refresh();
+        set_status(StatusKind::Error, _L("Draft needs a picked face — click a side face first"));
         return;
     }
 
     m_feature_counter++;
     m_doc.add_draft(m_draft_angle->GetValue(), m_sel_solid_face, m_sel_solid_body,
-                    "Draft" + std::to_string(m_feature_counter));
+                    feature_name(_L("Draft")));
 
     if (!recompute_guarded(_L("Rebuilding model…")))
-        set_status(_L("Recompute error: ") + wxString::FromUTF8(m_doc.error));
+        set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
         set_status_ok();
 
@@ -7045,25 +7029,37 @@ void DesignPanel::on_tab_shown()
 
     if (m_viewport) m_viewport->refresh_bed();
 
-    // Modeling origin = bed centre, set BEFORE any recompute/datum-resolve so sketches and datums
-    // land in the middle of the bed (not the bed corner = world 0).
-    if (Plater* pl = wxGetApp().plater()) {
-        const Vec2d bc = pl->build_volume().bed_center();
-        m_doc.modeling_origin = Vec3d(bc.x(), bc.y(), 0.0);
-    }
-
-    // Rehydrate the parametric model from a freshly loaded project (the 3MF carried the
-    // recipe in Metadata/orca_cad.bin). Only when nothing is in progress here, so we
-    // never clobber an active design when the user just toggles back to the Design tab.
-    if (m_doc.features.empty()) {
-        if (Plater* plater = wxGetApp().plater()) {
-            const std::string& blob = plater->model().cad_recipe;
-            if (!blob.empty()) load_recipe(blob);
-        }
-    }
+    hydrate_from_model();
     update_reference_planes();   // entering the Design tab: show the XY/XZ/YZ planes if no object yet
     sync_sidebar_width();        // keep the panel as wide as Prepare's so the canvas edge doesn't jump
     if (m_viewport) m_viewport->force_repaint();   // the page was just re-shown: paint it for real
+}
+
+// Rehydrate the parametric model from a freshly loaded project (the 3MF carried the recipe in
+// Metadata/orca_cad.bin). Only into an EMPTY document, so an active design is never clobbered
+// when the user toggles back to the tab. Called on tab show and by the control socket — which
+// used to skip it, work on an empty document, and then overwrite the project's recipe with
+// just its own features.
+void DesignPanel::hydrate_from_model()
+{
+    if (!m_doc.features.empty()) return;
+    Plater* plater = wxGetApp().plater();
+    if (plater == nullptr) return;
+    // Modeling origin = bed centre, set BEFORE any recompute/datum-resolve so sketches and
+    // datums land in the middle of the bed (not the bed corner = world 0) — only for a document
+    // that has none yet. A design in progress keeps its origin: its sketches have it baked into
+    // their planes, so moving it under them (a printer change between visits) would slide the
+    // datum planes off the geometry. A loaded project brings its own (load_recipe).
+    if (!m_doc.origin_from_recipe) {
+        const Vec2d bc = plater->build_volume().bed_center();
+        m_doc.modeling_origin = Vec3d(bc.x(), bc.y(), 0.0);
+        // A document started here takes the weld rule from the preference; a loaded one
+        // brings its own (load_recipe).
+        m_doc.auto_close_loops = wxGetApp().is_auto_close_sketch_loops();
+        Slic3r::set_sketch_auto_close(m_doc.auto_close_loops);
+    }
+    const std::string& blob = plater->model().cad_recipe;
+    if (!blob.empty()) load_recipe(blob);
 }
 
 // Application close / language switch, from the plater's canvas teardown.
@@ -7102,11 +7098,9 @@ void DesignPanel::load_recipe(const std::string& blob)
         // the user unable to tell "update OrcaSlicer" from "your file is damaged". Same
         // error-loss class as the 31 McpControl sites (1de72de9ed): the message exists, it was
         // simply not passed on.
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(m_doc.error.empty()
+        set_status(StatusKind::Error, m_doc.error.empty()
                    ? _L("Could not restore the CAD model from this project")
-                   : _L("Could not restore the CAD model: ") + wxString::FromUTF8(m_doc.error));
-        m_status->Refresh();
+                   : wxString::Format(_L("Could not restore the CAD model: %s"), wxString::FromUTF8(m_doc.error)));
         return;
     }
     m_feature_counter = int(m_doc.features.size());
@@ -7256,7 +7250,6 @@ void DesignPanel::toggle_section_view()
 {
     if (!m_viewport) return;
     m_section_on = !m_section_on;
-    m_status->SetForegroundColour(wxNullColour);
     if (m_section_on) {
         m_section_cut_z = m_viewport->model_mid_z();   // start at the model's mid-height
         m_section_upper = false;                       // keep the lower half by default
@@ -7276,10 +7269,8 @@ void DesignPanel::flip_section_view()
     if (!m_viewport || !m_section_on) return;
     m_section_upper = !m_section_upper;
     m_viewport->set_section_plane(true, m_section_cut_z, m_section_upper);
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(wxString::Format(_L("Section view — showing the %s half"),
+    set_status(StatusKind::Info, wxString::Format(_L("Section view — showing the %s half"),
         m_section_upper ? _L("upper") : _L("lower")));
-    m_status->Refresh();
 }
 
 void DesignPanel::sync_body_visible()
@@ -7346,9 +7337,7 @@ void DesignPanel::feed_bodies()
 void DesignPanel::on_boolean_tool()
 {
     if (m_doc.bodies.size() < 2) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("Boolean needs two bodies — create or import a second solid"));
-        m_status->Refresh();
+        set_status(StatusKind::Warning, _L("Boolean needs two bodies — add or import a second one"));
         return;
     }
     populate_body_choices();
@@ -7362,10 +7351,8 @@ void DesignPanel::on_move_body()
     if (b < 0 || b >= int(m_doc.display_body_meshes.size())) {
         // Never fail silently here: the caller gates on bodies.size() while this needs a
         // tessellated per-body mesh, and when those disagreed the click did nothing at all.
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(b < 0 ? _L("Select a body first — click it in the viewport or the Bodies list")
+        set_status(StatusKind::Error, b < 0 ? _L("Select a body first — click it in the viewport or the Bodies list")
                                  : _L("That body has no display mesh yet — recompute first"));
-        m_status->Refresh();
         return;
     }
     sync_body_xform();
@@ -7388,9 +7375,7 @@ void DesignPanel::on_move_body()
     if (m_move_angle) m_move_angle->SetValue(0.0);
     show_move_card(true);
     update_action_bar();      // surface the unified ✓/✗ while moving
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(_L("Drag the arrows to move, the rings to rotate — then Confirm (Esc cancels)"));
-    m_status->Refresh();
+    set_status(StatusKind::Info, _L("Drag the arrows to move, the rings to rotate — then Confirm (Esc cancels)"));
 }
 
 // Transform card (add mode): arm the same move gizmo on the card's body so the geometry-first
@@ -7422,9 +7407,7 @@ void DesignPanel::arm_transform_gizmo()
     if (m_xf_dy) m_xf_dy->SetValue(0.0);
     if (m_xf_dz) m_xf_dz->SetValue(0.0);
     if (m_xf_angle) m_xf_angle->SetValue(0.0);
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(_L("Drag the arrows to move, the rings to rotate — the numbers follow"));
-    m_status->Refresh();
+    set_status(StatusKind::Info, _L("Drag the arrows to move, the rings to rotate — the numbers follow"));
 }
 
 // Color tool: open a colour picker on the selected body and store a per-body display-colour
@@ -7437,9 +7420,7 @@ void DesignPanel::on_set_body_color()
     int b = tree_body_selection();
     if (b < 0) b = m_sel_solid_body;
     if (b < 0 || b >= int(m_doc.bodies.size())) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("Select a body first"));
-        m_status->Refresh();
+        set_status(StatusKind::Error, _L("Select a body first"));
         return;
     }
 
@@ -7457,9 +7438,7 @@ void DesignPanel::on_set_body_color()
                                       (unsigned char)picked.Blue(), (unsigned char)255);
     feed_bodies();   // same refresh path the visibility toggle uses → viewport updates immediately
 
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(wxString::Format(_L("Body %d colour set"), b + 1));
-    m_status->Refresh();
+    set_status(StatusKind::Info, wxString::Format(_L("Body %d color set"), b + 1));
 }
 
 // Prepare's "Place on Face" (F), ported to Design. Pick a body face, then this rotates the
@@ -7472,9 +7451,7 @@ bool DesignPanel::place_on_face()
     const int b = m_sel_solid_body;
     if (b < 0 || b >= int(m_doc.bodies.size()) || m_sel_solid_face < 0
         || b >= int(m_doc.display_body_meshes.size())) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("Click a face on the solid, then press F"));
-        m_status->Refresh();
+        set_status(StatusKind::Error, _L("Click a face on the solid, then press F"));
         return false;
     }
     const TopoDS_Face face = GeometryEngine::face_by_index(m_doc.bodies[b].shape, m_sel_solid_face);
@@ -7495,9 +7472,7 @@ bool DesignPanel::place_on_face()
     x = Transform3d(Eigen::Translation3d(0.0, 0.0, -probe.bounding_box().min.z())) * x;
     m_body_xform[b] = x;
     set_status_ok();   // rebuild display/pick meshes, re-point picking; resets face selection
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(_L("Placed on face — body laid flat on the bed"));
-    m_status->Refresh();
+    set_status(StatusKind::Info, _L("Placed on face — body laid flat on the bed"));
     return true;
 }
 
@@ -7523,13 +7498,10 @@ void DesignPanel::after_tree_edit(bool ok)
     refresh_variables();
     if (!ok) {
         // The edit was rolled back (recompute failed); the body is unchanged.
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("Edit rejected: ") + wxString::FromUTF8(m_doc.error));
-        m_status->Refresh();
+        set_status(StatusKind::Error, wxString::Format(_L("Edit rejected: %s"), kernel_error_text(m_doc.error)));
         return;
     }
     sync_recipe_to_model();   // deletes, reorders and suppressions change the document too
-    m_status->SetForegroundColour(wxNullColour);
     if (m_doc.display_mesh.its.indices.empty()) {
         if (m_viewport != nullptr) m_viewport->clear_mesh();
         sync_sketch_display();   // empty body: show any un-consumed committed sketch
@@ -7570,6 +7542,8 @@ void DesignPanel::clear_document()
 {
     tool_cancel();                 // leave any active tool / sketch / constrain cleanly
     m_doc.clear();                 // features + bodies + meshes + history
+    m_doc.auto_close_loops = wxGetApp().is_auto_close_sketch_loops();   // a new design: today's preference
+    Slic3r::set_sketch_auto_close(m_doc.auto_close_loops);
     m_edit_index = -1;
     m_move_body  = -1;
     show_move_card(false);
@@ -7583,34 +7557,26 @@ void DesignPanel::clear_document()
 // The verb the offer names when you point at a body, or at any face/edge/vertex of one. A body
 // is a recomputed RESULT, so what actually gets deleted is the feature that created it
 // (CadBody::source_feature). That is an edit to the recipe and can take other features with it,
-// so it asks first and NAMES the feature: a body disappearing from the viewport is not by itself
-// evidence of which feature went, and this is the one action here that cannot be eyeballed.
+// so the status line NAMES the feature that went: a body disappearing from the viewport is not by
+// itself evidence of which feature it was. No confirmation — it is one Ctrl+Z away, like every
+// other delete here, and a modal in the modelling loop is the thing charter 4.2 removes.
 void DesignPanel::on_delete_body()
 {
     const int nb = int(m_doc.bodies.size());
     if (m_sel_solid_body < 0 || m_sel_solid_body >= nb) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("Select a body first"));
-        m_status->Refresh();
+        set_status(StatusKind::Error, _L("Select a body first"));
         return;
     }
     const int src = m_doc.bodies[m_sel_solid_body].source_feature;
     if (src < 0 || src >= int(m_doc.features.size())) {
         // Only reachable for a body no feature claims — a stale recipe, or a feature type that
         // broke the "never replace a whole CadBody" invariant recompute() relies on.
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("This body has no feature to delete — use New Design to start over"));
-        m_status->Refresh();
+        set_status(StatusKind::Error, _L("This body has no feature to delete — use New Design to start over"));
         return;
     }
     const std::string& raw = m_doc.features[src].name;
     const wxString fname = raw.empty() ? wxString::Format(_L("feature %d"), src + 1)
                                        : wxString::FromUTF8(raw);
-    if (wxMessageBox(wxString::Format(
-                         _L("Delete %s?\n\nThat is the feature this body was made from. "
-                            "Features built on it may be removed or stop working."), fname),
-                     _L("Delete body"), wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION, this) != wxYES)
-        return;
     // A card left open over a feature that is about to vanish goes stale — same reason
     // on_delete_feature() closes it.
     if (m_active != Tool::None || m_edit_index >= 0) {
@@ -7620,7 +7586,10 @@ void DesignPanel::on_delete_body()
     m_doc.checkpoint();   // undo boundary: deleting a body's feature
     m_sel_solid_body = m_sel_solid_face = m_sel_solid_edge = -1;   // the selection is about to
     m_sel_solid_vertex = false;                                    // name a body that is gone
-    after_tree_edit(m_doc.remove_feature(src));
+    const bool ok = m_doc.remove_feature(src);
+    after_tree_edit(ok);
+    if (ok)
+        set_status(StatusKind::Ok, wxString::Format(_L("Deleted %s, the feature this body was made from — Ctrl+Z restores it"), fname));
 }
 
 void DesignPanel::on_delete_feature()
@@ -7628,15 +7597,12 @@ void DesignPanel::on_delete_feature()
     // A Body row has no directly-removable feature (bodies are recomputed results); guide the
     // user to delete the feature that created it, or use New Design to wipe everything.
     if (tree_body_selection() >= 0) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("Select the FEATURE that created this body (or use New Design)"));
-        m_status->Refresh();
+        set_status(StatusKind::Error, _L("Select the FEATURE that created this body (or use New Design)"));
         return;
     }
     int sel = tree_selection();
     if (sel == wxNOT_FOUND) {
-        set_status(_L("Select a feature in the tree first"));
-        m_status->Refresh();
+        set_status(StatusKind::Info, _L("Select a feature in the tree first"));
         return;
     }
     // If a feature dialog is open (e.g. the feature is being edited), dismiss it first —
@@ -7674,33 +7640,25 @@ void DesignPanel::on_toggle_visibility()
             // fell through to the FEATURE-level branch below instead of un-hiding the body.
             if (m_parts != nullptr && bsel < int(m_tree_body_items.size()))
                 m_parts->SelectItem(m_tree_body_items[bsel]);
-            m_status->SetForegroundColour(wxNullColour);
-            set_status(wxString::Format(now_visible ? _L("Body %d shown")
+            set_status(StatusKind::Info, wxString::Format(now_visible ? _L("Body %d shown")
                                                             : _L("Body %d hidden"), bsel + 1));
-            m_status->Refresh();
         }
         return;
     }
 
     int sel = tree_selection();
     if (sel == wxNOT_FOUND || sel >= int(m_doc.features.size())) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("Select a feature in the tree first"));
-        m_status->Refresh();
+        set_status(StatusKind::Error, _L("Select a feature in the tree first"));
         return;
     }
     const bool shown = !m_doc.features[sel].enabled;
-    m_doc.features[sel].enabled = shown;
-
-    // recompute() reports an all-hidden / sketch-only document as false (no
-    // solid to build), but that is a VALID state for hide — so clear the body
-    // explicitly instead of letting after_tree_edit treat it as a rejected edit
-    // (which would skip the overlay refresh, leaving hidden art on screen).
-    if (!recompute_guarded(_L("Rebuilding model…"))) {
-        m_doc.body         = TopoDS_Shape();
-        m_doc.display_mesh = TriangleMesh{};
-        m_doc.error.clear();
-    }
+    // Through the document, not a bare flag flip: hiding a feature that makes a body shifts
+    // every later body index, and set_feature_enabled keeps those references on their bodies
+    // (and datum-plane references on their planes). It accepts an all-hidden / sketch-only
+    // result as the valid empty state it is, and rolls back — saying why — when a later
+    // feature cannot do without what was hidden.
+    m_doc.checkpoint();
+    if (!m_doc.set_feature_enabled(sel, shown)) { after_tree_edit(false); return; }
     refresh_tree();                       // greys the row
     set_tree_selection(sel);              // keep the toggled feature selected
     if (m_viewport != nullptr) {
@@ -7708,17 +7666,14 @@ void DesignPanel::on_toggle_visibility()
         else                                        feed_bodies();
     }
     sync_sketch_display();                // skips the hidden sketch + direct-renders
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(shown ? _L("Feature shown") : _L("Feature hidden"));
-    m_status->Refresh();
+    set_status(StatusKind::Info, shown ? _L("Feature shown") : _L("Feature hidden"));
 }
 
 void DesignPanel::on_move_feature(int delta)
 {
     int sel = tree_selection();
     if (sel == wxNOT_FOUND) {
-        set_status(_L("Select a feature in the tree first"));
-        m_status->Refresh();
+        set_status(StatusKind::Info, _L("Select a feature in the tree first"));
         return;
     }
     int target = sel + delta;
@@ -7742,9 +7697,7 @@ bool DesignPanel::enter_constrain_inline()
         m_viewport->finish_sketch();   // synchronous: packages live entities+constraints -> Sketch
     const int sk = resolve_extrude_sketch();   // last/selected Sketch feature
     if (sk < 0) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("Draw a sketch first, then Constrain"));
-        m_status->Refresh();
+        set_status(StatusKind::Error, _L("Draw a sketch first, then Constrain"));
         return false;
     }
     set_tree_selection(sk);            // tree drives on_begin_constrain / the constraint manager
@@ -7768,16 +7721,12 @@ void DesignPanel::on_begin_constrain(int sel_override)
         set_tree_selection(sel);       // keep the tree in step with what the viewport says
     }
     if (sel == wxNOT_FOUND || sel >= int(m_doc.features.size())) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("Select a sketch in the tree first"));
-        m_status->Refresh();
+        set_status(StatusKind::Error, _L("Select a sketch in the tree first"));
         return;
     }
     CadFeature& f = m_doc.features[sel];
     if (f.type != CadFeatureType::Sketch) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("Selected feature is not a sketch"));
-        m_status->Refresh();
+        set_status(StatusKind::Error, _L("Selected feature is not a sketch"));
         return;
     }
 
@@ -7786,17 +7735,13 @@ void DesignPanel::on_begin_constrain(int sel_override)
     if (!f.entities.empty()) {
         m_constrain_feat = sel;
         if (m_viewport) m_viewport->begin_constrain_entities(f.entities, f.plane);
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(_L("Pick 1-2 lines, then a constraint; right-click exits"));
-        m_status->Refresh();
+        set_status(StatusKind::Info, _L("Pick 1-2 lines, then a constraint; right-click exits"));
         return;
     }
 
     // Legacy profile path (Fase 3).
     if (f.profile.points.size() < 3) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("Selected feature is not a sketch"));
-        m_status->Refresh();
+        set_status(StatusKind::Error, _L("Selected feature is not a sketch"));
         return;
     }
     m_constrain_feat = sel;
@@ -7805,9 +7750,7 @@ void DesignPanel::on_begin_constrain(int sel_override)
     if (f.constraints.empty())
         f.constraints.push_back(SketchConstraintDef{SketchConstraintType::Fix, 0, -1, -1, -1, 0.0});
     if (m_viewport) m_viewport->begin_constrain(f.profile, f.plane);
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(_L("Pick 1-2 entities, then a constraint or dimension; right-click exits"));
-    m_status->Refresh();
+    set_status(StatusKind::Info, _L("Pick 1-2 entities, then a constraint or dimension; right-click exits"));
 }
 
 // Why an entity-constraint pick was refused, as a localized string. The kernel's
@@ -7863,9 +7806,7 @@ void DesignPanel::apply_entity_constraint(SketchConstraintType type)
     const ConstraintPlan plan = plan_entity_constraint(feat.entities, e0, e1, e2, type);
 
     auto fail = [this](const wxString& msg) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(msg);
-        m_status->Refresh();
+        set_status(StatusKind::Error, msg);
     };
 
     switch (plan.kind) {
@@ -7902,9 +7843,7 @@ void DesignPanel::apply_live_constraint(SketchConstraintType type)
         m_viewport->sketch_entities(), e0, e1, e2, type);
 
     auto fail = [this](const wxString& msg) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(msg);
-        m_status->Refresh();
+        set_status(StatusKind::Error, msg);
     };
     // Shared commit: try_add_constraints appends→solves→keeps-or-rolls-back and leaves the
     // geometry untouched on failure, so the same over-constrained message the committed path
@@ -7916,7 +7855,6 @@ void DesignPanel::apply_live_constraint(SketchConstraintType type)
             return;
         }
         m_viewport->request_repaint();
-        m_status->SetForegroundColour(wxNullColour);
         // Say where it went and how to undo it, here at the moment of applying: the hint line
         // only refreshes when the step tuple changes, which applying a constraint does not.
         set_status(_L("Applied constraint  ·  its badge is on the sketch — click the badge to remove it"));
@@ -7935,7 +7873,7 @@ void DesignPanel::apply_live_constraint(SketchConstraintType type)
                               constraint_reject_text(plan.reason, type), int(sel.size())));
         return;
     case ConstraintPlan::Kind::AskValue:
-        m_viewport->open_inline_value(plan.prefill, [this, plan, commit](double v) {
+        m_viewport->open_inline_value(plan.prefill, [plan, commit](double v) {
             commit(plan.defs, v);
         });
         return;
@@ -7965,9 +7903,7 @@ void DesignPanel::commit_entity_constraints(const std::vector<SketchEntityConstr
         feat.entity_constraints.resize(before);
         feat.entities = saved;
         m_doc.abandon_checkpoint();   // fully restored above: nothing happened, so nothing to undo
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("Constraint rejected (over-constrained)"));
-        m_status->Refresh();
+        set_status(StatusKind::Error, _L("Constraint rejected (over-constrained)"));
         return;
     }
     m_doc.recompute();
@@ -7978,9 +7914,7 @@ void DesignPanel::commit_entity_constraints(const std::vector<SketchEntityConstr
     m_viewport->update_constrain_entities(m_doc.features[m_constrain_feat].entities);
     if (!m_doc.display_mesh.its.indices.empty())
         feed_bodies();
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(_L("Applied constraint"));
-    m_status->Refresh();
+    set_status(StatusKind::Info, _L("Applied constraint"));
 
     refresh_constrain_dof();      // P3 DoF readout for the Constrain path
     rebuild_constraint_list();    // C3.4 manager: a row appeared
@@ -8166,9 +8100,7 @@ void DesignPanel::delete_constraint(int idx)
     if (live_constraint_scope()) {
         if (!m_viewport->remove_sketch_constraint(idx))
             return;
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(_L("Constraint deleted"));
-        m_status->Refresh();
+        set_status(StatusKind::Info, _L("Constraint deleted"));
         return;
     }
     if (m_constrain_feat < 0 || m_constrain_feat >= int(m_doc.features.size()) || !m_viewport)
@@ -8188,9 +8120,7 @@ void DesignPanel::delete_constraint(int idx)
     m_viewport->update_constrain_entities(m_doc.features[m_constrain_feat].entities);
     if (!m_doc.display_mesh.its.indices.empty())
         feed_bodies();
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(_L("Constraint deleted"));
-    m_status->Refresh();
+    set_status(StatusKind::Info, _L("Constraint deleted"));
     refresh_constrain_dof();
     rebuild_constraint_list();
 }
@@ -8199,15 +8129,11 @@ void DesignPanel::apply_edit_op(EditOp op)
 {
     if (m_constrain_feat < 0 || m_constrain_feat >= int(m_doc.features.size()) || !m_viewport ||
         !m_viewport->is_constraining_entities()) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("Press Constrain on a sketch first"));
-        m_status->Refresh();
+        set_status(StatusKind::Error, _L("Press Constrain on a sketch first"));
         return;
     }
     auto fail = [this](const wxString& msg) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(msg);
-        m_status->Refresh();
+        set_status(StatusKind::Error, msg);
     };
 
     int e0 = -1, e1 = -1;
@@ -8263,8 +8189,7 @@ void DesignPanel::apply_edit_op(EditOp op)
                 if (a >= int(f.entities.size())) return;
                 auto out = SketchEngine::offset_entities({ f.entities[a] }, d);
                 if (out.empty()) {
-                    m_status->SetForegroundColour(wxColour(235, 110, 110));
-                    set_status(_L("Offset collapsed the entity")); m_status->Refresh(); return;
+                    set_status(StatusKind::Error, _L("Offset collapsed the entity")); return;
                 }
                 const int ni = int(f.entities.size());   // offset copy lands here
                 for (auto& o : out) f.entities.push_back(o);
@@ -8305,9 +8230,7 @@ void DesignPanel::apply_edit_op(EditOp op)
             if (a >= int(f.entities.size()) || b >= int(f.entities.size())) return;
             SketchEntity a_out, b_out, arc_out;
             if (!SketchEngine::fillet_lines(f.entities[a], f.entities[b], r, a_out, b_out, arc_out)) {
-                m_status->SetForegroundColour(wxColour(235, 110, 110));
-                set_status(_L("Fillet failed (parallel lines or radius too large)"));
-                m_status->Refresh(); return;
+                set_status(StatusKind::Error, _L("Fillet failed (parallel lines or radius too large)")); return;
             }
             f.entities[a] = a_out;
             f.entities[b] = b_out;
@@ -8386,9 +8309,7 @@ void DesignPanel::apply_edit_op(EditOp op)
             if (a >= int(f.entities.size()) || b >= int(f.entities.size())) return;
             SketchEntity a_out, b_out, seg_out;
             if (!SketchEngine::chamfer_lines(f.entities[a], f.entities[b], d, a_out, b_out, seg_out)) {
-                m_status->SetForegroundColour(wxColour(235, 110, 110));
-                set_status(_L("Chamfer failed (parallel lines or distance too large)"));
-                m_status->Refresh(); return;
+                set_status(StatusKind::Error, _L("Chamfer failed (parallel lines or distance too large)")); return;
             }
             f.entities[a] = a_out;
             f.entities[b] = b_out;
@@ -8575,8 +8496,7 @@ void DesignPanel::apply_edit_op(EditOp op)
                         auto copies = SketchEngine::array_entities(
                             { src }, count, sp * dir, 0.0, Vec2d(0, 0));
                         if (copies.empty()) {
-                            m_status->SetForegroundColour(wxColour(235, 110, 110));
-                            set_status(_L("Array produced nothing")); m_status->Refresh(); return;
+                            set_status(StatusKind::Error, _L("Array produced nothing")); return;
                         }
                         const int base = int(f.entities.size());   // first copy index
                         for (auto& c : copies) f.entities.push_back(c);
@@ -8653,8 +8573,7 @@ void DesignPanel::apply_edit_op(EditOp op)
                         auto out = SketchEngine::transform_entities(
                             { f.entities[a] }, Vec2d(dx, dy), 0.0, 1.0, Vec2d(0, 0));
                         if (out.empty()) {
-                            m_status->SetForegroundColour(wxColour(235, 110, 110));
-                            set_status(_L("Move produced nothing")); m_status->Refresh(); return;
+                            set_status(StatusKind::Error, _L("Move produced nothing")); return;
                         }
                         f.entities[a] = out[0];
 
@@ -8721,8 +8640,7 @@ void DesignPanel::apply_edit_op(EditOp op)
                 auto out = SketchEngine::transform_entities(
                     { f.entities[a] }, Vec2d(0, 0), deg * M_PI / 180.0, 1.0, piv);
                 if (out.empty()) {
-                    m_status->SetForegroundColour(wxColour(235, 110, 110));
-                    set_status(_L("Rotate produced nothing")); m_status->Refresh(); return;
+                    set_status(StatusKind::Error, _L("Rotate produced nothing")); return;
                 }
                 f.entities[a] = out[0];
 
@@ -8780,8 +8698,7 @@ void DesignPanel::apply_edit_op(EditOp op)
                 auto out = SketchEngine::transform_entities(
                     { f.entities[a] }, Vec2d(0, 0), 0.0, sf, piv);
                 if (out.empty()) {
-                    m_status->SetForegroundColour(wxColour(235, 110, 110));
-                    set_status(_L("Scale produced nothing")); m_status->Refresh(); return;
+                    set_status(StatusKind::Error, _L("Scale produced nothing")); return;
                 }
                 f.entities[a] = out[0];
 
@@ -8850,8 +8767,7 @@ void DesignPanel::apply_edit_op(EditOp op)
                         auto copies = SketchEngine::array_entities(
                             { src }, count, Vec2d(0, 0), angle_step, piv);
                         if (copies.empty()) {
-                            m_status->SetForegroundColour(wxColour(235, 110, 110));
-                            set_status(_L("Polar array produced nothing")); m_status->Refresh(); return;
+                            set_status(StatusKind::Error, _L("Polar array produced nothing")); return;
                         }
                         const int base = int(f.entities.size());   // first copy index
                         for (auto& c : copies) f.entities.push_back(c);
@@ -8923,9 +8839,7 @@ void DesignPanel::after_edit_op()
     sync_sketch_display();
     if (!m_doc.display_mesh.its.indices.empty())
         feed_bodies();
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(_L("Applied edit"));
-    m_status->Refresh();
+    set_status(StatusKind::Info, _L("Applied edit"));
     refresh_constrain_dof();
     rebuild_constraint_list();
 }
@@ -8945,9 +8859,7 @@ void DesignPanel::request_value(const wxString& label, double def, double mn, do
     m_form->FitInside();
     m_value_input->SetFocus();
     m_value_input->SetSelection(-1, -1);   // select all so typing replaces the value
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(label + _L(" — type a value, press Enter (or Confirm)"));
-    m_status->Refresh();
+    set_status(StatusKind::Info, label + _L(" — type a value, press Enter (or Confirm)"));
 }
 
 void DesignPanel::confirm_value()
@@ -8976,9 +8888,7 @@ void DesignPanel::cancel_value()
     update_cards_frame(); m_form->Layout();
     m_form->FitInside();
     if (was_open) {
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(wxString());
-        m_status->Refresh();
+        set_status(StatusKind::Info, wxString());
     }
     if (on_cancel)
         on_cancel();                     // e.g. keep a pending line segment as drawn
@@ -9000,9 +8910,7 @@ void DesignPanel::apply_constraint(SketchConstraintType type)
 
     if (m_constrain_feat < 0 || m_constrain_feat >= int(m_doc.features.size()) ||
         m_viewport == nullptr) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("Press Constrain on a sketch first"));
-        m_status->Refresh();
+        set_status(StatusKind::Error, _L("Press Constrain on a sketch first"));
         return;
     }
 
@@ -9014,16 +8922,12 @@ void DesignPanel::apply_constraint(SketchConstraintType type)
 
     // 3. Legacy profile path.
     if (!m_viewport->is_constraining()) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("Press Constrain on a sketch first"));
-        m_status->Refresh();
+        set_status(StatusKind::Error, _L("Press Constrain on a sketch first"));
         return;
     }
     int a = -1, b = -1;
     if (!m_viewport->selected_segment(a, b)) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("Pick a segment in the viewport first"));
-        m_status->Refresh();
+        set_status(StatusKind::Error, _L("Pick a segment in the viewport first"));
         return;
     }
     CadFeature& feat = m_doc.features[m_constrain_feat];
@@ -9036,9 +8940,7 @@ void DesignPanel::apply_constraint(SketchConstraintType type)
         feat.constraints.pop_back();        // reject the non-converging addition
         feat.profile.points = saved_pts;    // and restore the pre-solve geometry
         m_doc.abandon_checkpoint();         // restored: no state change, so no undo step
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("Constraint rejected (over-constrained)"));
-        m_status->Refresh();
+        set_status(StatusKind::Error, _L("Constraint rejected (over-constrained)"));
         return;
     }
     m_doc.recompute();
@@ -9047,10 +8949,8 @@ void DesignPanel::apply_constraint(SketchConstraintType type)
     m_viewport->update_constrain_profile(m_doc.features[m_constrain_feat].profile.points);
     if (!m_doc.display_mesh.its.indices.empty())
         feed_bodies();
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(type == SketchConstraintType::Horizontal ? _L("Applied Horizontal")
+    set_status(StatusKind::Info, type == SketchConstraintType::Horizontal ? _L("Applied Horizontal")
                                                                 : _L("Applied Vertical"));
-    m_status->Refresh();
 }
 
 void DesignPanel::reset_edit_state()
@@ -9402,8 +9302,7 @@ void DesignPanel::on_edit_feature()
 {
     int sel = tree_selection();
     if (sel == wxNOT_FOUND) {
-        set_status(_L("Select a feature in the tree first"));
-        m_status->Refresh();
+        set_status(StatusKind::Info, _L("Select a feature in the tree first"));
         return;
     }
     const CadFeature& f = m_doc.features[sel];
@@ -9433,9 +9332,7 @@ void DesignPanel::on_edit_feature()
                 m_viewport->set_display_sketches({});
                 m_viewport->edit_sketch(f.entities, f.entity_constraints, f.plane);
             }
-            m_status->SetForegroundColour(wxNullColour);
-            set_status(_L("Editing sketch — drag a handle or click a quote to edit"));
-            m_status->Refresh();
+            set_status(StatusKind::Info, _L("Editing sketch — drag a handle or click a quote to edit"));
         } else {
             load_feature_into_dialog(f);
             open_tool(Tool::Sketch);
@@ -9610,16 +9507,12 @@ void DesignPanel::on_edit_feature()
         // job, and that feature already exists — so point there rather than invent a dialog
         // that would only duplicate it. (Imported 2D Text/SVG art is different and IS
         // re-editable; it arrives as a Sketch feature with imported_regions, handled above.)
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(_L("An imported solid has no parameters — use Transform to move or rotate it"));
-        m_status->Refresh();
+        set_status(StatusKind::Info, _L("An imported solid has no parameters — use Transform to move or rotate it"));
         break;
     default:
         // Every CadFeatureType now has a case. Kept as a guard so a type added later
         // announces itself instead of silently swallowing the Edit click.
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(_L("This feature type can't be edited yet"));
-        m_status->Refresh();
+        set_status(StatusKind::Info, _L("This feature type can't be edited yet"));
         break;
     }
 }
@@ -9630,9 +9523,7 @@ void DesignPanel::on_export_step()
     if (m_active != Tool::None)
         confirm_tool();
     if (m_doc.bodies.empty()) {
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(_L("Nothing to export — add a feature first"));
-        m_status->Refresh();
+        set_status(StatusKind::Info, _L("Nothing to export — add a feature first"));
         return;
     }
     wxFileDialog dlg(this, _L("Export STEP"), wxEmptyString, "model.step",
@@ -9643,9 +9534,9 @@ void DesignPanel::on_export_step()
     sync_body_xform();   // export bodies at their displayed Move-gizmo positions
     std::string err;
     const bool ok = m_doc.export_step(dlg.GetPath().ToUTF8().data(), m_body_xform, err);
-    m_status->SetForegroundColour(ok ? wxColour(120, 210, 120) : wxColour(235, 110, 110));
-    set_status(ok ? _L("Exported STEP")
-                          : _L("STEP export failed: ") + wxString::FromUTF8(err));
+    set_status(ok ? StatusKind::Ok : StatusKind::Error,
+               ok ? _L("Exported STEP")
+                  : wxString::Format(_L("STEP export failed: %s"), wxString::FromUTF8(err)));
     m_status->Refresh();
 }
 
@@ -9787,6 +9678,10 @@ CadFeature DesignPanel::build_candidate(Tool t) const
         f.thread_internal = m_thread_internal->GetValue();
         f.thread_x        = m_thread_x->GetValue();
         f.thread_y        = m_thread_y->GetValue();
+        // The field is the nominal (major) diameter. A thread from an older project being
+        // re-edited keeps the reading it was made with (f was seeded from it), so editing its
+        // pitch does not also silently change its diameter.
+        if (!editing) f.thread_major_nominal = true;
         if (m_thread_on_face) f.target_body = m_thread_face_body;   // tap the right body
         break;
     case Tool::Shell:
@@ -9824,6 +9719,13 @@ CadFeature DesignPanel::build_candidate(Tool t) const
         f.pattern_spacing  = m_pattern_spacing->GetValue();
         f.pattern_dir      = m_pattern_dir->GetSelection();
         f.pattern_angle    = m_pattern_angle->GetValue();
+        if (!editing) {
+            // What add_pattern commits, so the preview is the pattern that will be made: the
+            // bed-centred XY plane, and copies spanning the whole angle.
+            f.pattern_inclusive = true;
+            f.plane             = SketchPlane::XY();
+            f.plane.origin     += m_doc.modeling_origin;
+        }
         break;
     case Tool::Plane:
         f.type             = CadFeatureType::Plane;
@@ -10012,7 +9914,8 @@ CadFeature DesignPanel::build_candidate(Tool t) const
         && m_active != Tool::DeleteFace && m_active != Tool::Rib && m_active != Tool::Project
         && m_active != Tool::Helix && m_active != Tool::SurfaceOffset
         && m_active != Tool::ThickenSurface)
-        f.target_body = m_sel_solid_body;
+        f.target_body = (m_active == Tool::Extrude && m_sel_solid_body < 0) ? m_extrude_auto_body
+                                                                           : m_sel_solid_body;
     return f;
 }
 
@@ -10669,17 +10572,16 @@ void DesignPanel::refresh_preview()
     if (m_active == Tool::Sketch  || m_active == Tool::Plane   || m_active == Tool::Axis ||
         m_active == Tool::CoordSys || m_active == Tool::Helix   || m_active == Tool::Project) {
         m_viewport->clear_preview();
-        m_status->SetForegroundColour(wxColour(120, 210, 120));
         wxString ready;
         switch (m_active) {
         case Tool::Plane:    ready = _L("Plane ready");     break;
         case Tool::Axis:     ready = _L("Axis ready");      break;
-        case Tool::CoordSys: ready = _L("Coord Sys ready"); break;
+        case Tool::CoordSys: ready = _L("Coordinate system ready"); break;
         case Tool::Helix:    ready = _L("Helix ready");     break;
         case Tool::Project:  ready = _L("Project ready");   break;
         default:             ready = _L("Sketch ready");    break;
         }
-        set_status(ready);
+        set_status(StatusKind::Ok, ready);
         for (wxButton* b : m_confirm_btns) if (b) b->Enable(true);
         m_status->Refresh();
         update_datum_gizmo();   // Plane card: show/refresh the in-canvas resize handles
@@ -10703,13 +10605,11 @@ void DesignPanel::refresh_preview()
         if (!has_two) {
             m_viewport->clear_preview();
             m_viewport->set_body_hidden(false);   // the ghost replaced them; give them back
-            m_status->SetForegroundColour(wxColour(235, 110, 110));
-            set_status(_L("Mate needs at least two CoordSys features"));
+            set_status(StatusKind::Warning, _L("Mate needs two coordinate systems — create them first"));
         } else if (same) {
             m_viewport->clear_preview();
             m_viewport->set_body_hidden(false);
-            m_status->SetForegroundColour(wxColour(235, 110, 110));
-            set_status(_L("Mate: CS A and CS B must be different"));
+            set_status(StatusKind::Error, _L("Mate: A and B must be different coordinate systems"));
         } else {
             sync_body_xform();   // same reason as the solid path below: drop stale per-body poses
             const int cs_a = int(reinterpret_cast<intptr_t>(m_mate_cs_a->GetClientData(sel_a)));
@@ -10720,11 +10620,9 @@ void DesignPanel::refresh_preview()
                                  m_mate_angle  ? m_mate_angle->GetValue()  : 0.0,
                                  m_mate_flip   && m_mate_flip->GetValue(), err);
             if (ok) {
-                m_status->SetForegroundColour(wxColour(120, 210, 120));
-                set_status(_L("Mate ready"));
+                set_status(StatusKind::Ok, _L("Mate ready"));
             } else {
-                m_status->SetForegroundColour(wxColour(235, 110, 110));
-                set_status(_L("Invalid: ") + wxString::FromUTF8(err));
+                set_status(StatusKind::Error, wxString::Format(_L("Invalid: %s"), kernel_error_text(err)));
             }
         }
         for (wxButton* b : m_confirm_btns) if (b) b->Enable(ok);
@@ -10766,12 +10664,10 @@ void DesignPanel::refresh_preview()
 
     if (ok) {
         m_viewport->set_preview_mesh(mesh);
-        m_status->SetForegroundColour(wxColour(120, 210, 120)); // ok = green
-        set_status(wxString::Format(_L("Preview — %zu triangles"), mesh.its.indices.size()));
+        set_status(StatusKind::Ok, wxString::Format(_L("Preview — %zu triangles"), mesh.its.indices.size()));
     } else {
         m_viewport->clear_preview();
-        m_status->SetForegroundColour(wxColour(235, 110, 110)); // invalid = red
-        set_status(_L("Invalid: ") + wxString::FromUTF8(err));
+        set_status(StatusKind::Error, wxString::Format(_L("Invalid: %s"), kernel_error_text(err)));
     }
     // Onshape parity: a broken candidate cannot be committed. Grey the active dialog's
     // Confirm so the user sees the gate before clicking; the red status says why.
@@ -10848,11 +10744,9 @@ void DesignPanel::apply_move_card()
     m_body_xform[b] = x * m_move_prev;
     feed_bodies();
     if (m_viewport) m_viewport->request_repaint();
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(wxString::Format(_L("Body %d — moved (%.1f, %.1f, %.1f) mm, rotated %.1f°"),
+    set_status(StatusKind::Info, wxString::Format(_L("Body %d — moved (%.1f, %.1f, %.1f) mm, rotated %.1f°"),
                                         b + 1, d.x(), d.y(), d.z(),
                                         m_move_angle ? m_move_angle->GetValue() : 0.0));
-    m_status->Refresh();
 }
 
 void DesignPanel::show_move_card(bool show)
@@ -11042,10 +10936,12 @@ void DesignPanel::open_tool(Tool t)
         else if (m_extrude_sketch_ref >= 0 && m_extrude_sketch_ref < int(m_doc.features.size()))
             m_extrude_sketch_label->SetLabel(_L("Sketch: ") +
                 wxString::FromUTF8(m_doc.features[m_extrude_sketch_ref].name));
-        // A fresh extrude defaults to New body — even when other bodies exist — so
-        // overlapping extrudes stay SEPARATE solids instead of silently fusing. Joining
-        // is opt-in (pick "Join"). Engraving art onto a face still defaults to Cut.
-        // (Edit-mode keeps the feature's stored mode, set below.)
+        // The default is inferred from where the profile is (charter L6: most extrudes join).
+        // A profile drawn on or touching a solid joins THAT body; a pushed/pulled face joins
+        // its own body; a profile in free space is a New body, so overlapping extrudes are
+        // never silently fused into something they do not touch. Engraving art onto a face
+        // still defaults to Cut. (Edit-mode keeps the feature's stored mode, set below.)
+        m_extrude_auto_body = -1;
         if (m_edit_index < 0) {
             const bool on_face_import =
                 m_extrude_sketch_ref >= 0 && m_extrude_sketch_ref < int(m_doc.features.size())
@@ -11053,8 +10949,11 @@ void DesignPanel::open_tool(Tool t)
             if (on_face_import) {
                 m_mode->SetSelection(2);     // Cut — engrave into the face
                 m_flip->SetValue(true);      // extrude inward (the face normal points out)
+            } else if (m_extrude_face_src >= 0) {
+                m_mode->SetSelection(1);     // Join — push/pull grows the face's own body
             } else {
-                m_mode->SetSelection(0);     // New body (was: Add when a body already existed)
+                m_extrude_auto_body = m_doc.body_touching_sketch(m_extrude_sketch_ref);
+                m_mode->SetSelection(m_extrude_auto_body >= 0 ? 1 : 0);   // Join : New body
             }
         }
     }
@@ -11083,7 +10982,7 @@ void DesignPanel::open_tool(Tool t)
     case Tool::Boolean: m_hdr_boolean->SetLabel(title(_L("Boolean"))); break;
     case Tool::Cut:     m_hdr_cut->SetLabel(title(_L("Cut")));         break;
     case Tool::Axis:    m_hdr_axis->SetLabel(title(_L("Axis")));       break;
-    case Tool::CoordSys: m_hdr_coordsys->SetLabel(title(_L("Coord Sys"))); break;
+    case Tool::CoordSys: m_hdr_coordsys->SetLabel(title(_L("Coordinate system"))); break;
     case Tool::SurfaceExtrude:  m_hdr_surf_extrude->SetLabel(title(_L("Surface Extrude")));  break;
     case Tool::SurfaceRevolve:  m_hdr_surf_revolve->SetLabel(title(_L("Surface Revolve")));  break;
     case Tool::SurfaceLoft:     m_hdr_surf_loft->SetLabel(title(_L("Surface Loft")));      break;
@@ -11280,9 +11179,7 @@ void DesignPanel::cancel_tool()
     close_tool();
     // Cancel discards the candidate: clear the stale "Preview …"/"Invalid …"
     // label and restore the neutral idle colour (Confirm keeps its "OK" status).
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(wxString());
-    m_status->Refresh();
+    set_status(StatusKind::Info, wxString());
 }
 
 // One Confirm surface for the whole tab. Routes to the right commit by current context:
@@ -11301,7 +11198,10 @@ void DesignPanel::tool_confirm()
     if (m_active == Tool::Insert) { finalize_insert(); return; }
     if (m_active != Tool::None)   { confirm_tool();   return; }
     if (m_ui_mode == UiMode::Sketch) {
-        if (m_viewport && m_viewport->is_sketching()) m_viewport->finish_sketch();
+        if (m_viewport && m_viewport->is_sketching()) {
+            m_viewport->sketch_confirm_pending();   // a ready edit-op/transform/chain is kept, not dropped
+            m_viewport->finish_sketch();
+        }
         set_ui_mode(UiMode::Feature);
         return;
     }
@@ -11310,9 +11210,7 @@ void DesignPanel::tool_confirm()
         if (m_viewport) m_viewport->end_constrain();
         m_constrain_feat = -1;
         set_ui_mode(UiMode::Feature);
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(wxString());
-        m_status->Refresh();
+        set_status(StatusKind::Info, wxString());
     }
 }
 
@@ -11330,9 +11228,7 @@ void DesignPanel::tool_cancel()
         show_move_card(false);
         feed_bodies();           // re-render the reverted placement
         update_action_bar();
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(_L("Move cancelled"));
-        m_status->Refresh();
+        set_status(StatusKind::Info, _L("Move cancelled"));
         return;
     }
     if (m_active == Tool::Insert) { cancel_insert(); return; }
@@ -11356,9 +11252,7 @@ void DesignPanel::tool_cancel()
         set_ui_mode(UiMode::Feature);
         sync_sketch_display();
         refresh_tree();
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(wxString());
-        m_status->Refresh();
+        set_status(StatusKind::Info, wxString());
         return;
     }
     if (m_ui_mode == UiMode::Constrain) {
@@ -11366,10 +11260,22 @@ void DesignPanel::tool_cancel()
         if (m_viewport) m_viewport->end_constrain();
         m_constrain_feat = -1;
         set_ui_mode(UiMode::Feature);
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(wxString());
-        m_status->Refresh();
+        set_status(StatusKind::Info, wxString());
     }
+}
+
+bool DesignPanel::confirm_enabled() const
+{
+    if (m_value_cont) return true;
+    if (m_active == Tool::None)
+        return (m_viewport && m_viewport->moving_body())
+               || m_ui_mode == UiMode::Sketch || m_ui_mode == UiMode::Constrain;
+    if (m_active == Tool::Insert) return true;
+    for (wxButton* b : m_confirm_btns)
+        if (b != nullptr && b->IsShownOnScreen()) return b->IsEnabled();
+    for (wxButton* b : m_confirm_btns)
+        if (b != nullptr) return b->IsEnabled();
+    return true;
 }
 
 // Which level of the interaction stack one Esc press belongs to. The rule itself lives in
@@ -11415,9 +11321,7 @@ void DesignPanel::escape()
         // puts the body back at the pose it had when the gizmo appeared.
         if (m_viewport && m_viewport->drawing_in_progress()) {
             m_viewport->sketch_abort_gesture();
-            m_status->SetForegroundColour(wxNullColour);
-            set_status(wxString());
-            m_status->Refresh();
+            set_status(StatusKind::Info, wxString());
             return;
         }
         tool_cancel();
@@ -11430,9 +11334,7 @@ void DesignPanel::escape()
         // back to Select, leaving every entity already drawn exactly where it is.
         if (m_active != Tool::None || m_ui_mode == UiMode::Constrain) { tool_cancel(); return; }
         if (m_viewport && m_viewport->sketch_disarm_tool()) {
-            m_status->SetForegroundColour(wxNullColour);
-            set_status(_L("Select"));
-            m_status->Refresh();
+            set_status(StatusKind::Info, _L("Select"));
         }
         return;
 
@@ -11443,9 +11345,7 @@ void DesignPanel::escape()
         if (m_viewport && m_viewport->clear_any_selection()) {
             m_sel_sketch_region = -1;
             m_sel_sketch_feat   = -1;
-            m_status->SetForegroundColour(wxNullColour);
-            set_status(wxString());
-            m_status->Refresh();
+            set_status(StatusKind::Info, wxString());
             return;
         }
         // Nothing selected and nothing to unwind. An EMPTY sketch session may as well close —
@@ -11456,12 +11356,18 @@ void DesignPanel::escape()
             return;
         }
         if (m_ui_mode == UiMode::Sketch) {
-            m_status->SetForegroundColour(wxNullColour);
-            set_status(_L("Sketch kept — Finish to commit it, Cancel to discard"));
-            m_status->Refresh();
+            set_status(StatusKind::Info, _L("Sketch kept — Finish to commit it, Cancel to discard"));
         }
         return;
     }
+}
+
+bool DesignPanel::menu_can_undo_redo(bool redo) const
+{
+    if (m_ui_mode == UiMode::Sketch && m_viewport && m_viewport->is_sketching())
+        return redo ? m_viewport->can_redo_sketch_entity() : m_viewport->can_undo_sketch_entity();
+    if (m_ui_mode != UiMode::Feature || m_active != Tool::None) return false;
+    return redo ? m_doc.can_redo() : m_doc.can_undo();
 }
 
 void DesignPanel::update_undo_redo_buttons()
@@ -11470,6 +11376,11 @@ void DesignPanel::update_undo_redo_buttons()
     // mode with no tool/dialog open (otherwise Esc is the way out), so reflect that gate here
     // as well as the document's available history.
     if (m_btn_undo == nullptr || m_btn_redo == nullptr) return;
+    if (m_ui_mode == UiMode::Sketch && m_viewport && m_viewport->is_sketching()) {
+        m_btn_undo->Enable(m_viewport->can_undo_sketch_entity());
+        m_btn_redo->Enable(m_viewport->can_redo_sketch_entity());
+        return;
+    }
     const bool gated = (m_ui_mode != UiMode::Feature) || (m_active != Tool::None);
     m_btn_undo->Enable(!gated && m_doc.can_undo());
     m_btn_redo->Enable(!gated && m_doc.can_redo());
@@ -11509,20 +11420,24 @@ void DesignPanel::update_action_bar()
 
 void DesignPanel::do_undo_redo(bool redo)
 {
+    // Inside a live sketch, history is the sketch's own: the last drawn shape comes off, and
+    // comes back. Keys and buttons both land here, so they cannot disagree.
+    if (m_ui_mode == UiMode::Sketch && m_viewport && m_viewport->is_sketching()) {
+        const bool ok = redo ? m_viewport->redo_last_sketch_entity() : m_viewport->undo_last_sketch_entity();
+        if (!ok) set_status(redo ? _L("Nothing to redo") : _L("Nothing to undo"));
+        update_undo_redo_buttons();
+        return;
+    }
     // v1: act only in Feature mode. While authoring/constraining a sketch (m_ui_mode) or
     // with a feature dialog open (m_active), Esc/Cancel is the way out — popping committed
     // history mid-tool would be ambiguous (and could orphan the tool's referenced feature).
     if (m_ui_mode != UiMode::Feature || m_active != Tool::None) {
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(_L("Finish or cancel the current tool first (Esc)"));
-        m_status->Refresh();
+        set_status(StatusKind::Info, _L("Finish or cancel the current tool first (Esc)"));
         return;
     }
     const bool ok = redo ? m_doc.redo() : m_doc.undo();
     if (!ok) {
-        m_status->SetForegroundColour(wxNullColour);
-        set_status(redo ? _L("Nothing to redo") : _L("Nothing to undo"));
-        m_status->Refresh();
+        set_status(StatusKind::Info, redo ? _L("Nothing to redo") : _L("Nothing to undo"));
         return;
     }
     // The solid whole/face/edge pick and any in-place edit reference ids that recompute()
@@ -11531,10 +11446,8 @@ void DesignPanel::do_undo_redo(bool redo)
     m_pick_face = m_pick_face_body = -1;   // recompute() invalidated the face ids too
     reset_edit_state();
     after_tree_edit(true);   // refresh tree + viewport meshes + status from the restored doc
-    m_status->SetForegroundColour(wxNullColour);
-    set_status(wxString::Format(redo ? _L("Redo  (%zu more)") : _L("Undo  (%zu more)"),
+    set_status(StatusKind::Info, wxString::Format(redo ? _L("Redo  (%zu more)") : _L("Undo  (%zu more)"),
                                         redo ? m_doc.redo_depth() : m_doc.undo_depth()));
-    m_status->Refresh();
 }
 
 // --- Document variables panel ---------------------------------------------------------
@@ -11557,9 +11470,7 @@ void DesignPanel::on_add_variable()
     if (name.IsEmpty()) return;
     name.Trim(true).Trim(false);
     if (name.Contains(' ')) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("Variable name must not contain spaces"));
-        m_status->Refresh();
+        set_status(StatusKind::Error, _L("Variable name must not contain spaces"));
         return;
     }
     wxString expr = ::wxGetTextFromUser(
@@ -11649,7 +11560,7 @@ std::vector<std::string> DesignPanel::fields_for_tool(Tool t)
     case T::Extrude:          return {"distance", "distance2", "taper_deg"};
     case T::Dressup:          return {"dressup_size"};
     case T::Hole:             return {"hole_diameter", "hole_depth", "hole_x", "hole_y"};
-    case T::Thread:           return {"thread_radius", "thread_pitch", "thread_height", "thread_depth", "thread_x", "thread_y"};
+    case T::Thread:           return {"thread_diameter", "thread_pitch", "thread_height", "thread_depth", "thread_x", "thread_y"};
     case T::Shell:            return {"shell_thickness"};
     case T::Revolve:          return {"revolve_angle"};
     case T::Sweep:            return {};
@@ -11702,6 +11613,12 @@ void DesignPanel::on_set_expr()
 
     const std::string field = fwx.ToUTF8().data();
     const std::string expr  = ewx.ToUTF8().data();
+    // The picker is editable; a name the evaluator does not know would make every later
+    // recompute fail, so it is refused here with the reason.
+    if (!CadDocument::is_bindable_field(field)) {
+        set_status(StatusKind::Error, wxString::Format(_L("\"%s\" is not a value an expression can drive"), fwx));
+        return;
+    }
 
     m_doc.checkpoint();
     m_doc.features[m_edit_index].expr[field] = expr;
@@ -11741,9 +11658,7 @@ void DesignPanel::on_clear_expr()
     const std::string field = fwx.ToUTF8().data();
     auto& feat_expr = m_doc.features[m_edit_index].expr;
     if (feat_expr.find(field) == feat_expr.end()) {
-        m_status->SetForegroundColour(wxColour(235, 110, 110));
-        set_status(_L("No binding for that field"));
-        m_status->Refresh();
+        set_status(StatusKind::Error, _L("No binding for that field"));
         return;
     }
 

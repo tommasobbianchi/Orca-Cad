@@ -20,13 +20,14 @@ design intent that both steps discard. A part modified after slicing should retu
 feature history, not to a mesh. Keeping the CAD model inside the slicer preserves that
 loop — the nozzle diameter, the build volume and the material are known at design time.
 
-For the integration case in full: [design_tab_upstream_portability.md](docs/design_tab_upstream_portability.md).
+For the integration case in full: [design_tab_upstream_portability.md](design_tab_upstream_portability.md).
 
 ## How it is built
 
 The `SLIC3R_CAD` CMake flag (default ON) gates the entire tab. With it OFF the tab is not
 compiled and the deps prefix matches upstream exactly — the dependency diff is one line in
-OCCT's CMake: `BUILD_MODULE_ModelingAlgorithms=OFF → ON`.
+OCCT's CMake: `BUILD_MODULE_ModelingAlgorithms=OFF → ON`. At run time the tab is off until
+Preferences → CAD feature (experimental) is enabled.
 
 Measured cost table: [cad_dependency_weight.md](docs/cad_dependency_weight.md).
 
@@ -55,7 +56,7 @@ circle-line tangency solver abort and the internal-thread reference) are fixed.
 
 The vendored solver in `src/libslic3r/slvs/` is **GPL-3.0** (see `src/libslic3r/slvs/LICENSE`),
 not LGPL. The combined work is distributable under AGPL-3.0. See the Licensing section of
-[design_tab_upstream_portability.md](docs/design_tab_upstream_portability.md) for the
+[design_tab_upstream_portability.md](design_tab_upstream_portability.md) for the
 AGPLv3/GPLv3 compatibility argument; this point should be confirmed with upstream explicitly.
 
 ## Not verified

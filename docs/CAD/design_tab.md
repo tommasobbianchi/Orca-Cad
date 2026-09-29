@@ -14,10 +14,15 @@ already ships for STEP import.
 
 ## Getting started
 
+The Design tab is experimental. It exists only in builds with `SLIC3R_CAD` on, and appears
+after **Preferences → CAD feature (experimental)** is ticked and the app restarted. Switched off,
+Prepare and every project behave exactly as without it; a project that carries a design keeps
+its recipe untouched.
+
 1. Open the **Design** tab.
 2. Click a face or a reference plane in the viewport, then press `Shift+S` (Sketch). The offer
    opens with the sketch tools on it.
-3. Draw a closed profile, then press **✓ Confirm** in the floating action bar.
+3. Draw a closed profile, then press **✓ Confirm** in the floating action bar (or `Enter`).
 4. With the sketch selected, press `Shift+E` (Extrude).
 5. Press **Commit to Plate** to hand the solid to Prepare.
 
@@ -47,18 +52,23 @@ tool"*. It is also where a refusal explains itself.
 
 ## The offer
 
-Right-click on the geometry, released without moving the mouse (an 8 px budget — a
-right-drag that orbits the camera does not open it). Left-click still only selects, so
+Right-click on the geometry, released without moving the mouse (a 3 px budget — a
+right-drag that orbits the camera does not open it). How long the button is held does not
+matter. Left-click still only selects, so
 pointing at things stays quiet.
 
 The offer also opens by itself the moment you press Sketch on a face or plane, showing the
 sketch tools — the app hands you the tools directly.
 
+The first line names what the rows act on — *"Flat face 4 of Body 2"*, *"Sketch line"*,
+*"Nothing selected"* — so the menu is readable even when the selection is not under the cursor.
+
 **Eight families, always in this fixed order:** Create, Add material, Remove, Dress-up,
 Repeat, Transform, Reference, Modify.
 
 - A family with at least one applicable verb shows it. Several applicable verbs collapse
-  into a submenu under the family name.
+  into a submenu under the family name. A verb that is about the selection but blocked by the
+  document (no body yet, no second sketch) stays in that submenu, greyed, with its reason.
 - A family with nothing applicable is **shown greyed in place, with the reason** — e.g.
   *"Create — Click a face or a reference plane in the viewport, then a sketch tool"*. It is
   not hidden. A control that cannot be used still says what it is and what you would have to
@@ -70,6 +80,22 @@ on a selection: Import STEP, Import mesh, Text, SVG, Export STEP, Commit to Plat
 Redo, Variables, Section view, Origin planes, World axes. They live in the toolbar.
 
 ---
+
+## Confirm and cancel
+
+One rule everywhere, in the feature cards and in the sketch alike:
+
+- `Enter` does what **✓** does; `Esc` does what **✗** does. Neither is ever the only way.
+- `Esc` steps back exactly one level — a value field, then the gesture in progress, then the
+  armed tool, then the selection. It never deletes, discards a sketch or rolls back a feature.
+- A click on empty space clears the selection. It never applies anything: a pending fillet,
+  offset, move or array waits for `Enter` or **✓**.
+- Right-click on a tool with something pending drops that gesture; with nothing pending it
+  opens the offer, like anywhere else.
+- Switching to another tool applies a pending operation that is complete and valid, then arms
+  the new tool.
+- A value typed into a field that the geometry cannot take (a zero-length side, an arc of more
+  than 360°) is refused in place: the field stays open and says why.
 
 ## Keyboard
 
@@ -99,8 +125,10 @@ selected by the mode, not by whether a sketch session is running.
 | `H` | Chamfer — pick two lines, set the distance |
 | `K` | Constrain — finish the live sketch and enter constrain |
 | `Q` | Construction toggle — draw the next entity as construction geometry |
-| `Del` | Delete the selected sketch entity |
-| `Esc` | Cancel the live tool |
+| `Del` | Delete the selected sketch entities (nothing selected: nothing happens) |
+| `Enter` | Apply what is pending; otherwise end the chain; otherwise drop the tool |
+| `Esc` | Undo one level: close the field, drop the gesture, drop the tool, clear the selection |
+| `Ctrl+Z` / `Ctrl+Y` | Undo / redo the last sketch edit |
 
 ### Feature (when no sketch is open)
 
@@ -150,7 +178,9 @@ kept. With no section on, `F` is Place on Face — lay the picked face flat on t
 ## Sketching
 
 A sketch is a closed (or open) 2D profile on a plane or on a flat face of an existing body.
-Press `Shift+S`, click the face or plane you want to sketch on, and draw. The toolbar and
+Pick the face or plane and press `Shift+S` — the offer opens with the sketch tools. Pressing
+`Shift+S` with nothing picked also works: the status line asks for the face or plane, and the
+first tool you arm sketches on it. The toolbar and
 the offer both carry the sketch tools.
 
 **Entities:** line, polyline, rectangle (corner / centre / oblique / rounded), circle
@@ -275,6 +305,10 @@ variable and the whole model follows.
 
 ## Import and export
 
+**Text** asks for the words, the font (any installed font, bold, italic) and the height, and
+shows the outline that will be inserted with its size in millimetres before anything is added.
+The last font and height are remembered.
+
 **Import STEP** brings in a real B-rep solid, not a mesh: its faces and edges can be filleted,
 shelled and cut like anything modelled here.
 
@@ -288,6 +322,13 @@ edit; the importer warns before you commit to it.
 **Commit to Plate** sends the solid to Prepare for slicing. The whole feature recipe is saved
 inside the 3MF, so reopening the project restores the editable model rather than a frozen
 mesh.
+
+**MCP control** lets an external agent drive the tab through the same kernel the GUI uses.
+Start the app with `ORCA_CAD_MCP=1` (socket `/tmp/orca-cad-mcp.sock`) or
+`ORCA_CAD_MCP=/path/to.sock`; the CAD feature must be enabled too. Linux and macOS only. A
+command that would change the document is refused while the Design tab is busy with it — a
+rebuild, an open feature card or a sketch session — so the agent and the user never edit the
+same thing at once.
 
 ---
 

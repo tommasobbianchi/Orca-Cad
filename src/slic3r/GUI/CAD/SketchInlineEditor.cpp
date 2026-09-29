@@ -22,7 +22,8 @@ namespace {
 // Numbers are typed and shown with a POINT, whatever the locale: this field feeds a CAD kernel,
 // and a decimal comma reaching it as a thousands separator is a silent order-of-magnitude error.
 // Parsing accepts either separator because a keyboard's numeric pad may only offer one.
-std::string fmt_value(double v, int digits = 2)
+// Trailing zeros are dropped, so a count opens as "3" and a length as "37.457", not "37.46".
+std::string fmt_value(double v, int digits = 3)
 {
     char fmt[16];
     std::snprintf(fmt, sizeof(fmt), "%%.%df", digits);
@@ -30,7 +31,13 @@ std::string fmt_value(double v, int digits = 2)
     std::snprintf(buf, sizeof(buf), fmt, v);
     for (char* c = buf; *c; ++c)
         if (*c == ',') *c = '.';
-    return std::string(buf);
+    std::string s(buf);
+    if (s.find('.') != std::string::npos) {
+        while (!s.empty() && s.back() == '0') s.pop_back();
+        if (!s.empty() && s.back() == '.') s.pop_back();
+    }
+    if (s == "-0") s = "0";
+    return s;
 }
 
 bool parse_value(const char* text, double& out)
@@ -80,6 +87,9 @@ void SketchInlineEditor::open(const wxPoint& canvas_px, double value, const std:
     m_cancel = std::move(on_cancel);
     const std::string v = fmt_value(value);
     std::snprintf(m_buf, sizeof(m_buf), "%s", v.c_str());
+    m_prefill_value = value;
+    m_prefill_text  = v;
+    m_active        = false;
     m_open          = true;
     // ImGui takes keyboard focus for one frame on request; asking on the frame the field first
     // appears is what makes typing land without a click. There is no window manager to consult.
@@ -91,6 +101,7 @@ void SketchInlineEditor::close()
 {
     m_open          = false;
     m_focus_pending = false;
+    m_active        = false;
     m_commit        = nullptr;
     m_cancel        = nullptr;
     m_err.clear();
@@ -114,10 +125,32 @@ void SketchInlineEditor::do_cancel()
     if (cb) cb();
 }
 
+bool SketchInlineEditor::refuse(const std::string& why)
+{
+    // Only meaningful while a commit callback runs and before it opened another field.
+    if (!m_in_commit || m_open) return false;
+    m_anchor        = m_last.anchor;
+    m_title         = m_last.title;
+    m_commit        = m_last.commit;
+    m_cancel        = m_last.cancel;
+    m_prefill_value = m_last.prefill_value;
+    m_prefill_text  = m_last.prefill_text;
+    std::snprintf(m_buf, sizeof(m_buf), "%s", m_last.buf.c_str());
+    m_err           = why;
+    m_open          = true;
+    m_focus_pending = true;
+    ux_trace("refused", m_title, "reason=" + why);
+    return true;
+}
+
 void SketchInlineEditor::do_commit()
 {
     double v = 0.0;
-    if (!parse_value(m_buf, v)) {
+    // An untouched field commits the value it opened with, not its rounded display: Enter on a
+    // 37.4567 line must not turn it into a 37.457 driving dimension.
+    if (m_prefill_text == m_buf)
+        v = m_prefill_value;
+    else if (!parse_value(m_buf, v)) {
         // Refusing input in silence is indistinguishable from the app having frozen: the field
         // just sits there and the user has no idea what it wants. Say so in the title line and
         // keep editing.
@@ -128,11 +161,15 @@ void SketchInlineEditor::do_commit()
     }
     ux_trace("commit", m_title, std::string("typed=") + m_buf + " value=" + fmt_value(v, 4));
     auto cb = m_commit;
+    m_last = Closed{ m_anchor, m_title, std::string(m_buf), m_commit, m_cancel, m_prefill_value, m_prefill_text };
     close();
     // AFTER close(): the callback may open the next queued dimension (a rectangle queues Width
     // then Height), and doing that into a field that still believes it is open would drop the
     // second one's prefill on the floor.
+    m_in_commit = true;
     if (cb) cb(v);
+    m_in_commit = false;
+    m_last = Closed{};
 }
 
 bool SketchInlineEditor::render(ImGuiWrapper& imgui, float scale)
@@ -167,10 +204,15 @@ bool SketchInlineEditor::render(ImGuiWrapper& imgui, float scale)
     // EnterReturnsTrue so Enter commits from inside the widget; AutoSelectAll so the prefill is
     // replaced by the first digit typed, which is what "pre-selected" meant when this was a
     // wxTextCtrl and is what makes typing a value a single gesture.
+    // No CharsDecimal: it lets only the LOCALE's decimal separator through, so in a C locale a
+    // comma could not be typed at all, and it admits '*' and '/' that the parser then refuses.
+    // parse_value() is the one judge of what is a number.
     const bool entered = ImGui::InputText("##sketchvalue_in", m_buf, sizeof(m_buf),
                                           ImGuiInputTextFlags_EnterReturnsTrue
-                                              | ImGuiInputTextFlags_AutoSelectAll
-                                              | ImGuiInputTextFlags_CharsDecimal);
+                                              | ImGuiInputTextFlags_AutoSelectAll);
+    m_active = ImGui::IsItemActive();
+    // Tab accepts the value like Enter does (and moves on to the next queued field, if any).
+    const bool tabbed = m_active && ImGui::IsKeyPressed(ImGui::GetKeyIndex(ImGuiKey_Tab));
     // MEASUREMENT, not a fix: one line per frame saying whether ImGui believes it owns the
     // keyboard and whether our widget is the active one. "Typing does not arrive" has two very
     // different causes — no FRAMES (this canvas repaints on demand only, so an idle canvas never
@@ -194,7 +236,7 @@ bool SketchInlineEditor::render(ImGuiWrapper& imgui, float scale)
 
     // Act AFTER end(): do_commit can reopen the field for the next queued dimension, and that
     // must not happen inside this frame's window.
-    if (entered)
+    if (entered || tabbed)
         do_commit();
     else if (ImGui::IsKeyPressed(ImGui::GetKeyIndex(ImGuiKey_Escape)))
         do_cancel();

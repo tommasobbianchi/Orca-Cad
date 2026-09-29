@@ -17,6 +17,8 @@
 #include <cmath>
 #include <algorithm>
 #include <utility>
+#include <atomic>
+#include <set>
 
 #include <nlohmann/json.hpp>
 #include <boost/log/trivial.hpp>
@@ -1996,6 +1998,22 @@ std::string handle_on_main(const std::string& method, const json& params, const 
     DesignPanel* panel = mf ? mf->ensure_design_panel() : nullptr;
     if (!panel)
         return rpc_error(id, -32001, "Design panel not ready");
+    // A project opened without ever showing the Design tab has its recipe only in the Model;
+    // load it, as showing the tab would, before anything reads or writes the document.
+    panel->hydrate_from_model();
+
+    // Methods that only LOOK. Everything else changes the document or the live sketch, and
+    // must not do it under a GUI editor, a sketch session it does not own, or a rebuild in
+    // progress (the GUI's worker thread holds the document then).
+    static const std::set<std::string> kReadOnly = {
+        "describe_tools", "describe_scene", "query_topology", "measure", "mass_properties",
+        "slice_body", "validate_against", "list_verbs", "sketch_describe", "sketch_validate",
+        "check_interference" };
+    if (kReadOnly.count(method) == 0) {
+        std::string why;
+        if (panel->mcp_busy(method.rfind("sketch_", 0) == 0, why))
+            return rpc_error(id, -32002, "Design tab busy: " + why);
+    }
 
     // Stale-id guard, checked here rather than in each handler.
     //
@@ -2110,11 +2128,16 @@ std::string dispatch_request(const std::string& line)
 
     auto prom = std::make_shared<std::promise<std::string>>();
     auto fut  = prom->get_future();
+    // 0 = queued, 1 = running, 2 = abandoned. A request that timed out while still QUEUED must
+    // never run: the client has been told it failed, and a retry would otherwise apply it twice.
+    auto state = std::make_shared<std::atomic<int>>(0);
     // Nothing may escape this lambda. It is invoked by the wx event loop, which has no
     // handler of its own, so an escaping exception is std::terminate — the socket would
     // become a way for any client to kill the application. handle_on_main() catches what
     // it knows about; this catches what it does not, and still answers the caller.
-    wxGetApp().CallAfter([prom, method, params, id]() {
+    wxGetApp().CallAfter([prom, state, method, params, id]() {
+        int queued = 0;
+        if (!state->compare_exchange_strong(queued, 1)) return;   // abandoned by a timeout
         try {
             prom->set_value(handle_on_main(method, params, id));
         } catch (const std::exception& ex) {
@@ -2123,20 +2146,33 @@ std::string dispatch_request(const std::string& line)
             prom->set_value(rpc_error(id, -32000, "internal error: unknown exception"));
         }
     });
-    if (fut.wait_for(std::chrono::seconds(15)) != std::future_status::ready)
-        return rpc_error(id, -32000, "main-thread timeout");
+    if (fut.wait_for(std::chrono::seconds(15)) != std::future_status::ready) {
+        int queued = 0;
+        if (state->compare_exchange_strong(queued, 2))
+            return rpc_error(id, -32000, "main-thread timeout: the command was NOT run");
+        // Already running: it will finish, so wait for its real answer rather than report a
+        // failure for a command that is in fact being applied.
+        fut.wait();
+    }
     return fut.get();
 }
 
-// Read newline-delimited requests off one client connection until EOF.
+// Read newline-delimited requests off one client connection until EOF. A line may not grow
+// past kMaxLine: a client that never sends a newline would otherwise grow this buffer until the
+// process runs out of memory.
 void serve_client(int cfd)
 {
+    constexpr size_t kMaxLine = 16u << 20;   // 16 MB — far above any real request
     std::string buf;
     char chunk[4096];
     for (;;) {
         ssize_t n = ::read(cfd, chunk, sizeof(chunk));
         if (n <= 0) break;
         buf.append(chunk, size_t(n));
+        if (buf.size() > kMaxLine && buf.find('\n') == std::string::npos) {
+            BOOST_LOG_TRIVIAL(error) << "MCP: request line over " << kMaxLine << " bytes; closing the connection";
+            return;
+        }
         size_t nl;
         while ((nl = buf.find('\n')) != std::string::npos) {
             std::string line = buf.substr(0, nl);
@@ -2156,9 +2192,30 @@ void serve_client(int cfd)
     }
 }
 
+// Where the socket lives, for the exit handler.
+std::string g_sock_path;
+
+void remove_socket_at_exit()
+{
+    struct stat st{};
+    if (!g_sock_path.empty() && ::lstat(g_sock_path.c_str(), &st) == 0 && S_ISSOCK(st.st_mode))
+        ::unlink(g_sock_path.c_str());
+}
+
 void server_thread(std::string sock_path)
 {
-    ::unlink(sock_path.c_str());
+    // Clear a stale socket from an earlier run — and ONLY a socket. ORCA_CAD_MCP names a path,
+    // and unlinking it unconditionally deleted whatever file that path happened to be.
+    {
+        struct stat st{};
+        if (::lstat(sock_path.c_str(), &st) == 0) {
+            if (!S_ISSOCK(st.st_mode)) {
+                BOOST_LOG_TRIVIAL(error) << "MCP: " << sock_path << " exists and is not a socket; refusing to replace it";
+                return;
+            }
+            ::unlink(sock_path.c_str());
+        }
+    }
     int sfd = ::socket(AF_UNIX, SOCK_STREAM, 0);
     if (sfd < 0) { BOOST_LOG_TRIVIAL(error) << "MCP: socket() failed"; return; }
 
@@ -2183,6 +2240,8 @@ void server_thread(std::string sock_path)
         ::close(sfd); ::unlink(sock_path.c_str()); return;
     }
     if (::listen(sfd, 1) < 0) { BOOST_LOG_TRIVIAL(error) << "MCP: listen() failed"; ::close(sfd); return; }
+    g_sock_path = sock_path;
+    std::atexit(remove_socket_at_exit);   // do not leave the socket file behind
     BOOST_LOG_TRIVIAL(info) << "MCP control listening on " << sock_path;
 
     for (;;) {

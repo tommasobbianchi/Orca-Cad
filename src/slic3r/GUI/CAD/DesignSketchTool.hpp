@@ -67,6 +67,17 @@ public:
     // row off arms a NEIGHBOURING tool and then grades whatever that drew. ekt9.
     Mode mode() const { return m_mode; }
     int  pending_points() const { return int(m_points.size()); }
+    // Picks the armed tool is holding that are not yet an entity or a constraint: the Dimension
+    // tool's first anchor, an edit-op's or a transform's subjects, Constrain's picks. Together
+    // with pending_points() they are CadLevel::Gesture, so Esc drops them and keeps the tool.
+    bool has_pending_picks() const {
+        return m_dim_has0 || m_op_a >= 0 || !m_tf_targets.empty() || m_pick0 >= 0 || m_sel_a >= 0;
+    }
+    bool gesture_pending() const { return !m_points.empty() || has_pending_picks(); }
+    // Enter while an edit-op or a transform is ready: apply it, the same as its value field's
+    // Enter. False when nothing is pending, so the key can fall through to the tab's ✓.
+    bool confirm_pending();
+    bool end_chain();            // Polyline / Spline: finish the open chain as drawn
     void emit_step_hint();   // fires on_step_changed when the step actually moved
     // Is an in-canvas value field open? While one is, the canvas is frozen and every letter is
     // swallowed — the single most common reason a driven gesture "does nothing".
@@ -203,9 +214,6 @@ public:
     void clear_move_gizmo();
     bool moving_body() const { return m_mv_active; }
     int  move_body_index() const { return m_mv_body; }
-    // F key forwarded from the canvas (Prepare's Place on Face): returns true if it acted.
-    bool request_place_on_face() { return on_place_on_face ? on_place_on_face() : false; }
-    std::function<bool()> on_place_on_face;
     std::function<void(int body, const Transform3d& xform)> on_body_move_changed;
     // Fired on each cycle change: (level 0=None/1=Whole/2=Face/3=Edge, body index, face id, edge id).
     std::function<void(int level, int body, int face, int edge)> on_solid_selection_changed;
@@ -550,25 +558,15 @@ public:
         reset_autoedit();
         if (on_readout) on_readout(std::string());    // the HUD is not redrawn once the tool stops
     }
-    // Ctrl+Z while sketching: drop the last drawn entity (reuses delete_selected's remap).
-    bool undo_last_entity() {
-        if (!m_active || m_entities.empty()) return false;
-        m_selection.assign(1, int(m_entities.size()) - 1);
-        delete_selected();
-        reset_autoedit();
-        return true;
-    }
-    // Delete while sketching: the selected entities, or the last drawn one if none is selected.
-    bool delete_selected_or_last() {
-        if (!m_active) return false;
-        if (m_selection.empty()) {
-            if (m_entities.empty()) return false;
-            m_selection.assign(1, int(m_entities.size()) - 1);
-        }
-        delete_selected();
-        reset_autoedit();
-        return true;
-    }
+    // Ctrl+Z while sketching: drop the last thing DRAWN — a whole rectangle, slot or polygon
+    // when the last entity belongs to one, since that was one gesture. Undoing one side of a
+    // rectangle left three lines and dissolved the shape.
+    bool undo_last_entity();
+    // Ctrl+Y / Ctrl+Shift+Z while sketching: bring back what undo_last_entity removed, as long
+    // as nothing was drawn or deleted since (then the old state is no longer "the next step").
+    bool redo_last_entity();
+    bool can_undo_entity() const { return m_active && !m_entities.empty(); }
+    bool can_redo_entity() const;
     std::function<void(int count)> on_selection_changed;
 
     // Dimension tool: infer a driving dimension from the current selection and set
@@ -612,6 +610,14 @@ public:
     // characteristic dimensions). Empty string -> hide the HUD. The owner (DesignCanvas)
     // shows it as a floating corner label over the GL canvas.
     std::function<void(const std::string&)> on_readout;
+    // Why something did not happen, or what a gesture did as a side effect. NOT on_readout:
+    // that one is rewritten every frame from build_readout(), so a message sent through it was
+    // gone before anyone could read it. The host shows this on its persistent status line.
+    std::function<void(const std::string& msg, bool error)> on_notice;
+    void notify(const std::string& msg, bool error = true) { if (on_notice) on_notice(msg, error); }
+    // A typed value the tool cannot take: the open value field comes back with the reason, or,
+    // when no field is committing, the reason goes to the status line.
+    void show_refusal(const std::string& why);
 
     // Driving dimension constraints accumulated during the session (the Dimension
     // tool records a SketchEntityConstraintDef per applied dimension); committed
@@ -633,17 +639,11 @@ public:
     // request_exit() declined to leave because the session holds geometry. The panel owns the
     // status line, so the tool reports through this instead of writing text itself.
     std::function<void()> on_exit_refused;
-    std::function<void()> on_move_exit;   // right-click finished the move-body gizmo
     // The two inner Esc levels, callable on their own so the panel can route one press to one
     // level (see DesignInteraction.hpp). Each returns whether it had anything to unwind.
     bool abort_gesture();   // CadLevel::Gesture — drop the entity being drawn
     bool disarm_tool();     // CadLevel::Tool    — armed draw/edit tool falls back to Select
     void request_exit();
-    // Ctrl+Z / Ctrl+Shift+Z (Ctrl+Y) while the Design canvas is focused: undo/redo the
-    // committed feature history. The tool just forwards to the host, which owns the
-    // CadDocument (the tool has no document of its own). redo == true requests redo.
-    std::function<void(bool /*redo*/)> on_undo_redo;
-    void request_undo_redo(bool redo);
 
 private:
     bool screen_to_plane(GLCanvas3D& canvas, const wxMouseEvent& evt, Vec2d& out) const;
@@ -660,10 +660,17 @@ private:
     // chains join across entities (a line + an arc can close into one loop). Shift
     // disables it. `snapped` reports whether a vertex was hit.
     Vec2d snap_vertex(GLCanvas3D& canvas, const wxMouseEvent& evt, const Vec2d& raw, bool& snapped) const;
+    bool  click_snaps() const;   // does the NEXT click of the armed draw tool land on a snap target?
 
     // --- P1 inference / auto-constraint engine ---------------------------------
     // Plane-units tolerance equivalent to ~`px` screen pixels at the cursor.
-    double screen_tol(GLCanvas3D& canvas, const wxMouseEvent& evt, const Vec2d& at, double px = 8.0) const;
+    // The sketcher's pick budgets, in screen pixels, converted to plane units by screen_tol().
+    // One set for every tool, so the same thing is equally easy to hit whichever tool is armed.
+    static constexpr double kPickPx     = 8.0;    // grab a point, a handle or an edge; hover uses the same
+    static constexpr double kToolPickPx = 24.0;   // pick an entity for a tool to act on (trim, edit-ops,
+                                                  // transforms, constrain)
+    static constexpr double kLabelPx    = 24.0;   // click or double-click a value label
+    double screen_tol(GLCanvas3D& canvas, const wxMouseEvent& evt, const Vec2d& at, double px = kPickPx) const;
     // Run kernel inference at the cursor, cache the target for the hint renderer.
     InferenceSnap infer_at(GLCanvas3D& canvas, const wxMouseEvent& evt, const Vec2d& raw) const;
     // True if m_constraints already holds an equivalent Coincident between the two refs.
@@ -1050,6 +1057,16 @@ private:
     Vec2d                 m_live_slot_angle_label{0,0}; // straight-slot centreline angle label
     int                   m_live_slot_fi{-1};           // the straight-slot Feature (rebuild edits)
     std::vector<Feature>  m_features;              // parametric groups over m_entities
+    // Sketch-local redo: the state each undo_last_entity() replaced, and the entity/constraint
+    // counts it left behind (a mismatch means the sketch moved on and the redo is stale).
+    struct SketchSnap {
+        std::vector<SketchEntity> entities; std::vector<SketchEntityConstraintDef> constraints;
+        std::vector<Feature> features;      std::vector<DimAnnot> dimensions;
+        size_t after_entities{0};           size_t after_constraints{0};
+    };
+    std::vector<SketchSnap> m_sketch_redo;
+    int    m_skipped_last{0};       // constraints the last solve could not apply (reported on change)
+    double m_chain_dup_tol{1e-9};   // plane units ~3 px at the last chain click (double-click repeat)
     int                   m_open_feature{-1};      // index of the Feature being built, or -1
 
     // In-canvas edit-op gizmo state (Fillet/Chamfer/Offset/Mirror). GUI-only, reset by

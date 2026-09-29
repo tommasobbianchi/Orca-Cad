@@ -72,10 +72,11 @@ which is what makes the destructive path unrepresentable rather than merely unli
 own handlers so it can consume the event before them:
 
 ```cpp
-RIGHT_DOWN: remember the press position and the clock, then Skip()   // the canvas still seeds the orbit
+RIGHT_DOWN: remember the press position, clear `travelled`, then Skip() // the canvas still seeds the orbit
+MOTION:     travelled |= drift from the press > 3 px                   // an orbit that came back still orbited
 
 RIGHT_UP:   terminated = sketch_tool.take_right_consumed();          // read-and-clear, always
-            is_click   = drift <= 3 px && dt <= 200 ms;              // both budgets, or it was navigation
+            is_click   = !travelled && drift <= 3 px;                // otherwise it was navigation
             if (callback && !terminated && !inline_busy && is_click) {
                 select_at_screen(press.x, press.y);                  // raycast at the PRESS, not the release
                 on_context_menu(ClientToScreen(press));
@@ -84,8 +85,9 @@ RIGHT_UP:   terminated = sketch_tool.take_right_consumed();          // read-and
             Skip();                                                  // orbit / pan / the handlers underneath
 ```
 
-Two independent budgets because the two failure modes are independent: drift alone still popped a
-menu at the end of a slow, careful orbit. `take_right_consumed()` is how a right-click that
+Only distance decides, never time (charter §6.2: no timing-dependent gestures): a slow, deliberate
+right-click is still a click. The drift is tracked over the whole press, not just at release, so a
+careful orbit that ends where it started does not pop a menu. `take_right_consumed()` is how a right-click that
 already meant something to the armed sketch tool (terminate a chain, drop an edit-op) declines to
 also mean "open a menu".
 
@@ -107,7 +109,7 @@ also mean "open a menu".
 | **Transient — popup menu** | run the entry | — | close the menu | run the highlighted entry |
 | **any** | — | — | *never* deletes, discards or rolls back | — |
 
-Right-hold-and-drag is not in the table on purpose: past 3 px or 200 ms it is navigation, and
+Right-hold-and-drag is not in the table on purpose: once it has travelled past 3 px it is navigation, and
 navigation does not transition the state machine.
 
 ## 4. Visual scaffolding

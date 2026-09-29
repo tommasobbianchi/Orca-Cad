@@ -400,6 +400,9 @@ public:
     // tab activation and the MCP socket go through this: the socket is driven headlessly,
     // with nobody to click the tab, and without this every verb would answer "not ready".
     DesignPanel*          ensure_design_panel();
+    // The Design panel when its tab is the one on screen, else null. Edit > Undo/Redo act on
+    // the tab that is shown: its own history when that is Design, the plater's otherwise.
+    DesignPanel*          shown_design_panel() const;
 #endif
     //BBS: GUI refactor
     MonitorPanel*         m_monitor{ nullptr };

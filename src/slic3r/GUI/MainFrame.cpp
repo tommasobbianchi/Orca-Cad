@@ -1250,6 +1250,12 @@ void MainFrame::show_option(bool show)
 }
 
 #ifdef SLIC3R_CAD
+DesignPanel* MainFrame::shown_design_panel() const
+{
+    return (m_design_panel != nullptr && m_design_page != nullptr && m_design_page->IsShownOnScreen())
+               ? m_design_panel : nullptr;
+}
+
 DesignPanel* MainFrame::ensure_design_panel()
 {
     if (m_design_panel == nullptr && m_design_page != nullptr) {
@@ -1357,8 +1363,9 @@ void MainFrame::init_tabpanel() {
     // the tab is selected (see the page-changed handler above), so nothing it constructs sits
     // on the startup path. The experimental feature is off by default, and when it is off the
     // page is never created, so the tab does not appear at all (the preference takes effect on
-    // the next start, like the other feature toggles).
-    if (wxGetApp().is_enable_cad_feature()) {
+    // the next start, like the other feature toggles). Nor in the G-code viewer, which has no
+    // Design tab to put it in — and no business opening a control socket onto one.
+    if (wxGetApp().is_enable_cad_feature() && wxGetApp().is_editor()) {
         m_design_page = new wxPanel(this);
         m_design_page->SetSizer(new wxBoxSizer(wxVERTICAL));
         m_design_page->Hide();
@@ -3016,12 +3023,28 @@ void MainFrame::init_menubar_as_editor()
 #ifndef __APPLE__
         // BBS undo
         append_menu_item(editMenu, wxID_ANY, _L("Undo") + "\t" + ctrl + "Z",
-            _L("Undo"), [this](wxCommandEvent&) { m_plater->undo(); },
-            "menu_undo", nullptr, [this](){return m_plater->can_undo(); }, this);
+            _L("Undo"), [this](wxCommandEvent&) {
+#ifdef SLIC3R_CAD
+                if (DesignPanel* dp = shown_design_panel()) { dp->menu_undo_redo(false); return; }
+#endif
+                m_plater->undo(); },
+            "menu_undo", nullptr, [this](){
+#ifdef SLIC3R_CAD
+                if (DesignPanel* dp = shown_design_panel()) return dp->menu_can_undo_redo(false);
+#endif
+                return m_plater->can_undo(); }, this);
         // BBS redo
         append_menu_item(editMenu, wxID_ANY, _L("Redo") + "\t" + ctrl + "Y",
-            _L("Redo"), [this](wxCommandEvent&) { m_plater->redo(); },
-            "menu_redo", nullptr, [this](){return m_plater->can_redo(); }, this);
+            _L("Redo"), [this](wxCommandEvent&) {
+#ifdef SLIC3R_CAD
+                if (DesignPanel* dp = shown_design_panel()) { dp->menu_undo_redo(true); return; }
+#endif
+                m_plater->redo(); },
+            "menu_redo", nullptr, [this](){
+#ifdef SLIC3R_CAD
+                if (DesignPanel* dp = shown_design_panel()) return dp->menu_can_undo_redo(true);
+#endif
+                return m_plater->can_redo(); }, this);
         editMenu->AppendSeparator();
         // BBS Cut TODO
         append_menu_item(editMenu, wxID_ANY, _L("Cut") + "\t" + ctrl + "X",
@@ -3068,8 +3091,15 @@ void MainFrame::init_menubar_as_editor()
                 if (handle_key_event(e)) {
                     return;
                 }
+#ifdef SLIC3R_CAD
+                if (DesignPanel* dp = shown_design_panel()) { dp->menu_undo_redo(false); return; }
+#endif
                 m_plater->undo(); },
-            "", nullptr, [this](){return m_plater->can_undo(); }, this);
+            "", nullptr, [this](){
+#ifdef SLIC3R_CAD
+                if (DesignPanel* dp = shown_design_panel()) return dp->menu_can_undo_redo(false);
+#endif
+                return m_plater->can_undo(); }, this);
         // BBS redo
         append_menu_item(editMenu, wxID_ANY, _L("Redo") + sep + ctrl_t + "Y",
             _L("Redo"), [this, handle_key_event](wxCommandEvent&) {
@@ -3080,8 +3110,15 @@ void MainFrame::init_menubar_as_editor()
                 if (handle_key_event(e)) {
                     return;
                 }
+#ifdef SLIC3R_CAD
+                if (DesignPanel* dp = shown_design_panel()) { dp->menu_undo_redo(true); return; }
+#endif
                 m_plater->redo(); },
-            "", nullptr, [this](){return m_plater->can_redo(); }, this);
+            "", nullptr, [this](){
+#ifdef SLIC3R_CAD
+                if (DesignPanel* dp = shown_design_panel()) return dp->menu_can_undo_redo(true);
+#endif
+                return m_plater->can_redo(); }, this);
         editMenu->AppendSeparator();
         // BBS Cut TODO
         append_menu_item(editMenu, wxID_ANY, _L("Cut") + sep + ctrl_t + "X",
