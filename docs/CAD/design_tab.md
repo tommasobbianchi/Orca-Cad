@@ -39,6 +39,11 @@ tool"*. It is also where a refusal explains itself.
   face → edge → body.
 - A click near a corner takes the corner, not the face behind it.
 - Left-drag sweeps a rubber band, and a rubber band takes the whole body.
+- Shift+click (or Ctrl+click) on an edge of the body already picked adds that edge, or removes
+  it if it is already picked. The set belongs to one body. **Fillet / Chamfer** then dresses
+  every picked edge in one feature, at one size. The edge ids are resolved together against
+  the same body. A chain of single-edge features would resolve each against a body the
+  previous one had already changed.
 - An open sketch line can be clicked, even where it bounds a region.
 - Double-click a sketch stroke to edit it — the gesture belongs on the geometry.
 - Editing a dimension's value **updates** that dimension instead of adding a second one next

@@ -2347,12 +2347,12 @@ TEST_CASE("a truncated feature keeps what it could read", "[CadDocument][recipe]
     }
 
     // Shorten feature 1 so it ends right after coordsys_face_kind: drop coordsys_face_edges
-    // (4 bytes) and the two flags appended after it (thread_major_nominal, pattern_inclusive:
-    // 1 byte each). Rewrite its length prefix and erase the tail bytes. The reader then runs
-    // out inside fa(f), throws, and keeps everything it had already assigned — that is the
-    // whole point of the try/catch. (Cut on a field boundary: a field cut in half is read as
-    // whatever half arrived.)
-    const size_t drop = sizeof(uint32_t) + 2 * sizeof(bool);
+    // (4 bytes), the two flags appended after it (thread_major_nominal, pattern_inclusive:
+    // 1 byte each) and the empty dressup_edges list (its 8-byte size tag). Rewrite its length
+    // prefix and erase the tail bytes. The reader then runs out inside fa(f), throws, and keeps
+    // everything it had already assigned — that is the whole point of the try/catch. (Cut on a
+    // field boundary: a field cut in half is read as whatever half arrived.)
+    const size_t drop = sizeof(uint32_t) + 2 * sizeof(bool) + sizeof(cereal::size_type);
     REQUIRE(f_len[1] > drop);
     std::string shortened = blob;
     shortened.erase(f_off[1] + 4 + f_len[1] - drop, drop);
@@ -2370,6 +2370,7 @@ TEST_CASE("a truncated feature keeps what it could read", "[CadDocument][recipe]
     REQUIRE(loaded.features[1].coordsys_face_edges == -1);    // defaulted by the cut
     REQUIRE_FALSE(loaded.features[1].thread_major_nominal);   // ...and so were the later flags
     REQUIRE_FALSE(loaded.features[1].pattern_inclusive);
+    REQUIRE(loaded.features[1].dressup_edges.empty());
     REQUIRE(loaded.features[0].name == doc.features[0].name);
     REQUIRE(loaded.features[2].name == doc.features[2].name);
 }
@@ -7984,6 +7985,87 @@ TEST_CASE("dressup: four chamfer ids captured up-front drift as earlier chamfers
     const bool ok = doc2.recompute();
     INFO("single-recompute driver path: ok=" << ok << " error=" << (ok ? std::string() : doc2.error));
     REQUIRE(ok);
+}
+
+// Several picked edges dressed by ONE feature: every id is resolved against the same body, so
+// capturing them up-front is correct here (unlike the chain of single-edge features above).
+TEST_CASE("dressup: one fillet on four picked edges equals the Top face group", "[CadDocument][dressup]")
+{
+    const double half = 10.0, h = 10.0, r = 1.0;
+    CadDocument doc = make_centred_box(half, h);
+    REQUIRE(doc.recompute());
+    const double v0 = solid_volume(doc.bodies[0].shape);
+
+    std::vector<int> ids;
+    for (const Vec3d& t : { Vec3d(half, 0.0, h), Vec3d(0.0, half, h), Vec3d(-half, 0.0, h), Vec3d(0.0, -half, h) }) {
+        const int id = edge_near(doc.bodies[0].shape, t, 1.5);
+        REQUIRE(id >= 0);
+        ids.push_back(id);
+    }
+    const int fi = doc.add_fillet(r, ids, "Fillet");
+    REQUIRE(doc.features[fi].dressup_edges == ids);
+    REQUIRE(doc.features[fi].dressup_edge == ids.front());   // what an older build falls back to
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    const double v_list = solid_volume(doc.bodies[0].shape);
+
+    CadDocument ref = make_centred_box(half, h);
+    ref.add_fillet(r, FaceGroup::Top, "Fillet");
+    REQUIRE(ref.recompute());
+    const double v_group = solid_volume(ref.bodies[0].shape);
+
+    INFO("v0=" << v0 << " list=" << v_list << " group=" << v_group);
+    REQUIRE(v_list < v0);
+    REQUIRE(std::abs(v_list - v_group) < 1e-6 * v0);
+
+    SECTION("the list survives a save and load") {
+        const std::string blob = doc.serialize_recipe();
+        CadDocument back;
+        REQUIRE(back.deserialize_recipe(blob));
+        REQUIRE(back.features.size() == doc.features.size());
+        REQUIRE(back.features[fi].dressup_edges == ids);
+        REQUIRE(std::abs(solid_volume(back.bodies[0].shape) - v_list) < 1e-6 * v0);
+    }
+}
+
+TEST_CASE("dressup: one chamfer on two picked edges, a single id still takes the one-edge path", "[CadDocument][dressup]")
+{
+    const double half = 10.0, h = 10.0, d = 0.5;
+    CadDocument doc = make_centred_box(half, h);
+    REQUIRE(doc.recompute());
+    const double v0 = solid_volume(doc.bodies[0].shape);
+    const int a = edge_near(doc.bodies[0].shape, Vec3d(half, 0.0, h), 1.5);
+    const int b = edge_near(doc.bodies[0].shape, Vec3d(-half, 0.0, h), 1.5);
+    REQUIRE(a >= 0);
+    REQUIRE(b >= 0);
+
+    CadDocument one = make_centred_box(half, h);
+    REQUIRE(one.recompute());
+    const int f1 = one.add_chamfer(d, std::vector<int>{ a }, "Chamfer");
+    REQUIRE(one.features[f1].dressup_edges.empty());       // a single pick stays a plain edge feature
+    REQUIRE(one.features[f1].dressup_edge == a);
+    REQUIRE(one.recompute());
+    const double single = v0 - solid_volume(one.bodies[0].shape);
+
+    doc.add_chamfer(d, std::vector<int>{ a, b }, "Chamfer");
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    const double both = v0 - solid_volume(doc.bodies[0].shape);
+    INFO("single=" << single << " both=" << both);
+    REQUIRE(single > 0.0);
+    // Two opposite rim edges share no corner: removing both takes exactly twice one.
+    REQUIRE(std::abs(both - 2.0 * single) < 1e-6 * v0);
+}
+
+TEST_CASE("dressup: an edge list naming a missing edge fails with a reason", "[CadDocument][dressup]")
+{
+    CadDocument doc = make_centred_box(10.0, 10.0);
+    REQUIRE(doc.recompute());
+    const int good = edge_near(doc.bodies[0].shape, Vec3d(10.0, 0.0, 10.0), 1.5);
+    REQUIRE(good >= 0);
+    doc.add_fillet(1.0, std::vector<int>{ good, 9999 }, "Fillet");
+    REQUIRE_FALSE(doc.recompute());
+    REQUIRE_FALSE(doc.error.empty());
 }
 
 // --- Face-drift fingerprint: a FaceAndDirection connector warns when its face index slides ---
