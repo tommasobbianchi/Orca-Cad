@@ -523,6 +523,8 @@ public:
         std::vector<int>   holes;        // indices into LoopReport::loops that this loop encloses
         bool               closed{false};
         double             area{0.0};    // signed shoelace area of the loop polyline
+        bool               defect{false};      // crosses or folds back on itself (see RegionLoop)
+        Vec2d              defect_at{0, 0};
     };
     struct LoopReport {
         std::vector<LoopInfo> loops;
@@ -701,6 +703,8 @@ private:
     bool selection_valid() const;                         // all selection indices in range
     void record_dimension_constraint(double v);           // append the driving def for the selection
     void resolve_live();                                  // solve accumulated constraints on m_entities now
+    void announce_loop_defects();                         // status line, once, when a loop starts crossing itself
+    bool m_loop_defect_shown{false};
     // Drag-aware re-solve: pins the dragged point at its current coord and lets the
     // solver move the rest (Slvs dragged[]). Used live while a point grab is active.
     void resolve_live_drag(int dragged_ei, SketchPointRole dragged_role);
@@ -965,6 +969,10 @@ private:
         std::vector<Vec2d> poly;
         std::vector<int>   ents;
         std::vector<int>   holes;   // indices into the same vector; one nesting level
+        // Closed, but crossing itself or turning straight back somewhere (sketch_loop_defect):
+        // it does not bound one region, whatever the chainer says. defect_at names the place.
+        bool               defect{false};
+        Vec2d              defect_at{0, 0};
     };
     std::vector<RegionLoop> region_loops(const std::vector<SketchEntity>& ents) const;
     // Index of the closed region containing plane-point p (point-in-polygon), or -1.

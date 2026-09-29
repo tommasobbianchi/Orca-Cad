@@ -52,6 +52,11 @@ tool"*. It is also where a refusal explains itself.
 - Sketching happens on the face you clicked, first click.
 - A sketch whose entities form no wire **fails** instead of extruding a default box. A
   subtraction that removes nothing is reported as an error instead of a silent success.
+- A loop whose ends all meet can still fail to bound one region. It may cross itself, or turn
+  straight back along itself at a joint (an arc leaving a line tangent to it but heading the
+  other way). The sketch tints such a loop red, marks the point, and says so once on the status
+  line. The extrude refuses a crossing loop with the same reason; before this check it produced a
+  body with no caps.
 
 ---
 

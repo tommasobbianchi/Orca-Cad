@@ -7987,6 +7987,98 @@ TEST_CASE("dressup: four chamfer ids captured up-front drift as earlier chamfers
     REQUIRE(ok);
 }
 
+// A closed chain that fails to bound one region although every joint meets, recorded on the rig:
+// a top line, an arc that leaves its end heading back over it (crossing it again 2.5 mm on), and
+// a 241 deg clockwise arc that leaves a 0.28 mm line tangent to it but the other way (a cusp).
+// MakeFace accepted it and the prism came out as walls with no caps. The loop analysis must name
+// the point, and the extrude must refuse it with a reason; the same arcs swept the other way round
+// are an ordinary profile.
+namespace {
+enum class Fold { None, Crossing, Cusp, Both };
+std::vector<SketchEntity> folding_profile(Fold fold)
+{
+    auto line = [](Vec2d a, Vec2d b) { SketchEntity e; e.type = SketchEntity::Type::Line; e.p0 = a; e.p1 = b; return e; };
+    auto arc  = [](Vec2d a, Vec2d b, Vec2d c, double r, double a0, double a1) {
+        SketchEntity e; e.type = SketchEntity::Type::Arc; e.p0 = a; e.p1 = b; e.center = c; e.radius = r;
+        e.start_angle = a0; e.end_angle = a1; return e; };
+    const Vec2d A(3.745882, 40.003810), B(54.449392, 40.003810), C(52.800871, -34.610853),
+                D(7.730833, -51.667501), E(-32.425978, -102.110463), F(-48.295291, -47.364094),
+                G(-48.017198, -47.364094);
+    const double TWO_PI = 2.0 * M_PI;
+    const bool cross = fold == Fold::Crossing || fold == Fold::Both;
+    const bool cusp  = fold == Fold::Cusp     || fold == Fold::Both;
+    // B->C: clockwise it bulges out to the right; counter-clockwise (recorded) it leaves B back
+    // over the top line and crosses it. G->A, centred right above G so it is tangent to F->G:
+    // counter-clockwise it carries on from F->G; clockwise (recorded) it turns straight back.
+    const double b0 = 1.536417, b1 = 4.702588;
+    const double g0 = -M_PI / 2.0, g1 = std::atan2(A.y() - 11.653958, A.x() + 48.017198);
+    return {
+        line(A, B),
+        arc(B, C, Vec2d(53.166645, 2.706608), 37.319254, b0, cross ? b1 : b1 - TWO_PI),
+        line(C, D),
+        line(D, E),
+        line(E, F),
+        line(F, G),
+        arc(G, A, Vec2d(-48.017198, 11.653958), 59.018053, g0, cusp ? g1 - TWO_PI : g1),
+    };
+}
+} // namespace
+
+TEST_CASE("loop analysis: a closed loop that crosses or folds back names the point", "[sketch]")
+{
+    const std::vector<int> order{ 0, 1, 2, 3, 4, 5, 6 };
+    Vec2d at;
+    REQUIRE_FALSE(sketch_loop_defect(folding_profile(Fold::None), order, at));
+
+    REQUIRE(sketch_loop_defect(folding_profile(Fold::Cusp), order, at));
+    INFO("cusp at " << at.transpose());
+    REQUIRE((at - Vec2d(-48.017198, -47.364094)).norm() < 1e-3);    // the joint G
+
+    REQUIRE(sketch_loop_defect(folding_profile(Fold::Crossing), order, at));
+    INFO("crossing at " << at.transpose());
+    REQUIRE(std::abs(at.y() - 40.003810) < 1e-3);                     // on the top line...
+    REQUIRE(at.x() > 50.0);                                           // ...a little before B
+    REQUIRE(at.x() < 54.4);
+
+    // Traversal order does not matter: the same loop walked backwards.
+    const std::vector<int> back{ 6, 5, 4, 3, 2, 1, 0 };
+    REQUIRE(sketch_loop_defect(folding_profile(Fold::Cusp), back, at));
+    REQUIRE_FALSE(sketch_loop_defect(folding_profile(Fold::None), back, at));
+
+    // Ordinary joints are not defects: a fillet-like tangent join and a straight continuation.
+    SketchEntity l1; l1.type = SketchEntity::Type::Line; l1.p0 = Vec2d(0, 0);  l1.p1 = Vec2d(10, 0);
+    SketchEntity l2; l2.type = SketchEntity::Type::Line; l2.p0 = Vec2d(10, 0); l2.p1 = Vec2d(20, 0);
+    SketchEntity a1; a1.type = SketchEntity::Type::Arc;  a1.center = Vec2d(20, 5); a1.radius = 5;
+    a1.start_angle = -M_PI / 2; a1.end_angle = M_PI / 2; a1.p0 = Vec2d(20, 0); a1.p1 = Vec2d(20, 10);
+    SketchEntity l3; l3.type = SketchEntity::Type::Line; l3.p0 = Vec2d(20, 10); l3.p1 = Vec2d(0, 10);
+    SketchEntity l4; l4.type = SketchEntity::Type::Line; l4.p0 = Vec2d(0, 10); l4.p1 = Vec2d(0, 0);
+    REQUIRE_FALSE(sketch_loop_defect({ l1, l2, a1, l3, l4 }, { 0, 1, 2, 3, 4 }, at));
+}
+
+TEST_CASE("extrude: a profile that folds back on itself is refused with a reason", "[CadDocument][sketch]")
+{
+    // A cusp alone still makes a face OCCT calls valid (the spike it leaves is 0.009 mm wide), so
+    // the kernel builds it; the viewport's loop analysis is what flags it. A crossing does not.
+    for (Fold f : { Fold::Crossing, Fold::Both }) {
+        CadDocument bad;
+        const int sk = bad.add_sketch_entities(folding_profile(f), SketchPlane::XY(), "Sketch");
+        bad.add_extrude(sk, 69.42, false, BooleanMode::New, "Extrude");
+        INFO("fold kind " << int(f) << ": " << bad.error);
+        REQUIRE_FALSE(bad.recompute());
+        REQUIRE(bad.error.find("folds back") != std::string::npos);
+    }
+
+    CadDocument good;
+    const int sk2 = good.add_sketch_entities(folding_profile(Fold::None), SketchPlane::XY(), "Sketch");
+    good.add_extrude(sk2, 69.42, false, BooleanMode::New, "Extrude");
+    REQUIRE(good.recompute());
+    REQUIRE(good.error.empty());
+    REQUIRE(good.bodies.size() == 1);
+    const auto mp = GeometryEngine::mass_properties(good.bodies[0].shape);
+    REQUIRE(mp.is_solid);
+    REQUIRE(mp.volume > 0.0);
+}
+
 // Several picked edges dressed by ONE feature: every id is resolved against the same body, so
 // capturing them up-front is correct here (unlike the chain of single-edge features above).
 TEST_CASE("dressup: one fillet on four picked edges equals the Top face group", "[CadDocument][dressup]")

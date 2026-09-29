@@ -889,6 +889,20 @@ void DesignSketchTool::resolve_live_drag(int dragged_ei, SketchPointRole dragged
         m_bad_dims.clear();
     }
     if (on_solve_state) on_solve_state(m_dof, m_solve_ok, has);
+    announce_loop_defects();
+}
+
+// The red tint and marker on a loop that crosses or folds back explain nothing on their own, so
+// the first time one appears the status line says what they mean. Once, on the transition: this
+// runs on every solve, drags included.
+void DesignSketchTool::announce_loop_defects()
+{
+    bool any = false;
+    for (const RegionLoop& r : region_loops(m_entities))
+        if (r.defect) { any = true; break; }
+    if (any && !m_loop_defect_shown)
+        notify(_u8L("This profile crosses or folds back on itself at the red mark, so it does not bound one region"));
+    m_loop_defect_shown = any;
 }
 
 // ---- Onshape-style visual editing: feature grouping + handles -----------------
@@ -6757,6 +6771,12 @@ DesignSketchTool::region_loops(const std::vector<SketchEntity>& ents) const
         }
         if (best >= 0) regions[best].holes.push_back(int(i));
     }
+    // Closed is not the same as bounding one region: the chainer only asks whether the ends
+    // meet. A loop that crosses itself, or turns straight back along itself, meets at every
+    // joint and still cannot be built — the kernel refuses a crossing, and a fold back is never
+    // what was meant. Say so here, where the region is drawn, instead of after an extrude.
+    for (RegionLoop& r : regions)
+        r.defect = sketch_loop_defect(ents, r.ents, r.defect_at);
     return regions;
 }
 
@@ -9049,14 +9069,21 @@ void DesignSketchTool::render(GLCanvas3D& canvas)
             for (const RegionLoop& L : loops)
                 for (int h : L.holes)
                     if (h >= 0 && h < int(is_hole.size())) is_hole[h] = 1;
+            std::vector<Vec2d> defects;
             for (size_t r = 0; r < loops.size(); ++r) {
+                if (loops[r].defect) defects.push_back(loops[r].defect_at);
                 if (is_hole[r]) continue;
                 std::vector<std::vector<Vec2d>> hp;
                 for (int h : loops[r].holes)
                     if (h >= 0 && h < int(loops.size())) hp.push_back(loops[h].poly);
-                draw_fill_holed(m_fill_model, loops[r].poly, hp, design_idle_face_color());
+                // A loop that crosses or folds back is tinted red, not offered as a face.
+                draw_fill_holed(m_fill_model, loops[r].poly, hp,
+                                loops[r].defect ? ColorRGBA(1.0f, 0.22f, 0.22f, 0.18f) : design_idle_face_color());
             }
             glsafe(::glDisable(GL_BLEND));
+            if (!defects.empty())   // and the place it goes wrong gets a screen-constant red marker
+                draw_vertices(m_vertex_model, defects, ColorRGBA(1.0f, 0.22f, 0.22f, 1.0f),
+                              5.0 / std::max(camera.get_zoom(), 1e-6));
         }
     }
 
@@ -9741,6 +9768,8 @@ DesignSketchTool::LoopReport DesignSketchTool::loop_report() const
         li.ents   = r.ents;
         li.holes  = r.holes;
         li.closed = true;
+        li.defect    = r.defect;
+        li.defect_at = r.defect_at;
         // Analytic where the loop IS one closed curve; shoelace only where it is a chain.
         // region_loops hands back the render polyline, and a circle's is a 64-gon whose area is
         // 0.3% short — a number reported as "area" must not be the faceting error.
