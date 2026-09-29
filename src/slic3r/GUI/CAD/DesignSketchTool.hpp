@@ -1097,6 +1097,10 @@ private:
     std::vector<SketchEntity> m_op_ghost;   // live result preview (recomputed on value change)
     bool   m_op_dragging_arrow{false};      // arrowhead drag in progress
     std::vector<int> m_mirror_targets;      // Mirror: entities to be mirrored (axis = m_op_a)
+    // Offset: the whole chain the picked entity belongs to (connected by shared endpoints), so
+    // an outline offsets as one outline. A single entity when it is not part of a chain.
+    std::vector<int> m_op_chain;
+    std::vector<SketchEntity> op_chain_entities() const;
 
     // In-canvas imported-art transform gizmo (Mode::TransformArt). GUI-only. The art's
     // untransformed contours + its bbox in base coords; the live offset/scale; the grabbed
