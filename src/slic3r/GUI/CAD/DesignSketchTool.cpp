@@ -3468,7 +3468,7 @@ void DesignSketchTool::render_body_edges()
     const Camera& cam = wxGetApp().plater()->get_camera();
     const Vec3d vd = cam.get_dir_forward();
     const double px = 1.0 / std::max(cam.get_zoom(), 1e-6);
-    const double hw = 0.75 * px;     // ~1.5 px wide
+    const double hw = 1.0 * px;      // ~2 px wide: at 1.5 the lines read as hairlines
     // Pulled toward the eye by a few pixels, so the line wins the depth test against the two
     // faces meeting at the edge while a face in front of it still hides it.
     const Vec3d pull = -vd * (3.0 * px);
