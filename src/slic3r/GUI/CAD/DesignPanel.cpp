@@ -5687,7 +5687,7 @@ void DesignPanel::on_check_interference()
         list += (k ? ", " : "") + wxString::Format(_L("%s ↔ %s %.2f mm³"), body_name(sorted[k].body_a),
                                                    body_name(sorted[k].body_b), sorted[k].volume);
     if (sorted.size() > shown)
-        list += ", …";
+        list += wxString::FromUTF8(", …");
     set_status(StatusKind::Warning, wxString::Format(_L("%zu overlapping pairs: %s"), sorted.size(), list));
 }
 
@@ -7966,14 +7966,17 @@ wxString DesignPanel::constraint_label(const SketchEntityConstraintDef& d) const
             case SketchEntity::Type::BSpline:    c = 'B'; break;
             }
         }
+        // Non-ASCII narrow literals go through FromUTF8: wx converts a bare char* with the
+        // current locale, and under LC_ALL=C (the AppImage sets it) "—"/"·"/"°" fail to convert —
+        // an empty string, or a NULL format string that crashes wxString::Format.
         wxString s; s << wxUniChar(c) << ei;   // avoid %c assert in Unicode build
-        if (r == SketchPointRole::P1)     s += "·P1";
-        else if (r == SketchPointRole::Center) s += "·Ctr";
-        else if (r == SketchPointRole::P0)     s += "·P0";
+        if (r == SketchPointRole::P1)     s += wxString::FromUTF8("·P1");
+        else if (r == SketchPointRole::Center) s += wxString::FromUTF8("·Ctr");
+        else if (r == SketchPointRole::P0)     s += wxString::FromUTF8("·P0");
         return s;
     };
     auto two = [&](const wxString& name) {
-        return d.eb >= 0 ? wxString::Format("%s %s — %s", name, tag(d.ea, d.ra), tag(d.eb, d.rb))
+        return d.eb >= 0 ? wxString::Format(wxString::FromUTF8("%s %s — %s"), name, tag(d.ea, d.ra), tag(d.eb, d.rb))
                          : wxString::Format("%s %s", name, tag(d.ea, d.ra));
     };
     switch (d.type) {
@@ -7996,7 +7999,7 @@ wxString DesignPanel::constraint_label(const SketchEntityConstraintDef& d) const
                                                      tag(d.ea, d.ra), tag(d.eb, d.rb));
     case T::SymmetricAboutX: return wxString::Format(_L("Symmetric about X axis %s — %s"),
                                                      tag(d.ea, d.ra), tag(d.eb, d.rb));
-    case T::Angle:         return wxString::Format("%s = %s°", two(_L("Angle")), en_format(d.value * 180.0 / M_PI, 1));
+    case T::Angle:         return wxString::Format(wxString::FromUTF8("%s = %s°"), two(_L("Angle")), en_format(d.value * 180.0 / M_PI, 1));
     case T::Radius:        return wxString::Format("%s %s = %s", _L("Radius"),   tag(d.ea, d.ra), en_format(d.value));
     case T::Diameter:      return wxString::Format("%s %s = %s", _L("Diameter"), tag(d.ea, d.ra), en_format(d.value));
     case T::PointOnLine:   return two(_L("On line"));
