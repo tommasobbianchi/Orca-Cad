@@ -862,9 +862,9 @@ void DesignCanvas::set_on_shell_thickness_changed(std::function<void(double)> cb
 }
 
 void DesignCanvas::begin_revolve_gizmo(const SketchPlane& plane, const Vec2d& centroid,
-                                       int axis_sel, double angle, bool flip)
+                                       const Vec3d& axis_origin, const Vec3d& axis_dir, double angle, bool flip)
 {
-    m_sketch_tool.set_revolve_gizmo(plane, centroid, axis_sel, angle, flip);
+    m_sketch_tool.set_revolve_gizmo(plane, centroid, axis_origin, axis_dir, angle, flip);
     request_repaint();
 }
 

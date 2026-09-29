@@ -667,6 +667,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
                     set_status(StatusKind::Error, _L("Create a sketch profile to revolve first"));
                     return;
                 }
+                fill_revolve_axes(m_revolve_axis, m_revolve_axis_ents, m_revolve_sketch_ref, 0, -2);
                 open_tool(Tool::Revolve);
              }, SHIFT('R')},
             {"design_sweep", _L("Sweep"), _L("Sweep a profile along a path"),
@@ -796,6 +797,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
                     set_status(StatusKind::Error, _L("Create a sketch profile to revolve first"));
                     return;
                 }
+                fill_revolve_axes(m_surf_revolve_axis, m_surf_revolve_axis_ents, m_surf_revolve_sketch_ref, 0, -2);
                 open_tool(Tool::SurfaceRevolve);
              }, SHIFT('J')},
             {"design_loft", _L("Surface Loft"), _L("Loft (skin) between 2+ profiles, open (no end caps)"),
@@ -5372,9 +5374,11 @@ void DesignPanel::on_add_revolve()
         return;
     }
     m_feature_counter++;
-    m_doc.add_revolve(m_revolve_sketch_ref, m_revolve_angle->GetValue(),
-                      m_revolve_axis->GetSelection(), m_revolve_flip->GetValue(),
-                      mode, feature_name(_L("Revolve")));
+    int axis = 0, axis_entity = -1;
+    read_revolve_axis(m_revolve_axis, m_revolve_axis_ents, axis, axis_entity);
+    const int idx = m_doc.add_revolve(m_revolve_sketch_ref, m_revolve_angle->GetValue(), axis,
+                                      m_revolve_flip->GetValue(), mode, feature_name(_L("Revolve")));
+    m_doc.features[idx].revolve_axis_entity = axis_entity;
 
     if (!recompute_guarded(_L("Rebuilding model…")))
         set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
@@ -5465,9 +5469,11 @@ void DesignPanel::on_add_surface_revolve()
         return;
     }
     m_feature_counter++;
-    m_doc.add_surface_revolve(m_surf_revolve_sketch_ref, m_surf_revolve_angle->GetValue(),
-                              m_surf_revolve_axis->GetSelection(),
-                              feature_name(_L("Surface Revolve")));
+    int axis = 0, axis_entity = -1;
+    read_revolve_axis(m_surf_revolve_axis, m_surf_revolve_axis_ents, axis, axis_entity);
+    const int idx = m_doc.add_surface_revolve(m_surf_revolve_sketch_ref, m_surf_revolve_angle->GetValue(),
+                                              axis, feature_name(_L("Surface Revolve")));
+    m_doc.features[idx].revolve_axis_entity = axis_entity;
     if (!recompute_guarded(_L("Rebuilding model…")))
         set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
@@ -9199,10 +9205,10 @@ void DesignPanel::load_feature_into_dialog(const CadFeature& f)
         break;
     case CadFeatureType::Revolve:
         m_revolve_angle->SetValue(f.revolve_angle);
-        m_revolve_axis->SetSelection(f.revolve_axis);
         m_revolve_mode->SetSelection(static_cast<int>(f.mode));
         m_revolve_flip->SetValue(f.flip);
         m_revolve_sketch_ref = f.sketch_ref;
+        fill_revolve_axes(m_revolve_axis, m_revolve_axis_ents, f.sketch_ref, f.revolve_axis, f.revolve_axis_entity);
         break;
     case CadFeatureType::Sweep:
         m_sweep_profile_ref = f.sketch_ref;
@@ -9316,9 +9322,9 @@ void DesignPanel::load_feature_into_dialog(const CadFeature& f)
         break;
     case CadFeatureType::SurfaceRevolve:
         m_surf_revolve_angle->SetValue(f.revolve_angle);
-        m_surf_revolve_axis->SetSelection(f.revolve_axis);
         m_surf_revolve_flip->SetValue(f.flip);
         m_surf_revolve_sketch_ref = f.sketch_ref;
+        fill_revolve_axes(m_surf_revolve_axis, m_surf_revolve_axis_ents, f.sketch_ref, f.revolve_axis, f.revolve_axis_entity);
         if (m_surf_revolve_sketch_ref >= 0 && m_surf_revolve_sketch_ref < int(m_doc.features.size()))
             m_surf_revolve_sketch_label->SetLabel(_L("Sketch: ") +
                 wxString::FromUTF8(m_doc.features[m_surf_revolve_sketch_ref].name));
@@ -9850,7 +9856,7 @@ CadFeature DesignPanel::build_candidate(Tool t) const
         f.type          = CadFeatureType::Revolve;
         f.sketch_ref    = m_revolve_sketch_ref;
         f.revolve_angle = m_revolve_angle->GetValue();
-        f.revolve_axis  = m_revolve_axis->GetSelection();
+        read_revolve_axis(m_revolve_axis, m_revolve_axis_ents, f.revolve_axis, f.revolve_axis_entity);
         f.flip          = m_revolve_flip->GetValue();
         f.mode          = static_cast<BooleanMode>(m_revolve_mode->GetSelection());
         break;
@@ -9934,7 +9940,7 @@ CadFeature DesignPanel::build_candidate(Tool t) const
         f.type         = CadFeatureType::SurfaceRevolve;
         f.sketch_ref   = m_surf_revolve_sketch_ref;
         f.revolve_angle = m_surf_revolve_angle->GetValue();
-        f.revolve_axis = m_surf_revolve_axis->GetSelection();
+        read_revolve_axis(m_surf_revolve_axis, m_surf_revolve_axis_ents, f.revolve_axis, f.revolve_axis_entity);
         f.flip         = m_surf_revolve_flip->GetValue();
         break;
     case Tool::SurfaceLoft: {
@@ -10185,6 +10191,40 @@ void DesignPanel::update_shell_gizmo()
     m_viewport->begin_shell_gizmo(c, (-n).normalized(), m_shell_thickness->GetValue());
 }
 
+void DesignPanel::fill_revolve_axes(ComboBox* combo, std::vector<int>& ents, int sketch_ref, int axis, int entity)
+{
+    combo->Clear();
+    ents.clear();
+    combo->Append(_L("Plane X"));
+    combo->Append(_L("Plane Y"));
+    int centerline = -1, centerlines = 0;
+    if (sketch_ref >= 0 && sketch_ref < int(m_doc.features.size())) {
+        const std::vector<SketchEntity>& es = m_doc.features[sketch_ref].entities;
+        for (int i = 0; i < int(es.size()); ++i) {
+            if (es[i].type != SketchEntity::Type::Line)
+                continue;
+            // Named as the constraint list names entities (E0, E1, …), so the two agree.
+            combo->Append(es[i].construction ? wxString::Format(_L("Centerline E%d"), i)
+                                             : wxString::Format(_L("Line E%d"), i));
+            ents.push_back(i);
+            if (es[i].construction) { centerline = i; ++centerlines; }
+        }
+    }
+    if (entity == -2)   // fresh revolve: a lone centerline is what the profile was drawn around
+        entity = centerlines == 1 ? centerline : -1;
+    int sel = axis == 1 ? 1 : 0;
+    for (int k = 0; k < int(ents.size()); ++k)
+        if (ents[k] == entity) sel = 2 + k;
+    combo->SetSelection(sel);
+}
+
+void DesignPanel::read_revolve_axis(ComboBox* combo, const std::vector<int>& ents, int& axis, int& entity)
+{
+    const int sel = combo->GetSelection();
+    axis   = sel == 1 ? 1 : 0;
+    entity = sel >= 2 && sel - 2 < int(ents.size()) ? ents[sel - 2] : -1;
+}
+
 void DesignPanel::update_revolve_gizmo()
 {
     if (!m_viewport) return;
@@ -10200,6 +10240,7 @@ void DesignPanel::update_revolve_gizmo()
     if (!sk.entities.empty()) {
         Vec2d acc(0, 0); int n = 0;
         for (const SketchEntity& e : sk.entities) {
+            if (e.construction) continue;   // a centerline is the axis, not part of the profile
             switch (e.type) {
             case SketchEntity::Type::Line:    acc += 0.5 * (e.p0 + e.p1); ++n; break;
             case SketchEntity::Type::Arc:
@@ -10220,7 +10261,16 @@ void DesignPanel::update_revolve_gizmo()
         for (const Vec2d& p : sk.profile.points) centroid += p;
         centroid /= double(sk.profile.points.size());
     }
-    m_viewport->begin_revolve_gizmo(sk.plane, centroid, m_revolve_axis->GetSelection(),
+    // The axis as the kernel resolves it (revolve_axis_of): the picked line, else plane X / Y.
+    int axis = 0, axis_entity = -1;
+    read_revolve_axis(m_revolve_axis, m_revolve_axis_ents, axis, axis_entity);
+    Vec3d ax_o = sk.plane.origin, ax_d = axis == 1 ? sk.plane.y_axis : sk.plane.x_axis;
+    if (axis_entity >= 0 && axis_entity < int(sk.entities.size())
+        && (sk.entities[axis_entity].p1 - sk.entities[axis_entity].p0).norm() > 1e-9) {
+        ax_o = sk.plane.to_world(sk.entities[axis_entity].p0);
+        ax_d = sk.plane.to_world(sk.entities[axis_entity].p1) - ax_o;
+    }
+    m_viewport->begin_revolve_gizmo(sk.plane, centroid, ax_o, ax_d.normalized(),
                                     m_revolve_angle->GetValue(), m_revolve_flip->GetValue());
 }
 

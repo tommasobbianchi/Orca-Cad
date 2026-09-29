@@ -9,6 +9,7 @@
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
 #include <BRepClass_FaceClassifier.hxx>
@@ -335,20 +336,35 @@ TopoDS_Shape SketchEngine::make_extrude_regions(
     return count == 1 ? last : TopoDS_Shape(comp);   // avoid a compound-of-one
 }
 
-TopoDS_Shape SketchEngine::make_revolve(const TopoDS_Wire& wire, const SketchPlane& plane,
-                                        double angle_deg, int axis_sel)
+TopoDS_Shape SketchEngine::make_revolve(const TopoDS_Wire& wire, const gp_Ax1& axis_in, double angle_deg)
 {
     BRepBuilderAPI_MakeFace faceMaker(wire);
     if (!faceMaker.IsDone())
         throw std::runtime_error("Failed to make face from wire");
     TopoDS_Face face = faceMaker.Face();
 
-    // Revolution axis lies in the sketch plane through its origin: X (0) or Y (1).
-    const Vec3d& adir = (axis_sel == 1) ? plane.y_axis : plane.x_axis;
-    gp_Pnt o(plane.origin.x(), plane.origin.y(), plane.origin.z());
-    gp_Dir xd(adir.x(), adir.y(), adir.z());
-    gp_Ax1 axis(o, xd);
-
+    // A profile on both sides of the axis sweeps through itself; MakeRevol then fails with no
+    // reason, or builds an invalid solid. Sample every edge and name the cause instead.
+    {
+        const gp_Pnt o = axis_in.Location();
+        const gp_Dir d = axis_in.Direction();
+        bool pos = false, neg = false;
+        gp_Vec side_ref;
+        for (TopExp_Explorer ex(wire, TopAbs_EDGE); ex.More(); ex.Next()) {
+            BRepAdaptor_Curve c(TopoDS::Edge(ex.Current()));
+            for (int i = 0; i <= 16; ++i) {
+                const gp_Pnt p = c.Value(c.FirstParameter() + (c.LastParameter() - c.FirstParameter()) * i / 16.0);
+                const gp_Vec off = gp_Vec(o, p) - gp_Vec(d) * gp_Vec(o, p).Dot(gp_Vec(d));   // from the axis
+                if (off.Magnitude() < 1e-6)
+                    continue;
+                if (side_ref.Magnitude() == 0.0) { side_ref = off; pos = true; continue; }
+                (off.Dot(side_ref) > 0.0 ? pos : neg) = true;
+            }
+        }
+        if (pos && neg)
+            throw std::runtime_error("the profile crosses the revolve axis — it must lie on one side of it");
+    }
+    gp_Ax1 axis = axis_in;
     double angle_rad = angle_deg * M_PI / 180.0;
     // A negative angle is expressed as a positive sweep about the reversed axis,
     // since BRepPrimAPI_MakeRevol expects an angle in (0, 2*pi].
@@ -356,6 +372,8 @@ TopoDS_Shape SketchEngine::make_revolve(const TopoDS_Wire& wire, const SketchPla
     BRepPrimAPI_MakeRevol rev(face, axis, angle_rad);
     if (!rev.IsDone())
         throw std::runtime_error("Failed to revolve");
+    if (!BRepCheck_Analyzer(rev.Shape()).IsValid())
+        throw std::runtime_error("the profile crosses the revolve axis — it must lie on one side of it");
     return rev.Shape();
 }
 

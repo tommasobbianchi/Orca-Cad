@@ -374,12 +374,12 @@ public:
     void set_mate_links(std::vector<std::pair<Vec3d, Vec3d>> l) { m_mate_links = std::move(l); }
     void clear_mate_connectors() { m_mate_connectors.clear(); m_mate_links.clear(); }
 
-    // Visual Revolve gizmo. The panel feeds the sketch plane + profile centroid + axis (0=plane X,
-    // 1=plane Y) + angle + flip while its Revolve card is open; an angle-arc is drawn in the
-    // revolve plane at the profile radius. Dragging the tip sweeps the angle, a stationary click
+    // Visual Revolve gizmo. The panel feeds the sketch plane + profile centroid + the world axis
+    // (a point on it and its direction) + angle + flip while its Revolve card is open; an
+    // angle-arc is drawn in the revolve plane at the profile radius, and the axis dashed. Dragging the tip sweeps the angle, a stationary click
     // edits it; both fire on_revolve_angle_changed.
     void set_revolve_gizmo(const SketchPlane& plane, const Vec2d& centroid,
-                           int axis_sel, double angle, bool flip);
+                           const Vec3d& axis_origin, const Vec3d& axis_dir, double angle, bool flip);
     void clear_revolve_gizmo();
     bool revolving() const { return m_rv_active; }
     std::function<void(double angle)> on_revolve_angle_changed;

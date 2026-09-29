@@ -180,6 +180,9 @@ struct CadFeature {
     // target_body. revolve_axis: 0 = plane X axis, 1 = plane Y axis.
     double      revolve_angle{360};        // sweep angle in degrees (1..360)
     int         revolve_axis{0};           // 0 = plane X, 1 = plane Y
+    // A Line of the profile sketch to revolve about instead (index into its entities: a
+    // centerline, usually construction, or an edge of the profile itself); -1 = revolve_axis.
+    int         revolve_axis_entity{-1};
 
     // Sweep: profile carried by sketch_ref / entities (like Extrude); the spine is a
     // second Sketch referenced by sweep_path_ref (an open or closed wire). Reuses
@@ -404,7 +407,8 @@ struct CadFeature {
                coordsys_face_kind, coordsys_face_edges,
                thread_major_nominal, pattern_inclusive,
                dressup_edges,
-               text_string, text_font, text_height);
+               text_string, text_font, text_height,
+               revolve_axis_entity);
     }
     template<class Archive>
     void load(Archive& ar) {
@@ -446,7 +450,8 @@ struct CadFeature {
                coordsys_face_kind, coordsys_face_edges,
                thread_major_nominal, pattern_inclusive,
                dressup_edges,
-               text_string, text_font, text_height);
+               text_string, text_font, text_height,
+               revolve_axis_entity);
         imported_solid = brep_from_string(brep);
     }
     // The pre-framing (v4) layout, FROZEN. A v4 recipe is one flat stream with no per-feature

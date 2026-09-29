@@ -161,11 +161,11 @@ public:
     void clear_shell_gizmo();
     bool shelling() const;
     void set_on_shell_thickness_changed(std::function<void(double)> cb);
-    // Visual Revolve angle-arc gizmo: the panel feeds the sketch plane + profile centroid + axis
-    // (0=plane X, 1=plane Y) + angle + flip while its Revolve card is open; drag/edit fire the
-    // angle callback.
+    // Visual Revolve angle-arc gizmo: the panel feeds the sketch plane + profile centroid + the
+    // world axis (a point on it, unit direction) + angle + flip while its Revolve card is open;
+    // drag/edit fire the angle callback.
     void begin_revolve_gizmo(const SketchPlane& plane, const Vec2d& centroid,
-                             int axis_sel, double angle, bool flip);
+                             const Vec3d& axis_origin, const Vec3d& axis_dir, double angle, bool flip);
     void clear_revolve_gizmo();
     bool revolving() const;
     void set_on_revolve_angle_changed(std::function<void(double)> cb);
