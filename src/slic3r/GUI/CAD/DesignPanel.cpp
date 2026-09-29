@@ -383,7 +383,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
     // bind to their default mode; the other modes stay in the toolbar flyout. Registered here
     // where select_tool is in scope; the closures run at key-press time (members are live by then).
     auto sk_key = [this, select_tool](int ch, DesignSketchTool::Mode m, const wxString& h) {
-        m_keys_sketch[ch] = [this, select_tool, m, h] { select_tool(m, h); };
+        m_keys_sketch[ch] = [select_tool, m, h] { select_tool(m, h); };
     };
     sk_key('L', DesignSketchTool::Mode::Line,         _L("Line — click start, then end"));
     sk_key('R', DesignSketchTool::Mode::CornerRect,   _L("Rectangle — click two opposite corners"));
@@ -1390,19 +1390,19 @@ DesignPanel::DesignPanel(wxWindow* parent)
         // Choose FIRST, then open: open_tool() titles the card from m_dressup_type, so setting
         // it afterwards left the header reading "Fillet 1" over a chamfer. Nothing in the
         // opener resets the combo, so this order is safe.
-        m_verb_actions["btn:dress#0"] = [this, open_feature, k_dress] {
+        m_verb_actions["btn:dress#0"] = [this, open_feature] {
             if (m_dressup_type) m_dressup_type->SetSelection(0); open_feature(k_dress); };
-        m_verb_actions["btn:dress#1"] = [this, open_feature, k_dress] {
+        m_verb_actions["btn:dress#1"] = [this, open_feature] {
             if (m_dressup_type) m_dressup_type->SetSelection(1); open_feature(k_dress); };
         // Same order for all three families: choose the variant, then open, so the card, its
         // header and the first preview are built for the variant that was picked (a circular
         // pattern used to open showing the linear ghost and gizmo).
         for (int op = 0; op < 3; ++op)
-            m_verb_actions["btn:bool#" + std::to_string(op)] = [this, open_feature, k_bool, op] {
+            m_verb_actions["btn:bool#" + std::to_string(op)] = [this, open_feature, op] {
                 if (m_bool_op) m_bool_op->SetSelection(op);
                 open_feature(k_bool); };
         for (int t = 0; t < 2; ++t)
-            m_verb_actions["btn:pat#" + std::to_string(t)] = [this, open_feature, k_pat, t] {
+            m_verb_actions["btn:pat#" + std::to_string(t)] = [this, open_feature, t] {
                 if (m_pattern_type) m_pattern_type->SetSelection(t);
                 open_feature(k_pat); };
 
@@ -6625,7 +6625,7 @@ void DesignPanel::show_offer_menu(const wxPoint& screen_pos)
             mate_ghost = false;
         };
         menu.Bind(wxEVT_MENU_HIGHLIGHT,
-                  [this, cs_a, cs_b, opts, mate_base, &mate_ghost, drop_ghost](wxMenuEvent& e) {
+                  [this, cs_a, cs_b, opts, &mate_ghost, drop_ghost](wxMenuEvent& e) {
             const int i = e.GetMenuId() - (mate_base + 1);
             // Off the palette (a verb row, the header, or nothing) — a stale ghost from the row
             // you just left is worse than none, so it goes as soon as the cursor does.
@@ -6635,7 +6635,7 @@ void DesignPanel::show_offer_menu(const wxPoint& screen_pos)
             m_viewport->repaint_now();   // synchronous: the popup owns the loop, a queued repaint is never serviced
         });
 
-        menu.Bind(wxEVT_MENU, [this, cs_a, cs_b, opts, mate_base, drop_ghost](wxCommandEvent& e) {
+        menu.Bind(wxEVT_MENU, [this, cs_a, cs_b, opts, drop_ghost](wxCommandEvent& e) {
             const int i = e.GetId() - (mate_base + 1);
             if (i < 0 || i >= int(opts.size()) || !opts[i].viable) return;
             drop_ghost();         // the real bodies are about to become the ghost's pose
@@ -6664,14 +6664,14 @@ void DesignPanel::show_offer_menu(const wxPoint& screen_pos)
     // status message on screen, and clicking one created nothing at all. The whole mate palette
     // enumerated perfectly and fired nothing. Restricting the range keeps each half to its own ids
     // regardless of bind order.
-    menu.Bind(wxEVT_MENU_HIGHLIGHT, [this, &bound, base](wxMenuEvent& e) {
+    menu.Bind(wxEVT_MENU_HIGHLIGHT, [this, &bound](wxMenuEvent& e) {
         const int i = e.GetMenuId() - base;
         if (i < 0 || i >= int(bound.size()) || bound[i] == nullptr || bound[i]->hint == nullptr)
             return;
         set_status(StatusKind::Info, wxGetTranslation(wxString::FromUTF8(bound[i]->hint), SLIC3R_APP_KEY));
         m_status->Update();   // the popup owns the loop; without this the line repaints late
     }, base, base + 499);   // 499: the mate section starts at base + 500 (see mate_base)
-    menu.Bind(wxEVT_MENU, [this, &bound, base](wxCommandEvent& e) {
+    menu.Bind(wxEVT_MENU, [this, &bound](wxCommandEvent& e) {
         const int i = e.GetId() - base;
         if (i >= 0 && i < int(bound.size()) && bound[i])
             run_offer_action(bound[i]->action);
@@ -7873,7 +7873,7 @@ void DesignPanel::apply_live_constraint(SketchConstraintType type)
                               constraint_reject_text(plan.reason, type), int(sel.size())));
         return;
     case ConstraintPlan::Kind::AskValue:
-        m_viewport->open_inline_value(plan.prefill, [this, plan, commit](double v) {
+        m_viewport->open_inline_value(plan.prefill, [plan, commit](double v) {
             commit(plan.defs, v);
         });
         return;

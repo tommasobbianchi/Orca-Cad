@@ -16,8 +16,6 @@
 #endif
 #include <imgui/imgui_internal.h>
 
-#define L(s) Slic3r::GUI::I18N::translate((s)).c_str()
-
 namespace Slic3r {
 namespace GUI {
 
