@@ -550,7 +550,8 @@ private:
     // Revolve controls (sweep a sketch profile about an in-plane axis).
     wxStaticText*     m_revolve_sketch_label{nullptr};
     wxSpinCtrlDouble* m_revolve_angle{nullptr};
-    ComboBox*         m_revolve_axis{nullptr};   // 0 = plane X, 1 = plane Y
+    ComboBox*         m_revolve_axis{nullptr};   // Plane X, Plane Y, then the sketch's lines
+    std::vector<int>  m_revolve_axis_ents;       // entity index of each line entry, in order
     ComboBox*         m_revolve_mode{nullptr};   // New/Add/Cut/Intersect
     CheckBox*         m_revolve_flip{nullptr};
     int               m_revolve_sketch_ref{-1};
@@ -577,7 +578,14 @@ private:
     // Surface Revolve controls (sheet from sketch about axis).
     wxStaticText*     m_surf_revolve_sketch_label{nullptr};
     wxSpinCtrlDouble* m_surf_revolve_angle{nullptr};
-    ComboBox*         m_surf_revolve_axis{nullptr};   // 0 = plane X, 1 = plane Y
+    ComboBox*         m_surf_revolve_axis{nullptr};   // as m_revolve_axis
+    std::vector<int>  m_surf_revolve_axis_ents;
+    // Fill a revolve axis combo for the profile sketch `sketch_ref`: "Plane X", "Plane Y", then
+    // one entry per Line of the sketch (entity index in `ents`), and select axis/entity. A fresh
+    // revolve passes entity = -2: the sketch's only centerline when it has exactly one, else X.
+    void fill_revolve_axes(ComboBox* combo, std::vector<int>& ents, int sketch_ref, int axis, int entity);
+    // The combo's selection as CadFeature::revolve_axis + revolve_axis_entity.
+    static void read_revolve_axis(ComboBox* combo, const std::vector<int>& ents, int& axis, int& entity);
     CheckBox*         m_surf_revolve_flip{nullptr};
     int               m_surf_revolve_sketch_ref{-1};
 

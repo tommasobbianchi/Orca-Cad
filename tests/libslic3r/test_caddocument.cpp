@@ -2351,11 +2351,12 @@ TEST_CASE("a truncated feature keeps what it could read", "[CadDocument][recipe]
     // Shorten feature 1 so it ends right after coordsys_face_kind: drop coordsys_face_edges
     // (4 bytes), the two flags appended after it (thread_major_nominal, pattern_inclusive:
     // 1 byte each), the empty dressup_edges list and the two empty text strings (an 8-byte size
-    // tag each) and text_height (a double). Rewrite its length prefix and erase the tail bytes.
+    // tag each), text_height (a double) and revolve_axis_entity (an int). Rewrite its length prefix and erase the tail bytes.
     // The reader then runs out inside fa(f), throws, and keeps everything it had already
     // assigned — that is the whole point of the try/catch. (Cut on a field boundary: a field
     // cut in half is read as whatever half arrived.)
-    const size_t drop = sizeof(uint32_t) + 2 * sizeof(bool) + 3 * sizeof(cereal::size_type) + sizeof(double);
+    const size_t drop = sizeof(uint32_t) + 2 * sizeof(bool) + 3 * sizeof(cereal::size_type) + sizeof(double)
+                        + sizeof(int);
     REQUIRE(f_len[1] > drop);
     std::string shortened = blob;
     shortened.erase(f_off[1] + 4 + f_len[1] - drop, drop);
@@ -8947,4 +8948,94 @@ TEST_CASE("display edges: every real edge once, no seams, no degenerate apex", "
     // A cone keeps its base rim; the apex is a degenerate edge and the side has a seam.
     const auto cone = GeometryEngine::display_edges(BRepPrimAPI_MakeCone(5., 0., 8.).Shape(), 0.01);
     CHECK(cone.size() == 1);
+}
+
+namespace {
+// A 10 x 20 rectangle standing on the plane X axis between u = 5 and u = 15, and a construction
+// centerline x = 0 from (0,0) to (0,20): the half-profile of a tube, drawn the usual way.
+Slic3r::CadFeature tube_half_profile()
+{
+    using namespace Slic3r;
+    CadFeature sk;
+    sk.type  = CadFeatureType::Sketch;
+    sk.plane = SketchPlane::XY();
+    auto line = [](Vec2d a, Vec2d b, bool c) {
+        SketchEntity e; e.type = SketchEntity::Type::Line; e.p0 = a; e.p1 = b; e.construction = c; return e; };
+    sk.entities = { line({5, 0}, {15, 0}, false), line({15, 0}, {15, 20}, false),
+                    line({15, 20}, {5, 20}, false), line({5, 20}, {5, 0}, false),
+                    line({0, 0}, {0, 20}, true) };
+    return sk;
+}
+} // namespace
+
+TEST_CASE("revolve about a line of the sketch", "[CadDocument][revolve]")
+{
+    using namespace Slic3r;
+
+    SECTION("a construction centerline: the profile sweeps into a tube around it") {
+        CadDocument doc;
+        doc.features.push_back(tube_half_profile());
+        const int r = doc.add_revolve(0, 360.0, 0, false, BooleanMode::New, "Rev");
+        doc.features[r].revolve_axis_entity = 4;
+        REQUIRE(doc.recompute());
+        REQUIRE(doc.error.empty());
+        REQUIRE(doc.bodies.size() == 1);
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(doc.bodies[0].shape, props);
+        CHECK(props.Mass() == Approx(M_PI * (15. * 15. - 5. * 5.) * 20.).epsilon(1e-6));   // 4000 pi
+        Bnd_Box box;
+        BRepBndLib::Add(doc.bodies[0].shape, box);
+        double x0, y0, z0, x1, y1, z1;
+        box.Get(x0, y0, z0, x1, y1, z1);
+        CHECK(y0 == Approx(0.).margin(0.01));       // the axis runs along Y, as drawn
+        CHECK(y1 == Approx(20.).margin(0.01));
+        CHECK(x1 == Approx(15.).margin(0.01));
+    }
+
+    SECTION("an edge of the profile itself: a solid cylinder") {
+        CadDocument doc;
+        doc.features.push_back(tube_half_profile());
+        const int r = doc.add_revolve(0, 360.0, 0, false, BooleanMode::New, "Rev");
+        doc.features[r].revolve_axis_entity = 3;   // the rectangle's left side, u = 5
+        REQUIRE(doc.recompute());
+        REQUIRE(doc.error.empty());
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(doc.bodies[0].shape, props);
+        CHECK(props.Mass() == Approx(M_PI * 10. * 10. * 20.).epsilon(1e-6));
+    }
+
+    SECTION("an axis through the profile is refused with the reason") {
+        CadDocument doc;
+        CadFeature sk = tube_half_profile();
+        sk.entities[4].p0 = Vec2d(10, 0);
+        sk.entities[4].p1 = Vec2d(10, 20);   // straight through the middle of the rectangle
+        doc.features.push_back(sk);
+        const int r = doc.add_revolve(0, 360.0, 0, false, BooleanMode::New, "Rev");
+        doc.features[r].revolve_axis_entity = 4;
+        CHECK_FALSE(doc.recompute());
+        INFO(doc.error);
+        CHECK(doc.error.find("crosses the revolve axis") != std::string::npos);
+    }
+
+    SECTION("an axis index that no longer names a line fails with a reason") {
+        CadDocument doc;
+        doc.features.push_back(tube_half_profile());
+        const int r = doc.add_revolve(0, 360.0, 0, false, BooleanMode::New, "Rev");
+        doc.features[r].revolve_axis_entity = 9;
+        CHECK_FALSE(doc.recompute());
+        CHECK(doc.error.find("axis line") != std::string::npos);
+    }
+
+    SECTION("the axis line survives save and load") {
+        CadDocument doc;
+        doc.features.push_back(tube_half_profile());
+        const int r = doc.add_revolve(0, 270.0, 0, false, BooleanMode::New, "Rev");
+        doc.features[r].revolve_axis_entity = 4;
+        REQUIRE(doc.recompute());
+        CadDocument loaded;
+        REQUIRE(loaded.deserialize_recipe(doc.serialize_recipe()));
+        REQUIRE(loaded.features.size() == 2);
+        CHECK(loaded.features[1].revolve_axis_entity == 4);
+        CHECK(loaded.features[1].revolve_angle == Approx(270.));
+    }
 }

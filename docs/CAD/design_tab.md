@@ -227,6 +227,12 @@ Grouped in the toolbar by what they do, one concept per drawer.
 Extrude offers blind, symmetric, two-sided, through-all and up-to-face end conditions, plus
 a draft angle on the side wall, and can add, subtract, intersect or start a new body.
 
+Revolve turns the profile about the sketch plane's X or Y axis, or about any line of the same
+sketch: a construction centerline drawn beside the half-profile (picked for you when the sketch
+has exactly one), or an edge of the profile itself. The axis is drawn dashed while the card is
+open. A profile on both sides of the axis would sweep through itself, and is refused with that
+reason. Surface Revolve takes the same axes.
+
 ### Surface
 Sheet bodies — surfaces with no thickness — for shapes that are easier to build as skins and
 solidify afterwards.

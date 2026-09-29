@@ -6,6 +6,7 @@
 #include "libslic3r/CAD/GeometryEngine.hpp"
 
 #include <gp_Pln.hxx>
+#include <gp_Ax1.hxx>
 #include <gp_Ax3.hxx>
 #include <TopoDS_Wire.hxx>
 #include <TopoDS_Shape.hxx>
@@ -262,12 +263,10 @@ public:
         const std::vector<std::vector<std::vector<Vec2d>>>& regions,
         const SketchPlane& plane, double length, bool symmetric = false);
 
-    // Revolve a planar profile wire about an axis lying in the sketch plane and
-    // passing through the plane origin: axis_sel 0 = plane X axis, 1 = plane Y axis.
-    // A negative angle_deg sweeps the opposite direction (Flip). The profile must
-    // lie to one side of the axis (Onshape rule); a straddling profile self-intersects.
-    static TopoDS_Shape make_revolve(const TopoDS_Wire& wire, const SketchPlane& plane,
-                                     double angle_deg = 360.0, int axis_sel = 0);
+    // Revolve the closed profile wire about `axis` (world) by angle_deg; a negative angle sweeps
+    // the other way (Flip). The profile must lie to one side of the axis (Onshape rule): one that
+    // straddles it sweeps through itself, and that is refused rather than returned broken.
+    static TopoDS_Shape make_revolve(const TopoDS_Wire& wire, const gp_Ax1& axis, double angle_deg = 360.0);
 
     // Sweep a planar profile wire along a path (spine) wire. The profile is turned
     // into a face and swept with BRepOffsetAPI_MakePipe, which keeps the profile

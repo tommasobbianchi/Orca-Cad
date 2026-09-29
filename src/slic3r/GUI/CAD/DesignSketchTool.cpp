@@ -6405,12 +6405,13 @@ void DesignSketchTool::drag_cut_arrow(GLCanvas3D& canvas, const wxMouseEvent& ev
 }
 
 void DesignSketchTool::set_revolve_gizmo(const SketchPlane& plane, const Vec2d& centroid,
-                                         int axis_sel, double angle, bool flip)
+                                         const Vec3d& axis_origin, const Vec3d& axis_dir,
+                                         double angle, bool flip)
 {
-    const Vec3d ax = (axis_sel == 1 ? plane.y_axis : plane.x_axis).normalized();
+    const Vec3d ax = axis_dir.normalized();
     const Vec3d cw = plane.to_world(centroid);
-    const double axial = (cw - plane.origin).dot(ax);
-    m_rv_center = plane.origin + axial * ax;     // foot of the centroid on the axis line
+    const double axial = (cw - axis_origin).dot(ax);
+    m_rv_center = axis_origin + axial * ax;      // foot of the centroid on the axis line
     Vec3d ref = cw - m_rv_center;                // perpendicular to ax by construction
     double r = ref.norm();
     if (r < 1e-6) { ref = plane.normal.normalized(); r = std::max(plane.normal.norm(), 1.0); }
@@ -6477,6 +6478,16 @@ void DesignSketchTool::render_revolve_gizmo()
     draw_strokes(m_rv_stroke_model, segs, std::max(0.8 * upp, 1e-4), arcc);
     DimAnnot da; da.kind = DimType::Angle; da.value = m_rv_angle;
     draw_text(m_line_model, dim_text(da), tip * 1.14, th, arcc);
+    // The axis itself, dashed, past both ends of the sweep: which line is being revolved about
+    // is the one thing the card's list cannot show.
+    SketchPlane ap; ap.origin = m_rv_center; ap.x_axis = m_rv_axis; ap.y_axis = m_rv_ref;
+    ap.normal = m_rv_axis.cross(m_rv_ref);
+    m_plane = ap;
+    std::vector<std::pair<Vec2d, Vec2d>> dashes;
+    const double L = 1.6 * r, dash = std::max(r * 0.08, th * 0.5);
+    for (double u = -L; u < L; u += 2.0 * dash)
+        dashes.emplace_back(Vec2d(u, 0.0), Vec2d(std::min(u + dash, L), 0.0));
+    draw_strokes(m_rv_stroke_model, dashes, std::max(0.8 * upp, 1e-4), ColorRGBA(1.0f, 0.55f, 0.1f, 1.0f));
     m_plane = saved;
 }
 
