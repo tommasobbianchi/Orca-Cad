@@ -8198,7 +8198,7 @@ void DesignSketchTool::recompute_op_ghost()
         // Read the side off the ghost instead: the arrow points from the picked entity to its
         // offset copy, flipped for a negative distance, so dragging it always follows the ghost.
         if (m_op_chain.size() > 1 && std::abs(m_op_value) > 1e-12 && !m_op_ghost.empty()) {
-            double best = 1e30; Vec2d near = m_op_anchor;
+            double best = 1e30; Vec2d closest = m_op_anchor;   // not "near": a macro in windows.h
             for (const SketchEntity& g : m_op_ghost) {
                 bool closed = false;
                 const std::vector<Vec2d> pl = entity_polyline(g, closed);
@@ -8207,10 +8207,10 @@ void DesignSketchTool::recompute_op_ghost()
                     const double l2 = d.squaredNorm();
                     const double t = l2 > 1e-24 ? std::clamp((m_op_anchor - a).dot(d) / l2, 0.0, 1.0) : 0.0;
                     const Vec2d q = a + t * d;
-                    if ((q - m_op_anchor).norm() < best) { best = (q - m_op_anchor).norm(); near = q; }
+                    if ((q - m_op_anchor).norm() < best) { best = (q - m_op_anchor).norm(); closest = q; }
                 }
             }
-            const Vec2d v = near - m_op_anchor;
+            const Vec2d v = closest - m_op_anchor;
             if (v.norm() > 1e-12) m_op_dir = (m_op_value > 0 ? 1.0 : -1.0) * v.normalized();
         }
     } else if (m_mode == Mode::Mirror) {
