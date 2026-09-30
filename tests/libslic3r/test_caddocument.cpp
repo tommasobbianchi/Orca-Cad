@@ -8848,7 +8848,9 @@ TEST_CASE("A circular pattern spans its whole angle", "[CadDocument][pattern]")
     CHECK(doc.display_mesh.bounding_box().max.y() > 10.5);
 }
 
-TEST_CASE("Hole standards: inch sizes by either name, with their 82° countersink", "[CadDocument][hole]")
+// ASCII only: CTest passes the name to Catch on the command line, and on Windows a "°" arrives in
+// the ANSI code page, matches no test and fails the run.
+TEST_CASE("Hole standards: inch sizes by either name, with their 82 degree countersink", "[CadDocument][hole]")
 {
     CadDocument doc;
     const int a = doc.add_hole_standard("1/4-20", 2, true, 10, 0, 0, SketchPlane::XY(), "H1");
