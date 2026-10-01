@@ -2,7 +2,6 @@
 #define slic3r_DesignCanvas_hpp_
 
 #include <wx/panel.h>
-#include <wx/popupwin.h>
 
 #include <functional>
 #include <memory>
@@ -227,10 +226,6 @@ public:
     // the panel clips it at ~73 characters with no warning (8cc), the viewport's
     // bottom margin has the whole window width to spare. Empty text hides it.
     void set_status_text(const wxString& text, const wxColour& colour);
-    // Take the status line down / bring it back when the Design page leaves and re-enters view.
-    // A popup is a TOP-LEVEL window: hiding the page it belongs to does not hide it. Keeps the
-    // text, so coming back needs no re-selection.
-    void show_status_hud(bool on);
     void set_operand_bodies(int target_body, int tool_body);  // -1,-1 clears
     void set_body_translucent(bool on); // render the solid see-through (fillet/chamfer preview)
     void set_xray_focus(int body);      // >=0: fade+lock out every other body (CoordSys picking)
@@ -398,36 +393,15 @@ private:
     bool m_section_on{false};
 
     std::unique_ptr<SketchInlineEditor> m_inline_editor;  // floating in-canvas value editor
-    // Bottom-right viewport HUD: a borderless float label over the GL canvas showing the
-    // active tool's current values (fed by the tool's on_readout). Empty text hides it.
-    // A wxPopupWindow for the SAME reason as the status chip below, and it was a wxFrame until
-    // the reason was measured rather than assumed: "it appears mid-gesture and the next input is
-    // the mouse" is false. The chip keeps the last value on screen AFTER the gesture ends, and a
-    // frame holds the X input focus once it has it — so the next keystroke went to a 119x31
-    // window that has no use for it. Measured on :10: focus on the chip, `r` produced no
-    // CHAR_HOOK line at all; one bare canvas click moved focus back and the same key armed the
-    // tool. That is every sketch shortcut dead after every dimensioned entity.
-    wxPopupWindow* m_hud{nullptr};
-    wxStaticText* m_hud_label{nullptr};
+    // The viewport chips, drawn in the tool's ImGui pass (render_hud): bottom-right the active
+    // tool's current values (fed by the tool's on_readout), bottom-left the status line written by
+    // DesignPanel. Empty text draws nothing. They were top-level popups once; a popup does not
+    // follow its frame, so it floated over other applications and outlived the tab.
     std::string   m_hud_last;
-    void set_readout(const std::string& text);
-    void place_readout_hud();            // anchor + show, using m_hud_last
-    void show_readout_hud(bool on);      // iconise/deactivate: a popup would float on the desktop
-
-    // Bottom-LEFT viewport HUD: the selection / tool status line, written by DesignPanel.
-    // A wxPopupWindow, NOT the wxFrame the readout HUD uses: a frame accepts keyboard focus,
-    // and this one is on screen permanently and re-raised on every status change, so it stole
-    // the keyboard from the canvas and killed every sketch shortcut in the tab.
-    wxPopupWindow* m_status_hud{nullptr};
-    wxStaticText* m_status_hud_label{nullptr};
     wxString      m_status_hud_last;
-    wxColour      m_status_hud_colour;
-    void place_status_hud();          // re-anchors to the canvas corner (also on resize)
-    void apply_status_label();        // SetLabel + Wrap to the canvas width + Fit, always together
-    // On the top-level frame, which outlives this canvas — members so they can be unbound.
-    void on_frame_iconize(wxIconizeEvent& e);
-    void on_frame_activate(wxActivateEvent& e);
-    void on_status_hud_reanchor(wxEvent& e);   // frame wxEVT_MOVE and canvas wxEVT_SIZE
+    wxColour      m_status_hud_colour;   // wxNullColour: the overlay's own text colour
+    void set_readout(const std::string& text);
+    void render_hud();
     std::function<void(const SketchProfile&, const SketchPlane&)> m_on_sketch_commit;
     std::function<void(const std::vector<SketchEntity>&,
                        const std::vector<SketchEntityConstraintDef>&,

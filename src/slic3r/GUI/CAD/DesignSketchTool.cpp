@@ -8198,7 +8198,7 @@ void DesignSketchTool::recompute_op_ghost()
         // Read the side off the ghost instead: the arrow points from the picked entity to its
         // offset copy, flipped for a negative distance, so dragging it always follows the ghost.
         if (m_op_chain.size() > 1 && std::abs(m_op_value) > 1e-12 && !m_op_ghost.empty()) {
-            double best = 1e30; Vec2d near = m_op_anchor;
+            double best = 1e30; Vec2d closest = m_op_anchor;   // not "near": a macro in windows.h
             for (const SketchEntity& g : m_op_ghost) {
                 bool closed = false;
                 const std::vector<Vec2d> pl = entity_polyline(g, closed);
@@ -8207,10 +8207,10 @@ void DesignSketchTool::recompute_op_ghost()
                     const double l2 = d.squaredNorm();
                     const double t = l2 > 1e-24 ? std::clamp((m_op_anchor - a).dot(d) / l2, 0.0, 1.0) : 0.0;
                     const Vec2d q = a + t * d;
-                    if ((q - m_op_anchor).norm() < best) { best = (q - m_op_anchor).norm(); near = q; }
+                    if ((q - m_op_anchor).norm() < best) { best = (q - m_op_anchor).norm(); closest = q; }
                 }
             }
-            const Vec2d v = near - m_op_anchor;
+            const Vec2d v = closest - m_op_anchor;
             if (v.norm() > 1e-12) m_op_dir = (m_op_value > 0 ? 1.0 : -1.0) * v.normalized();
         }
     } else if (m_mode == Mode::Mirror) {
@@ -8988,6 +8988,8 @@ void DesignSketchTool::render(GLCanvas3D& canvas)
     // not there — there is no window to fall back to any more.
     if (inline_editor != nullptr)
         inline_editor->render(*wxGetApp().imgui(), m_render_scale);
+    if (render_overlays)
+        render_overlays();
     (void)canvas;
     if (!has_display()) {
         if (on_readout) on_readout(std::string());   // nothing to show -> hide HUD
@@ -10510,9 +10512,9 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
         // Left-drag rubber band -> whole body. Past the click budget the press becomes a sweep:
         // the rectangle is anchored at the ORIGINAL press point (not at the frame where the
         // threshold was crossed, which would lose the first few pixels) and the events are
-        // consumed from here on. Left-drag no longer orbits in this canvas — DesignCanvas puts
-        // orbit on middle-drag and pan on right-drag, the CAD convention — so nothing downstream
-        // is being starved of a gesture it used to own.
+        // consumed from here on. The camera follows Preferences > Control as in Prepare, so while
+        // left-drag is given to Rotate or Pan the band takes Shift+left-drag, Prepare's own
+        // rectangle selection.
         // HOVER PRE-HIGHLIGHT (9xw part 3): say what a click would take, before it is
         // taken. Plain motion only — no button down, no band running — because during a drag the
         // pointer is doing something else and a promise about clicking would be a lie. Returns
@@ -10522,7 +10524,9 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
             if (update_solid_hover(canvas, evt)) canvas.set_as_dirty();
             return false;
         }
-        if (evt.Dragging() && evt.LeftIsDown() && m_pick_pending) {
+        const bool left_drag_sweeps =
+            evt.ShiftDown() || std::atoi(wxGetApp().app_config->get("left_mouse_drag_action").c_str()) == 0;
+        if (evt.Dragging() && evt.LeftIsDown() && m_pick_pending && (left_drag_sweeps || m_rubber.is_dragging())) {
             if (!m_rubber.is_dragging()) {
                 if (std::max(std::abs(evt.GetX() - m_pick_press_x),
                              std::abs(evt.GetY() - m_pick_press_y)) <= 8)
