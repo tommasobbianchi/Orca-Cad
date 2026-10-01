@@ -8988,6 +8988,10 @@ void DesignSketchTool::render(GLCanvas3D& canvas)
     // not there — there is no window to fall back to any more.
     if (inline_editor != nullptr)
         inline_editor->render(*wxGetApp().imgui(), m_render_scale);
+    // ...and on top of the dimension labels, which are all drawn after it and each lift their
+    // own window to the front (draw_dim_label): without this a label prints across the number
+    // being typed. A guard, because the labels come from many of the exit paths below.
+    ScopeGuard field_on_top([this] { if (inline_editor != nullptr) inline_editor->bring_to_front(); });
     if (render_overlays)
         render_overlays();
     (void)canvas;
