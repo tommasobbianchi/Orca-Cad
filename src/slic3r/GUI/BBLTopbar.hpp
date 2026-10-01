@@ -69,6 +69,7 @@ public:
 
     void EnableUndoRedoItems();
     void DisableUndoRedoItems();
+    void EnableUndoRedo(bool undo, bool redo);
 
     void SaveNormalRect();
 

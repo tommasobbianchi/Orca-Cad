@@ -154,6 +154,8 @@ public:
     // The in-canvas value field, drawn by render() before any early return. Owned by
     // DesignCanvas; null until it sets it. Not a window — see SketchInlineEditor.hpp.
     class SketchInlineEditor* inline_editor{nullptr};
+    // The canvas's own overlays (its status and readout chips), drawn in this tool's ImGui pass.
+    std::function<void()> render_overlays;
 
     // Persistent committed sketches to draw even when no session is active (e.g. an
     // un-consumed sketch left visible after its extrude is removed). Each carries its
@@ -1244,9 +1246,8 @@ private:
     // change) read honestly — the change has to be predictable before the click, not only after.
     SolidPick m_pre;                       // what the pointer is currently over (kind None = nothing)
     bool update_solid_hover(GLCanvas3D& canvas, const wxMouseEvent& evt);  // true when it changed
-    // Left-drag rubber band: sweep a rectangle over the plate to take a whole body. Orbit
-    // moves to middle-drag in this canvas (DesignCanvas::set_cad_navigation) so the left
-    // button is free for it, which is the CAD convention (Onshape/SolidWorks).
+    // Left-drag rubber band: sweep a rectangle over the plate to take a whole body. While
+    // Preferences give left-drag to the camera it takes Shift+left-drag, as in Prepare.
     GLSelectionRectangle m_rubber;
     void pick_bodies_in_rectangle();       // resolve the swept rectangle -> whole-body selection
     bool on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas);   // the body; on_mouse wraps it

@@ -10,11 +10,10 @@
 #include <memory>
 #include <string>
 
-class wxTextCtrl;
-class wxChoice;
-class wxCheckBox;
-class wxSpinCtrlDouble;
 class wxStaticText;
+class TextInput;
+class ComboBox;
+class CheckBox;
 
 namespace Slic3r {
 namespace Emboss { struct FontFile; }
@@ -48,6 +47,7 @@ public:
 
 protected:
     void on_dpi_changed(const wxRect& suggested_rect) override;
+    void on_sys_color_changed() override;
 
 private:
     void     load_font();          // m_face/m_bold/m_italic -> m_font_file
@@ -58,11 +58,14 @@ private:
     void     cancel();
     bool     m_done{false};        // accept/cancel fire once
 
-    wxTextCtrl*       m_text{nullptr};
-    wxChoice*         m_face{nullptr};
-    wxCheckBox*       m_bold{nullptr};
-    wxCheckBox*       m_italic{nullptr};
-    wxSpinCtrlDouble* m_height{nullptr};
+    double   height_mm() const;    // the typed height, or the last valid one while it is being typed
+
+    ::TextInput*      m_text{nullptr};
+    ::ComboBox*       m_face{nullptr};
+    ::CheckBox*       m_bold{nullptr};
+    ::CheckBox*       m_italic{nullptr};
+    ::TextInput*      m_height{nullptr};   // mm; Orca's SpinInput is integer-only
+    double            m_last_height{10.0};
     wxWindow*         m_preview{nullptr};
     wxStaticText*     m_size{nullptr};
     wxWindow*         m_ok{nullptr};

@@ -73,5 +73,5 @@ a BRep revision OCCT can read.
 ## Undo
 
 The Design tab keeps its own history (`CadDocument` checkpoints), separate from the Plater's
-snapshot stack. The Edit menu's Undo/Redo drive whichever of the two belongs to the page on
-screen.
+snapshot stack. The top bar's Undo/Redo, `Ctrl+Z` and the Edit menu drive whichever of the two
+belongs to the page on screen; the tab has no Undo/Redo buttons of its own.

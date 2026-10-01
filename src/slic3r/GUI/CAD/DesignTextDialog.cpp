@@ -3,17 +3,18 @@
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/I18N.hpp"
 #include "slic3r/GUI/Widgets/DialogButtons.hpp"
+#include "slic3r/GUI/Widgets/TextInput.hpp"
+#include "slic3r/GUI/Widgets/ComboBox.hpp"
+#include "slic3r/GUI/Widgets/CheckBox.hpp"
+#include "slic3r/GUI/Widgets/Label.hpp"
 #include "slic3r/Utils/WxFontUtils.hpp"
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/Emboss.hpp"
 
-#include <wx/checkbox.h>
-#include <wx/choice.h>
 #include <wx/dcbuffer.h>
 #include <wx/fontenum.h>
 #include <wx/graphics.h>
 #include <wx/sizer.h>
-#include <wx/spinctrl.h>
 #include <wx/stattext.h>
 #include <wx/textctrl.h>
 
@@ -25,11 +26,31 @@ namespace Slic3r { namespace GUI {
 static const char* kFontKey   = "cad_text_font";     // WxFontUtils::store_wxFont descriptor
 static const char* kHeightKey = "cad_text_height";   // mm
 
-DesignTextDialog::DesignTextDialog(wxWindow* parent, const Spec* initial)
-    : DPIDialog(parent, wxID_ANY, _L("Text"), wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE)
+// Installed scalable faces, sorted, enumerated once per session: listing them takes long enough on
+// a machine with many fonts to be felt each time the dialog opened.
+static const wxArrayString& font_faces()
 {
-    SetFont(wxGetApp().normal_font());
-    SetBackgroundColour(wxGetApp().dark_mode() ? wxColour(0x2d, 0x2d, 0x31) : *wxWHITE);
+    static wxArrayString faces = [] {
+        // '@' faces are the vertical-writing aliases GTK/MSW list twice.
+        wxArrayString f = wxFontEnumerator::GetFacenames(wxFONTENCODING_SYSTEM, false);
+        f.erase(std::remove_if(f.begin(), f.end(), [](const wxString& n) { return n.StartsWith("@"); }), f.end());
+        f.Sort();
+        return f;
+    }();
+    return faces;
+}
+
+static bool parse_mm(wxString t, double& out)
+{
+    t.Replace(",", ".");
+    return t.Trim(true).Trim(false).ToCDouble(&out) && out >= 0.5 && out <= 500.0;
+}
+
+DesignTextDialog::DesignTextDialog(wxWindow* parent, const Spec* initial)
+    : DPIDialog(parent, wxID_ANY, _L("Text"), wxDefaultPosition, wxDefaultSize, wxCAPTION | wxCLOSE_BOX)
+{
+    SetFont(Label::Body_14);
+    SetBackgroundColour(*wxWHITE);   // light palette colour, dark-mapped by UpdateDlgDarkUI
     const int em = em_unit();
 
     // The text being edited, else the last used font and height, else the GUI font at 10 mm.
@@ -50,41 +71,47 @@ DesignTextDialog::DesignTextDialog(wxWindow* parent, const Spec* initial)
             try { height = std::clamp(std::stod(h), 0.5, 500.0); } catch (...) {}
         }
     }
+    m_last_height = height;
 
     auto* form = new wxFlexGridSizer(2, em / 2, em);
     form->AddGrowableCol(1, 1);
+    auto label = [this, form](const wxString& text) {
+        form->Add(new wxStaticText(this, wxID_ANY, text), 0, wxALIGN_CENTER_VERTICAL);
+    };
 
-    m_text = new wxTextCtrl(this, wxID_ANY, initial ? initial->text : wxString(), wxDefaultPosition,
-                            wxSize(30 * em, -1), wxTE_PROCESS_ENTER);
-    m_text->SetHint(_L("Type the text to insert"));
-    form->Add(new wxStaticText(this, wxID_ANY, _L("Text")), 0, wxALIGN_CENTER_VERTICAL);
+    m_text = new ::TextInput(this, initial ? initial->text : wxString(), "", "", wxDefaultPosition,
+                             wxSize(30 * em, -1), wxTE_PROCESS_ENTER);
+    m_text->GetTextCtrl()->SetHint(_L("Type the text to insert"));
+    label(_L("Text"));
     form->Add(m_text, 1, wxEXPAND);
 
-    // Scalable faces only ('@' faces are the vertical-writing aliases GTK/MSW list twice).
-    wxArrayString faces = wxFontEnumerator::GetFacenames(wxFONTENCODING_SYSTEM, false);
-    faces.erase(std::remove_if(faces.begin(), faces.end(), [](const wxString& f) { return f.StartsWith("@"); }),
-                faces.end());
-    faces.Sort();
-    m_face = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, faces);
-    int sel = m_face->FindString(font.GetFaceName());
+    m_face = new ::ComboBox(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(30 * em, -1), 0, nullptr,
+                            wxCB_READONLY);
+    const wxArrayString& faces = font_faces();
+    for (const wxString& f : faces)
+        m_face->Append(f);
+    const int sel = faces.Index(font.GetFaceName());
     m_face->SetSelection(sel != wxNOT_FOUND ? sel : 0);
-    form->Add(new wxStaticText(this, wxID_ANY, _L("Font")), 0, wxALIGN_CENTER_VERTICAL);
+    label(_L("Font"));
     form->Add(m_face, 1, wxEXPAND);
 
+    // Orca's CheckBox carries no label: each one sits beside its own text.
     auto* style = new wxBoxSizer(wxHORIZONTAL);
-    m_bold   = new wxCheckBox(this, wxID_ANY, _L("Bold"));
-    m_italic = new wxCheckBox(this, wxID_ANY, _L("Italic"));
-    m_bold->SetValue(WxFontUtils::is_bold(font));
-    m_italic->SetValue(WxFontUtils::is_italic(font));
-    style->Add(m_bold, 0, wxRIGHT, em);
-    style->Add(m_italic, 0);
+    auto check = [this, style, em](const wxString& text, bool value) {
+        auto* c = new ::CheckBox(this);
+        c->SetValue(value);
+        style->Add(c, 0, wxALIGN_CENTER_VERTICAL);
+        style->Add(new wxStaticText(this, wxID_ANY, text), 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, em / 2);
+        return c;
+    };
+    m_bold   = check(_L("Bold"), WxFontUtils::is_bold(font));
+    m_italic = check(_L("Italic"), WxFontUtils::is_italic(font));
     form->AddSpacer(0);
     form->Add(style, 0);
 
-    m_height = new wxSpinCtrlDouble(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(10 * em, -1),
-                                    wxSP_ARROW_KEYS, 0.5, 500.0, height, 0.5);
-    m_height->SetDigits(1);
-    form->Add(new wxStaticText(this, wxID_ANY, _L("Height (mm)")), 0, wxALIGN_CENTER_VERTICAL);
+    m_height = new ::TextInput(this, wxString::FromCDouble(height, 1), _L("mm"), "", wxDefaultPosition,
+                               wxSize(10 * em, -1), wxTE_PROCESS_ENTER);
+    label(_L("Height"));
     form->Add(m_height, 0);
 
     // The outline of what will be inserted, fitted to the box, with its real size under it.
@@ -104,26 +131,21 @@ DesignTextDialog::DesignTextDialog(wxWindow* parent, const Spec* initial)
     top->Add(m_size, 0, wxLEFT | wxRIGHT | wxTOP, em);
     top->Add(buttons, 0, wxEXPAND);
 
-    m_text->Bind(wxEVT_TEXT, [this](wxCommandEvent&) { update_preview(); });
+    m_text->Bind(wxEVT_TEXT, [this](wxCommandEvent& e) { update_preview(); e.Skip(); });
     m_text->Bind(wxEVT_TEXT_ENTER, [this](wxCommandEvent&) { accept(); });   // Enter = OK, as everywhere in the tab
-    auto refont = [this](wxCommandEvent&) { load_font(); update_preview(); };
-    m_face->Bind(wxEVT_CHOICE, refont);
-    m_bold->Bind(wxEVT_CHECKBOX, refont);
-    m_italic->Bind(wxEVT_CHECKBOX, refont);
-    m_height->Bind(wxEVT_SPINCTRLDOUBLE, [this](wxSpinDoubleEvent&) { update_preview(); });
-    m_height->Bind(wxEVT_TEXT, [this](wxCommandEvent&) { update_preview(); });
-    Bind(wxEVT_BUTTON, [this](wxCommandEvent& e) {
-        if (e.GetId() == wxID_OK)          accept();
-        else if (e.GetId() == wxID_CANCEL) cancel();
-        else                               e.Skip();
-    });
+    m_face->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent& e) { load_font(); update_preview(); e.Skip(); });
+    for (::CheckBox* c : {m_bold, m_italic})
+        c->Bind(wxEVT_TOGGLEBUTTON, [this](wxCommandEvent& e) { e.Skip(); CallAfter([this] { load_font(); update_preview(); }); });
+    m_height->Bind(wxEVT_TEXT, [this](wxCommandEvent& e) { update_preview(); e.Skip(); });
+    m_height->Bind(wxEVT_TEXT_ENTER, [this](wxCommandEvent&) { accept(); });
+    buttons->GetOK()->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { accept(); });
+    buttons->GetCANCEL()->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { cancel(); });
     Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent&) { cancel(); });
     Bind(wxEVT_CHAR_HOOK, [this](wxKeyEvent& e) {
         if (e.GetKeyCode() == WXK_ESCAPE) cancel();
         else                              e.Skip();
     });
 
-    wxGetApp().UpdateDlgDarkUI(this);
     SetSizerAndFit(top);
     // Out of the middle of the window, where the text is being placed: top right of the parent.
     if (parent != nullptr) {
@@ -132,17 +154,26 @@ DesignTextDialog::DesignTextDialog(wxWindow* parent, const Spec* initial)
     } else {
         CenterOnParent();
     }
+    wxGetApp().UpdateDlgDarkUI(this);
 
     load_font();
     update_preview();
-    m_text->SetFocus();
+    m_text->GetTextCtrl()->SetFocus();
 }
 
-wxString DesignTextDialog::text() const { return m_text->GetValue(); }
+double DesignTextDialog::height_mm() const
+{
+    double h = 0.0;
+    if (parse_mm(m_height->GetTextCtrl()->GetValue(), h))
+        const_cast<DesignTextDialog*>(this)->m_last_height = h;
+    return m_last_height;
+}
+
+wxString DesignTextDialog::text() const { return m_text->GetTextCtrl()->GetValue(); }
 
 DesignTextDialog::Spec DesignTextDialog::spec() const
 {
-    return { m_text->GetValue(), WxFontUtils::store_wxFont(current_font()), m_height->GetValue() };
+    return { text(), WxFontUtils::store_wxFont(current_font()), height_mm() };
 }
 
 void DesignTextDialog::accept()
@@ -151,7 +182,7 @@ void DesignTextDialog::accept()
     m_done = true;
     if (AppConfig* cfg = wxGetApp().app_config) {
         cfg->set(kFontKey, WxFontUtils::store_wxFont(current_font()));
-        cfg->set(kHeightKey, std::to_string(m_height->GetValue()));
+        cfg->set(kHeightKey, std::to_string(height_mm()));
     }
     if (on_accept) on_accept();
 }
@@ -167,7 +198,7 @@ wxFont DesignTextDialog::current_font() const
 {
     wxFontInfo info(12);
     if (m_face->GetSelection() != wxNOT_FOUND)
-        info.FaceName(m_face->GetStringSelection());
+        info.FaceName(m_face->GetString(m_face->GetSelection()));
     info.Bold(m_bold->GetValue()).Italic(m_italic->GetValue());
     return wxFont(info);
 }
@@ -182,10 +213,10 @@ void DesignTextDialog::load_font()
 
 void DesignTextDialog::update_preview()
 {
-    const std::string utf8(m_text->GetValue().ToUTF8().data());
+    const std::string utf8(text().ToUTF8().data());
     m_regions.clear();
     if (m_font_file && !utf8.empty())
-        m_regions = text_to_regions(utf8, m_height->GetValue(), m_font_file);
+        m_regions = text_to_regions(utf8, height_mm(), m_font_file);
 
     wxString line;
     if (!m_font_file)
@@ -250,7 +281,20 @@ void DesignTextDialog::draw_preview(wxWindow* canvas)
 
 void DesignTextDialog::on_dpi_changed(const wxRect&)
 {
-    Fit();
+    m_text->Rescale();
+    m_face->Rescale();
+    m_height->Rescale();
+    m_bold->Rescale();
+    m_italic->Rescale();
+    GetSizer()->SetSizeHints(this);
+    Refresh();
+}
+
+void DesignTextDialog::on_sys_color_changed()
+{
+    SetBackgroundColour(*wxWHITE);
+    wxGetApp().UpdateDlgDarkUI(this);
+    m_preview->Refresh();   // its colours are read at paint time
     Refresh();
 }
 

@@ -35,7 +35,7 @@ class wxSizer;
 class wxBoxSizer;
 class wxTextCtrl;
 class wxListCtrl;
-class wxButton;
+class Button;
 class wxPanel;
 class ScalableButton;
 
@@ -54,6 +54,10 @@ public:
     explicit DesignPanel(wxWindow* parent);
     void on_tab_shown();        // re-sync bed to the active printer when the Design tab is activated
     void on_tab_hidden();       // another tab took over: take the viewport status line down with us
+    // From MainFrame, like the other pages: re-rasterise the icons at the new scale, and on a theme
+    // switch also move every token colour onto the new theme.
+    void msw_rescale();
+    void on_sys_color_changed();
     void unbind_canvas_event_handlers();   // app close / language switch, from the plater's teardown
     void reset_canvas_volumes();
     void clear_document();      // New Project / Open Project: drop the document with the project
@@ -295,6 +299,8 @@ public:
     // and the toolbar buttons.
     void menu_undo_redo(bool redo) { do_undo_redo(redo); }
     bool menu_can_undo_redo(bool redo) const;
+    // Grey the app's Undo/Redo to this tab's history and gate (shown tab only).
+    void update_undo_redo_buttons();
 private:
     // The plane the Hole tool drills on: a picked face (inward, centred) or the dropdown.
     SketchPlane hole_plane() const;
@@ -499,19 +505,16 @@ private:
     // Unified Confirm/Cancel action bar (right end of the ribbon). Shown whenever any
     // tool or mode is active; the single confirm/cancel surface for the whole tab.
     wxSizer*  m_tb_action{nullptr};
-    // Persistent Undo/Redo group at the left of the ribbon — always visible, independent
-    // of the mode-gated tool groups. The buttons are greyed per the document history and
-    // the do_undo_redo gate (see update_undo_redo_buttons).
-    wxSizer*        m_tb_history{nullptr};
-    ScalableButton* m_btn_undo{nullptr};
-    ScalableButton* m_btn_redo{nullptr};
-    void update_undo_redo_buttons();   // enable/disable Undo/Redo from can_undo/can_redo + gate
     // All tool buttons, for the active-tool teal highlight (Onshape-style).
     std::vector<ScalableButton*> m_tool_btns;
     ScalableButton*              m_active_tool_btn{nullptr};
     void set_active_tool_btn(ScalableButton* b);   // nullptr clears the highlight
     // Owns the themed DropDown flyouts (and the item vectors they hold by ref).
     std::vector<std::shared_ptr<void>> m_flyout_keepalive;
+    // Icons that are not a plain ScalableButton face (flyout rows, card headers, the tree's image
+    // list, theme-twinned buttons): each re-creates its bitmaps for the current scale and theme.
+    std::vector<std::function<void()>> m_icon_refresh;
+    void refresh_icons();
     wxCheckBox*       m_construction{nullptr};   // sketch-mode construction toggle
     wxSpinCtrlDouble* m_move_dx{nullptr};        // Move/Rotate card: world translation
     wxSpinCtrlDouble* m_move_dy{nullptr};
@@ -645,7 +648,7 @@ private:
 
     // Delete Face controls (remove faces, heal the solid).
     ComboBox*         m_del_face_body{nullptr};      // target body
-    wxButton*         m_del_face_add_btn{nullptr};   // "Add picked face" button
+    ::Button*         m_del_face_add_btn{nullptr};   // "Add picked face" button
     wxStaticText*     m_del_face_list{nullptr};      // shows the accumulated face ids
     std::vector<int>  m_del_faces;                   // accumulated face list
 
@@ -670,8 +673,8 @@ private:
     // Expression binding (per-feature, visible during edit only)
     ComboBox*         m_expr_field{nullptr};     // field-name picker (editable)
     wxTextCtrl*       m_expr_text{nullptr};      // expression string
-    wxButton*         m_expr_set_btn{nullptr};   // Apply / bind
-    wxButton*         m_expr_clear_btn{nullptr}; // Remove binding
+    ::Button*         m_expr_set_btn{nullptr};   // Apply / bind
+    ::Button*         m_expr_clear_btn{nullptr}; // Remove binding
     wxStaticText*     m_expr_status{nullptr};    // shows current bindings for the edited feature
     void              populate_expr_fields(Tool t);   // fill m_expr_field from feature-type fields
     void              on_set_expr();                   // checkpoint + write -> recompute -> undo on fail
@@ -680,9 +683,9 @@ private:
     // Document variables panel (below the feature tree / parts)
     StaticBox*        m_var_box{nullptr};
     wxListCtrl*       m_var_list{nullptr};
-    wxButton*         m_btn_add_var{nullptr};
-    wxButton*         m_btn_edit_var{nullptr};
-    wxButton*         m_btn_del_var{nullptr};
+    ScalableButton*         m_btn_add_var{nullptr};
+    ScalableButton*         m_btn_edit_var{nullptr};
+    ScalableButton*         m_btn_del_var{nullptr};
     void              refresh_variables();            // rebuild m_var_list from m_doc.variables
     void              on_add_variable();
     void              on_edit_variable();
@@ -720,10 +723,10 @@ private:
     ComboBox*         m_plane_tilt_axis{nullptr};    // 0 = base X, 1 = base Y
     // Plane construction method + contextual face/edge reference picks (Onshape/Fusion parity).
     ComboBox*         m_plane_type{nullptr};         // PlaneType: Offset/Angle/Midplane/Tangent/TwoEdges/Coincident
-    wxButton*         m_plane_pick_faceA{nullptr};   wxStaticText* m_plane_faceA_lbl{nullptr};
-    wxButton*         m_plane_pick_faceB{nullptr};   wxStaticText* m_plane_faceB_lbl{nullptr};
-    wxButton*         m_plane_pick_edgeA{nullptr};   wxStaticText* m_plane_edgeA_lbl{nullptr};
-    wxButton*         m_plane_pick_edgeB{nullptr};   wxStaticText* m_plane_edgeB_lbl{nullptr};
+    ::Button*         m_plane_pick_faceA{nullptr};   wxStaticText* m_plane_faceA_lbl{nullptr};
+    ::Button*         m_plane_pick_faceB{nullptr};   wxStaticText* m_plane_faceB_lbl{nullptr};
+    ::Button*         m_plane_pick_edgeA{nullptr};   wxStaticText* m_plane_edgeA_lbl{nullptr};
+    ::Button*         m_plane_pick_edgeB{nullptr};   wxStaticText* m_plane_edgeB_lbl{nullptr};
     wxSpinCtrlDouble* m_plane_usize{nullptr};        // datum rectangle extent u (mm) — also driven by drag handles
     wxSpinCtrlDouble* m_plane_vsize{nullptr};        // datum rectangle extent v (mm)
     // Captured references for the candidate datum (body index + face/edge index, -1 = none).
@@ -846,8 +849,8 @@ private:
 
     // Axis controls (datum axis: line through two points or derived from geometry).
     ComboBox*         m_axis_type{nullptr};          // AxisType: TwoPoints/FaceNormal/CylinderCenterline/PlaneIntersection/AlongEdge
-    wxButton*         m_axis_pick_face{nullptr};     wxStaticText* m_axis_face_lbl{nullptr};
-    wxButton*         m_axis_pick_edge{nullptr};     wxStaticText* m_axis_edge_lbl{nullptr};
+    ::Button*         m_axis_pick_face{nullptr};     wxStaticText* m_axis_face_lbl{nullptr};
+    ::Button*         m_axis_pick_edge{nullptr};     wxStaticText* m_axis_edge_lbl{nullptr};
     ComboBox*         m_axis_plane_a{nullptr};
     ComboBox*         m_axis_plane_b{nullptr};
     wxSpinCtrlDouble* m_axis_p1x{nullptr};           wxSpinCtrlDouble* m_axis_p1y{nullptr};           wxSpinCtrlDouble* m_axis_p1z{nullptr};
@@ -860,8 +863,8 @@ private:
     ComboBox*         m_coordsys_type{nullptr};      // CoordSysType: PointWorld/FaceAndDirection
     ComboBox*         m_cs_body{nullptr};             // body-focus chooser: restrict picking to one body
     wxSpinCtrlDouble* m_cs_x{nullptr};               wxSpinCtrlDouble* m_cs_y{nullptr};               wxSpinCtrlDouble* m_cs_z{nullptr};
-    wxButton*         m_cs_pick_face{nullptr};       wxStaticText* m_cs_face_lbl{nullptr};
-    wxButton*         m_cs_pick_edge{nullptr};       wxStaticText* m_cs_edge_lbl{nullptr};
+    ::Button*         m_cs_pick_face{nullptr};       wxStaticText* m_cs_face_lbl{nullptr};
+    ::Button*         m_cs_pick_edge{nullptr};       wxStaticText* m_cs_edge_lbl{nullptr};
     wxSpinCtrlDouble* m_cs_hx{nullptr};              wxSpinCtrlDouble* m_cs_hy{nullptr};              wxSpinCtrlDouble* m_cs_hz{nullptr};
     int m_cs_face_body{-1}, m_cs_face{-1};
     int m_cs_edge_body{-1}, m_cs_edge{-1};
@@ -933,7 +936,6 @@ private:
     // m_status's foreground as created, captured before any caller touches it. Callers signal
     // "no opinion" by setting wxNullColour, which restores exactly this — so it is the only
     // reliable way to tell a chosen colour (the error red) from the default. See set_status().
-    wxColour          m_status_default_fg;
     // The guidance sentence for the step the armed sketch tool is on, kept so a transient
     // readout (the live length/angle while a segment is being dragged) can be appended to it
     // instead of replacing it — the guidance used to vanish on the first mouse move after a
@@ -949,7 +951,7 @@ private:
     bool              m_dof_last_has{false};
     int               m_feature_counter{0};
 
-    std::vector<wxButton*> m_confirm_btns;
+    std::vector<::Button*> m_confirm_btns;
 
     // Edit-in-place state: add-mode is m_edit_index == -1. Single-feature edit
     // (Sketch or Extrude independently) uses only m_edit_index as the row to replace.

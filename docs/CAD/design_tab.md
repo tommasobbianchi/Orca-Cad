@@ -38,7 +38,9 @@ tool"*. It is also where a refusal explains itself.
 - One left-click selects what is under the cursor. There is no click-cycling through
   face → edge → body.
 - A click near a corner takes the corner, not the face behind it.
-- Left-drag sweeps a rubber band, and a rubber band takes the whole body.
+- A rubber band takes the whole body. It is swept with Shift+left-drag, Prepare's rectangle
+  selection, while Preferences > Control give left-drag to the camera (the default), and with
+  plain left-drag when they do not.
 - Shift+click (or Ctrl+click) on an edge of the body already picked adds that edge, or removes
   it if it is already picked. The set belongs to one body. **Fillet / Chamfer** then dresses
   every picked edge in one feature, at one size. The edge ids are resolved together against
@@ -63,7 +65,7 @@ tool"*. It is also where a refusal explains itself.
 ## The offer
 
 Right-click on the geometry, released without moving the mouse (a 3 px budget — a
-right-drag that orbits the camera does not open it). How long the button is held does not
+right-drag that moves the camera does not open it). How long the button is held does not
 matter. Left-click still only selects, so
 pointing at things stays quiet.
 
@@ -374,6 +376,11 @@ separates the sides of a part, and curved faces darken toward their outline. Eve
 body is drawn as a thin dark line, except the seam OCCT puts down the side of a cylinder or
 cone; the edges of bodies faded by body focus are fainter, and a dress-up previewing its
 result alone hides them with the bodies.
+
+The camera follows Preferences > Control as in Prepare: which button rotates and which pans
+is set there, for every tab. The tab follows the app's light or dark theme and the display
+scale, live; the status line and the active tool's values are drawn in the viewport itself,
+so they go away with the tab and with the window.
 
 ---
 

@@ -11,6 +11,7 @@
 #include <boost/algorithm/string/case_conv.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/log/trivial.hpp>          // the offer/atlas join check reports on the log
+#include <wx/stopwatch.h>
 #include <Standard_Failure.hxx>
 
 #include <cassert>
@@ -37,7 +38,6 @@
 #include <wx/menu.h>
 #include <wx/progdlg.h>
 #include <wx/utils.h>    // wxWindowDisabler, wxMilliSleep
-#include <wx/msgdlg.h>   // wxMessageBox
 
 #include <string>
 #include <memory>
@@ -53,6 +53,9 @@
 #include "slic3r/GUI/Widgets/Button.hpp"            // Orca-styled Button (ButtonStyle/ButtonType) — same look as Prepare
 #include "slic3r/GUI/Widgets/CheckBox.hpp"          // Orca teal check (label lives in the row's left column)
 #include "slic3r/GUI/Widgets/ComboBox.hpp"          // Orca dropdown — replaces wxChoice in every Design card
+#include "slic3r/GUI/Widgets/TextInput.hpp"
+#include "slic3r/GUI/Widgets/DialogButtons.hpp"
+#include "slic3r/GUI/MsgDialog.hpp"
 #include "slic3r/GUI/Widgets/StaticBox.hpp"         // Prepare's rounded white card frame around each tool dialog
 #include "libslic3r/CAD/SketchImport.hpp"    // text_to_regions / svg_to_regions
 #include "libslic3r/CAD/ThreadStandards.hpp" // ISO metric / Unified imperial thread tables
@@ -149,21 +152,42 @@ static bool en_parse(const wxString& text, double& out)
     return t.ToCDouble(&out);
 }
 
-// Design-tab chrome tokens. The dark branch returns the EXACT legacy values so the
-// (correct) dark theme stays byte-identical; the light branch maps each onto Orca's
-// light surface so the ribbon/sidebar follow the app theme instead of staying black.
+// Design-tab chrome tokens, one {light, dark} pair each. Controls are coloured from these at
+// construction; on a theme switch on_sys_color_changed() walks the panel and moves every colour
+// that is one theme's token onto the other theme's, so the tab follows the app theme live.
+struct DpToken { wxColour light, dark; };
+enum DpTok { TokRibbonBg, TokRibbonHover, TokPanelBg, TokSecText, TokCtlText, TokItemText, TokItemDim,
+             TokBorder, TokCount };
+static const DpToken kDpTokens[TokCount] = {
+    { wxColour(0xEC,0xEC,0xEE), wxColour(0x36,0x36,0x3C) },   // ribbon
+    { wxColour(0xD7,0xD7,0xDB), wxColour(0x4D,0x4D,0x54) },   // ribbon hover
+    { wxColour(0xFB,0xFB,0xFD), wxColour(0x2D,0x2D,0x30) },   // sidebar / lists
+    { wxColour(0x66,0x66,0x68), wxColour(0x81,0x81,0x83) },   // secondary text
+    { wxColour(0x35,0x35,0x37), wxColour(0xC8,0xC8,0xC8) },   // control text
+    { wxColour(0x2C,0x2C,0x2E), wxColour(0xE0,0xE0,0xE0) },   // list item text
+    { wxColour(0xA0,0xA0,0xA2), wxColour(0x80,0x80,0x80) },   // dimmed list item
+    // Prepare's control-outline grey, sampled from its sidebar: #DBDBDB on light, #4A4A51 on the
+    // #2D2D31 dark panel. Every framed thing in Design uses this so the tab matches.
+    { wxColour(0xDB,0xDB,0xDB), wxColour(0x4A,0x4A,0x51) },
+};
 static bool     dp_dark()         { return wxGetApp().dark_mode(); }
-static wxColour dp_ribbon_bg()    { return dp_dark() ? wxColour(0x36,0x36,0x3C) : wxColour(0xEC,0xEC,0xEE); }
-static wxColour dp_ribbon_hover() { return dp_dark() ? wxColour(0x4D,0x4D,0x54) : wxColour(0xD7,0xD7,0xDB); }
-static wxColour dp_panel_bg()     { return dp_dark() ? wxColour(0x2D,0x2D,0x30) : wxColour(0xFB,0xFB,0xFD); }
-static wxColour dp_sec_text()     { return dp_dark() ? wxColour(0x81,0x81,0x83) : wxColour(0x66,0x66,0x68); }
-static wxColour dp_ctl_text()     { return dp_dark() ? wxColour(0xC8,0xC8,0xC8) : wxColour(0x35,0x35,0x37); }
-static wxColour dp_item_text()    { return dp_dark() ? wxColour(0xE0,0xE0,0xE0) : wxColour(0x2C,0x2C,0x2E); }
-static wxColour dp_item_dim()     { return dp_dark() ? wxColour(0x80,0x80,0x80) : wxColour(0xA0,0xA0,0xA2); }
+static wxColour dp_tok(DpTok t)   { return dp_dark() ? kDpTokens[t].dark : kDpTokens[t].light; }
+static wxColour dp_ribbon_bg()    { return dp_tok(TokRibbonBg); }
+static wxColour dp_ribbon_hover() { return dp_tok(TokRibbonHover); }
+static wxColour dp_panel_bg()     { return dp_tok(TokPanelBg); }
+static wxColour dp_sec_text()     { return dp_tok(TokSecText); }
+static wxColour dp_ctl_text()     { return dp_tok(TokCtlText); }
+static wxColour dp_item_text()    { return dp_tok(TokItemText); }
+static wxColour dp_item_dim()     { return dp_tok(TokItemDim); }
 
-// Prepare's control-outline grey, sampled from its sidebar: #4A4A51 on the #2D2D31 dark
-// panel, #DBDBDB on light. Every framed thing in Design uses this so the tab matches.
-static wxColour dp_border_col()   { return dp_dark() ? wxColour(0x4A,0x4A,0x51) : wxColour(0xDB,0xDB,0xDB); }
+// The other theme's value of a token colour, or `c` itself when it is no token.
+static wxColour dp_retheme(const wxColour& c, bool to_dark)
+{
+    for (const DpToken& t : kDpTokens)
+        if (c == (to_dark ? t.light : t.dark))
+            return to_dark ? t.dark : t.light;
+    return c;
+}
 
 // A tool card: Prepare's rounded white-bordered panel (Plater.cpp's panel_printer_preset
 // idiom — radius 8, #EEEEEE border, green on hover). Every card's controls are parented
@@ -172,7 +196,9 @@ static StaticBox* make_card(wxWindow* parent)
 {
     auto* c = new StaticBox(parent);
     c->SetCornerRadius(8);
-    c->SetBorderColorNormal(dp_border_col());   // no hover accent: the frame is not clickable
+    // The light literal in a StateColor is mapped to the dark one at paint time, so the frame
+    // follows a theme switch by itself. No hover accent: the frame is not clickable.
+    c->SetBorderColor(StateColor(kDpTokens[TokBorder].light));
     return c;
 }
 
@@ -186,8 +212,8 @@ static wxSpinCtrlDouble* make_spin(wxWindow* parent, double val,
 {
     auto* box = new StaticBox(parent);
     box->SetCornerRadius(4);
-    box->SetBorderColorNormal(dp_border_col());
-    auto* s = new wxSpinCtrlDouble(box, wxID_ANY, "", wxDefaultPosition, wxSize(90, -1),
+    box->SetBorderColor(StateColor(kDpTokens[TokBorder].light));
+    auto* s = new wxSpinCtrlDouble(box, wxID_ANY, "", wxDefaultPosition, parent->FromDIP(wxSize(90, -1)),
                                    wxSP_ARROW_KEYS | wxBORDER_NONE);
     s->SetRange(mn, mx);
     s->SetDigits(2);
@@ -280,17 +306,23 @@ static SketchPlane face_plane_inward(const TopoDS_Face& face)
 DesignPanel::DesignPanel(wxWindow* parent)
     : wxPanel(parent, wxID_ANY)
 {
+    // The tab is built on its first show; where that time goes is logged, per phase, because it
+    // varies by an order of magnitude between machines.
+    wxStopWatch build_clock;
+    long        build_mark = 0;
+    auto        build_phase = [&build_clock, &build_mark](const char* phase) {
+        const long now = build_clock.Time();
+        BOOST_LOG_TRIVIAL(info) << "Design tab build: " << phase << " " << now - build_mark << " ms";
+        build_mark = now;
+    };
     // Left column: a slim feature-tree + docked tool-dialog column. All form
     // controls are parented to m_form so it can scroll independently of the
     // live GL viewport. The tool buttons live in the top toolbar (built below).
     m_form = new wxScrolledWindow(this, wxID_ANY);
-    // The sidebar/panel never carried an explicit background, so in light theme it
-    // inherited the dark window colour and stayed black. Paint it on the light surface;
-    // dark is left untouched (it already reads correctly via inheritance).
-    if (!dp_dark()) {
-        SetBackgroundColour(dp_panel_bg());
-        m_form->SetBackgroundColour(dp_panel_bg());
-    }
+    // Explicit token background in both themes, so a theme switch can move it (an inherited
+    // colour stays whatever the theme was when the panel was built).
+    SetBackgroundColour(dp_panel_bg());
+    m_form->SetBackgroundColour(dp_panel_bg());
 
     auto* root = new wxBoxSizer(wxVERTICAL);
     {
@@ -313,22 +345,20 @@ DesignPanel::DesignPanel(wxWindow* parent)
     // #4D4D54); light maps onto the app's light chrome so the strip follows the theme.
     m_toolbar->SetBackgroundColour(dp_ribbon_bg());
 
-    const wxColour tb_bg    = dp_ribbon_bg();
-    const wxColour tb_hover = dp_ribbon_hover();
-    auto icon_btn = [this, tb_bg, tb_hover](const char* icon, const wxString& tip) {
+    auto icon_btn = [this](const char* icon, const wxString& tip) {
         // Prepare's main toolbar: 40 px icon cell, 4 px gap (GLToolbar::Default_Icons_Size
         // and set_gap_size(4)) -> 44 px pitch. Match it exactly.
-        auto* b = new ScalableButton(m_toolbar, wxID_ANY, icon, "", wxSize(40, 40),
+        auto* b = new ScalableButton(m_toolbar, wxID_ANY, icon, "", FromDIP(wxSize(40, 40)),
                                      wxDefaultPosition, wxBU_EXACTFIT | wxBORDER_NONE, false, 34);
         b->SetToolTip(tip);
-        b->SetBackgroundColour(tb_bg);
+        b->SetBackgroundColour(dp_ribbon_bg());
         m_tool_btns.push_back(b);
         // Hover affordance, honouring the active-tool teal state.
-        b->Bind(wxEVT_ENTER_WINDOW, [this, b, tb_hover](wxMouseEvent& e) {
-            b->SetBackgroundColour(b == m_active_tool_btn ? wxColour(0x52, 0xC7, 0xB8) : tb_hover);
+        b->Bind(wxEVT_ENTER_WINDOW, [this, b](wxMouseEvent& e) {
+            b->SetBackgroundColour(b == m_active_tool_btn ? wxColour(0x52, 0xC7, 0xB8) : dp_ribbon_hover());
             b->Refresh(); e.Skip(); });
-        b->Bind(wxEVT_LEAVE_WINDOW, [this, b, tb_bg](wxMouseEvent& e) {
-            b->SetBackgroundColour(b == m_active_tool_btn ? wxColour(0x00, 0x96, 0x88) : tb_bg);
+        b->Bind(wxEVT_LEAVE_WINDOW, [this, b](wxMouseEvent& e) {
+            b->SetBackgroundColour(b == m_active_tool_btn ? wxColour(0x00, 0x96, 0x88) : dp_ribbon_bg());
             b->Refresh(); e.Skip(); });
         // Mark this tool active (teal) on press — a separate event from the
         // button's command handler, so it never swallows the click action.
@@ -346,7 +376,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
     };
     auto add_sep = [this](wxSizer* row) {
         row->AddSpacer(5);
-        row->Add(new wxStaticLine(m_toolbar, wxID_ANY, wxDefaultPosition, wxSize(1, 22), wxLI_VERTICAL),
+        row->Add(new wxStaticLine(m_toolbar, wxID_ANY, wxDefaultPosition, FromDIP(wxSize(1, 22)), wxLI_VERTICAL),
                  0, wxALIGN_CENTER_VERTICAL);
         row->AddSpacer(5);
     };
@@ -497,24 +527,8 @@ DesignPanel::DesignPanel(wxWindow* parent)
         set_status(show ? _L("Bed shown") : _L("Bed hidden"));
     };
 
-    // Shared flyout glyph tint (used by BOTH the feature and sketch toolbars). Re-tint each
-    // design_* glyph to the DropDown's resolved TEXT colour so it reads on the popup in either
-    // theme: text_color is 0x363636, which darkModeColorFor() maps to a light tone in dark mode
-    // (the popup bg is darkModeColorFor(white) = dark) and leaves dark in light mode. The alpha
-    // (the glyph shape) is preserved; only RGB is replaced.
-    // ponytail: wxBitmap(img) drops the HiDPI scale factor (no scale ctor before wx 3.1.6); the
-    // deploy target runs at scale 1.0, so this is exact there.
-    const wxColour drop_icon_col = StateColor::darkModeColorFor(wxColour(0x36, 0x36, 0x36));
-    auto tint = [](wxBitmap bmp, const wxColour& c) -> wxBitmap {
-        if (!bmp.IsOk()) return bmp;
-        wxImage img = bmp.ConvertToImage();
-        if (!img.HasAlpha()) img.InitAlpha();
-        const int w = img.GetWidth(), h = img.GetHeight();
-        for (int y = 0; y < h; ++y)
-            for (int x = 0; x < w; ++x)
-                img.SetRGB(x, y, c.Red(), c.Green(), c.Blue());
-        return wxBitmap(img);
-    };
+    // Flyout rows show the design_* glyphs as they are: drawn in Orca's icon grey (#949494), which
+    // the icon cache maps per theme like every other sidebar icon, so they need no re-tint.
 
     // --- Feature group: Sketch / Extrude / Fillet-Chamfer / Hole / Thread / Constrain
     m_tb_feature = new wxBoxSizer(wxHORIZONTAL);
@@ -572,13 +586,18 @@ DesignPanel::DesignPanel(wxWindow* parent)
                 DropDown::Item it;
                 it.text = v.tip;
                 it.tip  = v.hint;
-                it.icon = tint(create_scaled_bitmap(v.icon, m_form, 18), drop_icon_col);
+                it.icon = create_scaled_bitmap(v.icon, m_form, 18);
                 fo->items.push_back(it);
                 fo->actions.push_back(std::move(v.action));
                 fo->icon_names.emplace_back(v.icon);
             }
             fo->btn = b;
             fo->drop.Create(b);
+            m_icon_refresh.push_back([this, fp = fo.get()] {
+                for (size_t i = 0; i < fp->items.size(); ++i)
+                    fp->items[i].icon = create_scaled_bitmap(fp->icon_names[i], m_form, 18);
+                fp->drop.Invalidate(true);
+            });
             fo->drop.SetUseContentWidth(true, false);
             fo->drop.Invalidate(true);
             FeatFlyout* fp = fo.get();
@@ -597,7 +616,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
                 fp->drop.SetUseContentWidth(false, false);
                 fp->drop.SetUseContentWidth(true, false);
                 wxPoint pos = b->ClientToScreen(wxPoint(0, -6));
-                fp->drop.Position(pos, wxSize(0, b->GetSize().y + 12));
+                fp->drop.Position(pos, wxSize(0, b->GetSize().y + b->FromDIP(12)));
                 fp->drop.Popup();
             });
             m_flyout_keepalive.push_back(fo);
@@ -1224,7 +1243,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
                 DropDown::Item it;
                 it.text = v.tip;
                 it.tip  = v.hint;
-                it.icon = tint(create_scaled_bitmap(v.icon, m_form, 18), drop_icon_col);
+                it.icon = create_scaled_bitmap(v.icon, m_form, 18);
                 fo->items.push_back(it);
                 fo->modes.push_back(v.mode);
                 fo->hints.push_back(v.hint);
@@ -1232,6 +1251,11 @@ DesignPanel::DesignPanel(wxWindow* parent)
             }
             fo->btn = b;
             fo->drop.Create(b);
+            m_icon_refresh.push_back([this, fp = fo.get()] {
+                for (size_t i = 0; i < fp->items.size(); ++i)
+                    fp->items[i].icon = create_scaled_bitmap(fp->icon_names[i], m_form, 18);
+                fp->drop.Invalidate(true);
+            });
             fo->drop.SetUseContentWidth(true, false);
             fo->drop.Invalidate(true);
             ToolFlyout* fp = fo.get();
@@ -1253,7 +1277,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
                 fp->drop.SetUseContentWidth(false, false);
                 fp->drop.SetUseContentWidth(true, false);
                 wxPoint pos = b->ClientToScreen(wxPoint(0, -6));
-                fp->drop.Position(pos, wxSize(0, b->GetSize().y + 12));
+                fp->drop.Position(pos, wxSize(0, b->GetSize().y + b->FromDIP(12)));
                 fp->drop.Popup();
             });
             m_flyout_keepalive.push_back(fo);
@@ -1496,67 +1520,37 @@ DesignPanel::DesignPanel(wxWindow* parent)
     // active (update_action_bar). Replaces the 13 per-card buttons + sketch Finish + Done.
     m_tb_action = new wxBoxSizer(wxHORIZONTAL);
     {
-        auto* ok = new wxButton(m_toolbar, wxID_ANY, _L("✓ Confirm"));
-        ok->SetForegroundColour(*wxWHITE);
-        ok->SetBackgroundColour(wxColour(0x00, 0x96, 0x88));   // Orca teal accent
+        auto* ok = new ::Button(m_toolbar, _L("Confirm"));
+        ok->SetStyle(ButtonStyle::Confirm, ButtonType::Window);
         ok->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { tool_confirm(); });
         m_confirm_btns.push_back(ok);   // refresh_preview greys this on an invalid candidate
-        auto* no = new wxButton(m_toolbar, wxID_ANY, _L("✗ Cancel"));
+        auto* no = new ::Button(m_toolbar, _L("Cancel"));
+        no->SetStyle(ButtonStyle::Regular, ButtonType::Window);
         no->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { tool_cancel(); });
         m_tb_action->Add(ok, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
         m_tb_action->Add(no, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 10);
     }
 
-    // Persistent Undo/Redo group: always visible (not mode-gated like the tool groups), so
-    // history is reachable from Feature, Sketch and Constrain alike. These are momentary
-    // actions, so — unlike icon_btn — they are NOT registered in m_tool_btns and never take
-    // the teal active-tool highlight. They route to the SAME do_undo_redo as the keyboard
-    // Ctrl+Z / Ctrl+Shift+Z path, and are greyed by update_undo_redo_buttons().
-    m_tb_history = new wxBoxSizer(wxHORIZONTAL);
-    {
-        auto hist_btn = [this, tb_bg, tb_hover](const char* icon, const wxString& tip) {
-            auto* b = new ScalableButton(m_toolbar, wxID_ANY, icon, "", wxSize(40, 40),
-                                         wxDefaultPosition, wxBU_EXACTFIT | wxBORDER_NONE, false, 34);
-            b->SetToolTip(tip);
-            b->SetBackgroundColour(tb_bg);
-            b->Bind(wxEVT_ENTER_WINDOW, [b, tb_hover](wxMouseEvent& e) {
-                if (b->IsEnabled()) { b->SetBackgroundColour(tb_hover); b->Refresh(); } e.Skip(); });
-            b->Bind(wxEVT_LEAVE_WINDOW, [b, tb_bg](wxMouseEvent& e) {
-                b->SetBackgroundColour(tb_bg); b->Refresh(); e.Skip(); });
-            return b;
-        };
-        m_btn_undo = hist_btn("menu_undo", _L("Undo (Ctrl+Z)"));
-        m_btn_undo->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { do_undo_redo(false); });
-        m_btn_redo = hist_btn("menu_redo", _L("Redo (Ctrl+Shift+Z)"));
-        m_btn_redo->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { do_undo_redo(true); });
-        m_btn_undo->Enable(false);   // nothing to undo/redo on a fresh document
-        m_btn_redo->Enable(false);
-        m_tb_history->Add(m_btn_undo, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
-        m_tb_history->Add(m_btn_redo, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
-    }
-
-    // Document actions, left of Undo/Redo and always visible (not mode-gated like the tools).
-    // Same styling as the history pair: momentary actions, never the teal active-tool state.
+    // Document actions, always visible (not mode-gated like the tools): momentary actions,
+    // never the teal active-tool state.
     m_tb_doc = new wxBoxSizer(wxHORIZONTAL);
-    const wxColour tb_glyph_col  = StateColor::darkModeColorFor(wxColour(0x36, 0x36, 0x36));
-    const wxColour tb_commit_col(0x00, 0x96, 0x88);   // Orca Confirm accent
     {
-        // Some Orca glyphs (toolbar_add_plate, toolbar_flatten) are drawn for a light toolbar and
-        // come out the same tone as this dark one — Commit was effectively invisible. Re-tint
-        // those: Commit in the teal accent it carries as the tab's primary action, the rest in
-        // the same grey the other toolbar glyphs resolve to.
-        auto doc_btn = [this, tb_bg, tb_hover, &tint](const char* icon, const wxString& tip,
-                                                      const wxColour* glyph = nullptr) {
-            auto* b = new ScalableButton(m_toolbar, wxID_ANY, icon, "", wxSize(40, 40),
+        // Some Orca glyphs (toolbar_flatten) are drawn for Prepare's light GL toolbar and come out
+        // the same tone as a dark ribbon. Those ship a "_dark" twin, picked per theme here (and
+        // again on a theme switch) the way GLToolbar picks it.
+        auto doc_btn = [this](const char* icon, const wxString& tip, bool has_dark_twin = false) {
+            const std::string name(icon);
+            auto themed = [name, has_dark_twin] { return has_dark_twin && dp_dark() ? name + "_dark" : name; };
+            auto* b = new ScalableButton(m_toolbar, wxID_ANY, themed(), "", FromDIP(wxSize(40, 40)),
                                          wxDefaultPosition, wxBU_EXACTFIT | wxBORDER_NONE, false, 34);
-            if (glyph != nullptr)
-                b->SetBitmap(tint(create_scaled_bitmap(icon, m_toolbar, 42), *glyph));
+            if (has_dark_twin)
+                m_icon_refresh.push_back([b, themed] { b->SetBitmap_(themed()); });
             b->SetToolTip(tip);
-            b->SetBackgroundColour(tb_bg);
-            b->Bind(wxEVT_ENTER_WINDOW, [b, tb_hover](wxMouseEvent& e) {
-                if (b->IsEnabled()) { b->SetBackgroundColour(tb_hover); b->Refresh(); } e.Skip(); });
-            b->Bind(wxEVT_LEAVE_WINDOW, [b, tb_bg](wxMouseEvent& e) {
-                b->SetBackgroundColour(tb_bg); b->Refresh(); e.Skip(); });
+            b->SetBackgroundColour(dp_ribbon_bg());
+            b->Bind(wxEVT_ENTER_WINDOW, [b](wxMouseEvent& e) {
+                if (b->IsEnabled()) { b->SetBackgroundColour(dp_ribbon_hover()); b->Refresh(); } e.Skip(); });
+            b->Bind(wxEVT_LEAVE_WINDOW, [b](wxMouseEvent& e) {
+                b->SetBackgroundColour(dp_ribbon_bg()); b->Refresh(); e.Skip(); });
             return b;
         };
         auto add_doc = [this](ScalableButton* b) {
@@ -1591,12 +1585,13 @@ DesignPanel::DesignPanel(wxWindow* parent)
         // These act on bodies / the view, so they ride in the feature group, in the slots
         // the user assigned them (9, 11bis, 16).
         auto* b_place = doc_btn("toolbar_flatten", _L("Place on Face (F) — lay the picked face on the bed"),
-                                &tb_glyph_col);
+                                true);
         b_place->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { place_on_face(); });
         tb_slot["place"].push_back(b_place);
 
         auto* b_section = doc_btn("split_parts", _L("Section View — hide part of the model to see inside. "
-                                                   "PageUp/PageDown move the plane; Delete removes it."));
+                                                   "PageUp/PageDown move the plane; Delete removes it."),
+                                  true);
         b_section->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { toggle_section_view(); });
         tb_slot["section"].push_back(b_section);
 
@@ -1608,7 +1603,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
         // Commit is the tab's primary action and sits far right, next to Confirm/Cancel.
         m_tb_commit = new wxBoxSizer(wxHORIZONTAL);
         auto* b_commit = doc_btn("toolbar_add_plate", _L("Commit to Plate — send the solid to Prepare"),
-                                 &tb_commit_col);
+                                 true);
         b_commit->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_commit(); });
         m_tb_commit->Add(b_commit, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
     }
@@ -1637,8 +1632,6 @@ DesignPanel::DesignPanel(wxWindow* parent)
     tbrow->AddSpacer(8);
     tbrow->Add(m_tb_doc,       0, wxALIGN_CENTER_VERTICAL | wxTOP | wxBOTTOM, 5);
     add_sep(tbrow);
-    tbrow->Add(m_tb_history,   0, wxALIGN_CENTER_VERTICAL | wxTOP | wxBOTTOM, 5);
-    add_sep(tbrow);
     tbrow->Add(m_tb_feature,   0, wxALIGN_CENTER_VERTICAL | wxTOP | wxBOTTOM, 5);
     tbrow->Add(m_tb_sketch,    0, wxALIGN_CENTER_VERTICAL | wxTOP | wxBOTTOM, 5);
     tbrow->Add(m_tb_relations, 0, wxALIGN_CENTER_VERTICAL | wxTOP | wxBOTTOM, 5);
@@ -1647,15 +1640,18 @@ DesignPanel::DesignPanel(wxWindow* parent)
     tbrow->Add(m_tb_action,    0, wxALIGN_CENTER_VERTICAL | wxTOP | wxBOTTOM, 5);
     tbrow->AddSpacer(8);
     m_toolbar->SetSizer(tbrow);
+    build_phase("toolbar");
     // Apply the body gates once now: an empty document is exactly the state the bug was reported
     // in, and feed_bodies() has not run yet on a fresh tab.
     update_body_gates();
 
     // Onshape-style dialog-card header: feature icon + bold title. out receives
     // the title control so open_tool() can retitle it per feature.
-    auto card_header = [](wxWindow* card, const char* icon, const wxString& title, wxStaticText*& out) -> wxSizer* {
+    auto card_header = [this](wxWindow* card, const char* icon, const wxString& title, wxStaticText*& out) -> wxSizer* {
         auto* h  = new wxBoxSizer(wxHORIZONTAL);
         auto* ic = new wxStaticBitmap(card, wxID_ANY, create_scaled_bitmap(icon, card, 18));
+        m_icon_refresh.push_back([ic, card, name = std::string(icon)] {
+            ic->SetBitmap(create_scaled_bitmap(name, card, 18)); });
         out = new wxStaticText(card, wxID_ANY, title);
         out->SetFont(Label::Head_14);   // Orca shared HarmonyOS card-title font
         h->Add(ic,  0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
@@ -2191,8 +2187,9 @@ DesignPanel::DesignPanel(wxWindow* parent)
         plform->Add(m_plane_tilt_axis, 0, wxEXPAND);
 
         // Contextual reference picks: arm a target, then click a solid face/edge in the canvas.
-        auto pick_row = [&](const wxString& label, wxButton*& btn, wxStaticText*& lbl, PlanePick target) {
-            btn = new wxButton(m_cards, wxID_ANY, label);
+        auto pick_row = [&](const wxString& label, ::Button*& btn, wxStaticText*& lbl, PlanePick target) {
+            btn = new ::Button(m_cards, label);
+            btn->SetStyle(ButtonStyle::Regular, ButtonType::Parameter);
             lbl = new wxStaticText(m_cards, wxID_ANY, _L("(none)"));
             btn->Bind(wxEVT_BUTTON, [this, target](wxCommandEvent&) { arm_plane_pick(target); });
             plform->Add(btn);
@@ -2220,7 +2217,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
     m_box_loft->Add(new wxStaticLine(m_cards), 0, wxEXPAND | wxALL, 8);
     m_box_loft->Add(new wxStaticText(m_cards, wxID_ANY, _L("Profiles (check 2+, in order):")),
                     0, wxLEFT | wxRIGHT | wxTOP, 12);
-    m_loft_list = new wxCheckListBox(m_cards, wxID_ANY, wxDefaultPosition, wxSize(-1, 120));
+    m_loft_list = new wxCheckListBox(m_cards, wxID_ANY, wxDefaultPosition, FromDIP(wxSize(-1, 120)));
     m_loft_list->Bind(wxEVT_CHECKLISTBOX, [this](wxCommandEvent&) { refresh_preview(); });
     m_box_loft->Add(m_loft_list, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 12);
     {
@@ -2292,7 +2289,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
     m_box_surf_loft->Add(new wxStaticLine(m_cards), 0, wxEXPAND | wxALL, 8);
     m_box_surf_loft->Add(new wxStaticText(m_cards, wxID_ANY, _L("Profiles (check 2+, in order):")),
                          0, wxLEFT | wxRIGHT | wxTOP, 12);
-    m_surf_loft_list = new wxCheckListBox(m_cards, wxID_ANY, wxDefaultPosition, wxSize(-1, 120));
+    m_surf_loft_list = new wxCheckListBox(m_cards, wxID_ANY, wxDefaultPosition, FromDIP(wxSize(-1, 120)));
     m_surf_loft_list->Bind(wxEVT_CHECKLISTBOX, [this](wxCommandEvent&) { refresh_preview(); });
     m_box_surf_loft->Add(m_surf_loft_list, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 12);
     m_surf_loft_ruled = new CheckBox(m_cards);
@@ -2532,7 +2529,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
         m_rib_sketch->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent&) { refresh_preview(); });
         rform->Add(new wxStaticText(m_cards, wxID_ANY, _L("Sketch")), 0, wxALIGN_CENTER_VERTICAL);
         rform->Add(m_rib_sketch, 0, wxEXPAND);
-        m_rib_entity = new wxSpinCtrl(m_cards, wxID_ANY, "", wxDefaultPosition, wxSize(90, -1),
+        m_rib_entity = new wxSpinCtrl(m_cards, wxID_ANY, "", wxDefaultPosition, FromDIP(wxSize(90, -1)),
                                       wxSP_ARROW_KEYS | wxBORDER_SIMPLE);
         m_rib_entity->SetRange(0, 999);
         m_rib_entity->SetValue(0);
@@ -2589,7 +2586,8 @@ DesignPanel::DesignPanel(wxWindow* parent)
         m_del_face_body->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent&) { refresh_preview(); });
         dform->Add(new wxStaticText(m_cards, wxID_ANY, _L("Body")), 0, wxALIGN_CENTER_VERTICAL);
         dform->Add(m_del_face_body, 0, wxEXPAND);
-        m_del_face_add_btn = new wxButton(m_cards, wxID_ANY, _L("Add picked face"));
+        m_del_face_add_btn = new ::Button(m_cards, _L("Add picked face"));
+        m_del_face_add_btn->SetStyle(ButtonStyle::Regular, ButtonType::Parameter);
         m_del_face_add_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
             // Say why nothing happened. Clicking with no face picked used to be a silent no-op,
             // which is indistinguishable from the button being broken.
@@ -2686,8 +2684,9 @@ DesignPanel::DesignPanel(wxWindow* parent)
 
         auto* axform = two_col_form();
 
-        auto ax_pick = [&](const wxString& label, wxButton*& btn, wxStaticText*& lbl, AxisPick target) {
-            btn = new wxButton(m_cards, wxID_ANY, label);
+        auto ax_pick = [&](const wxString& label, ::Button*& btn, wxStaticText*& lbl, AxisPick target) {
+            btn = new ::Button(m_cards, label);
+            btn->SetStyle(ButtonStyle::Regular, ButtonType::Parameter);
             lbl = new wxStaticText(m_cards, wxID_ANY, _L("(none)"));
             btn->Bind(wxEVT_BUTTON, [this, target](wxCommandEvent&) { arm_axis_pick(target); });
             axform->Add(btn);
@@ -2766,8 +2765,9 @@ DesignPanel::DesignPanel(wxWindow* parent)
         csform->Add(new wxStaticText(m_cards, wxID_ANY, _L("Z")), 0, wxALIGN_CENTER_VERTICAL);
         csform->Add(spin_frame(m_cs_z), 0, wxEXPAND);
 
-        auto cs_pick = [&](const wxString& label, wxButton*& btn, wxStaticText*& lbl, CoordSysPick target) {
-            btn = new wxButton(m_cards, wxID_ANY, label);
+        auto cs_pick = [&](const wxString& label, ::Button*& btn, wxStaticText*& lbl, CoordSysPick target) {
+            btn = new ::Button(m_cards, label);
+            btn->SetStyle(ButtonStyle::Regular, ButtonType::Parameter);
             lbl = new wxStaticText(m_cards, wxID_ANY, _L("(none)"));
             btn->Bind(wxEVT_BUTTON, [this, target](wxCommandEvent&) { arm_coordsys_pick(target); });
             csform->Add(btn);
@@ -2776,7 +2776,8 @@ DesignPanel::DesignPanel(wxWindow* parent)
         cs_pick(_L("Pick Face"), m_cs_pick_face, m_cs_face_lbl, CoordSysPick::Face);
 
         // ponytail: edge pick for CoordSys with rotation-direction hint
-        m_cs_pick_edge = new wxButton(m_cards, wxID_ANY, _L("Edge (sets in-plane direction)"));
+        m_cs_pick_edge = new ::Button(m_cards, _L("Edge (sets in-plane direction)"));
+        m_cs_pick_edge->SetStyle(ButtonStyle::Regular, ButtonType::Parameter);
         m_cs_edge_lbl = new wxStaticText(m_cards, wxID_ANY, _L("(none)"));
         m_cs_pick_edge->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { arm_coordsys_pick(CoordSysPick::Edge); });
         csform->Add(m_cs_pick_edge);
@@ -2920,8 +2921,10 @@ DesignPanel::DesignPanel(wxWindow* parent)
         m_box_expr->Add(eform, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 12);
 
         auto* brow = new wxBoxSizer(wxHORIZONTAL);
-        m_expr_set_btn   = new wxButton(m_cards, wxID_ANY, _L("Set"), wxDefaultPosition, wxSize(50, 24));
-        m_expr_clear_btn = new wxButton(m_cards, wxID_ANY, _L("Clear"), wxDefaultPosition, wxSize(50, 24));
+        m_expr_set_btn   = new ::Button(m_cards, _L("Set"));
+        m_expr_clear_btn = new ::Button(m_cards, _L("Clear"));
+        m_expr_set_btn->SetStyle(ButtonStyle::Confirm, ButtonType::Parameter);
+        m_expr_clear_btn->SetStyle(ButtonStyle::Regular, ButtonType::Parameter);
         m_expr_set_btn->Bind(wxEVT_BUTTON,   [this](wxCommandEvent&) { on_set_expr(); });
         m_expr_clear_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_clear_expr(); });
         brow->Add(m_expr_set_btn,   0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
@@ -2948,7 +2951,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
         // formats per the user locale (comma) with no clean override, so we own the
         // formatting here to guarantee international '.' decimals.
         m_value_input = new wxTextCtrl(m_cards, wxID_ANY, "", wxDefaultPosition,
-                                       wxSize(90, -1), wxTE_PROCESS_ENTER);
+                                       FromDIP(wxSize(90, -1)), wxTE_PROCESS_ENTER);
         m_value_input->Bind(wxEVT_TEXT_ENTER, [this](wxCommandEvent&) { confirm_value(); });
         vrow->Add(new wxStaticText(m_cards, wxID_ANY, _L("Value")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
         vrow->Add(m_value_input, 0, wxALIGN_CENTER_VERTICAL);
@@ -3016,19 +3019,27 @@ DesignPanel::DesignPanel(wxWindow* parent)
               FromDIP(SidebarProps::ContentMargin()));
     tree_inner->Add(new wxStaticLine(m_tree_box), 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP,
               FromDIP(SidebarProps::TitlebarMargin()));
-    m_tree = new wxTreeCtrl(m_tree_box, wxID_ANY, wxDefaultPosition, wxSize(-1, 64),
+    m_tree = new wxTreeCtrl(m_tree_box, wxID_ANY, wxDefaultPosition, FromDIP(wxSize(-1, 64)),
                             wxTR_HIDE_ROOT | wxTR_SINGLE | wxTR_NO_LINES |
                             wxTR_FULL_ROW_HIGHLIGHT | wxBORDER_SIMPLE | wxTR_EDIT_LABELS);
-    if (!dp_dark()) m_tree->SetBackgroundColour(dp_panel_bg());
+    m_tree->SetBackgroundColour(dp_panel_bg());
     // Per-feature-type icons (indices match tree_icon_for): sketch/extrude/dressup/hole/thread.
-    m_tree_images = new wxImageList(16, 16);
-    m_tree_images->Add(create_scaled_bitmap("design_sketch",  nullptr, 16)); // 0 Sketch
-    m_tree_images->Add(create_scaled_bitmap("design_extrude", nullptr, 16)); // 1 Extrude
-    m_tree_images->Add(create_scaled_bitmap("design_dressup", nullptr, 16)); // 2 Fillet/Chamfer
-    m_tree_images->Add(create_scaled_bitmap("design_hole",    nullptr, 16)); // 3 Hole
-    m_tree_images->Add(create_scaled_bitmap("design_thread",  nullptr, 16)); // 4 Thread
-    m_tree_images->Add(create_scaled_bitmap("design_shell",   nullptr, 16)); // 5 Shell
-    m_tree->AssignImageList(m_tree_images);
+    // The list is sized from the bitmaps themselves (image-list sizes are physical and must match
+    // them), and rebuilt with the other icons on a DPI or theme change.
+    auto tree_images = [this] {
+        static const char* const kIcons[] = { "design_sketch", "design_extrude", "design_dressup",
+                                              "design_hole", "design_thread", "design_shell" };
+        std::vector<wxBitmap> bmps;
+        for (const char* name : kIcons)
+            bmps.push_back(create_scaled_bitmap(name, this, 16));
+        const wxSize sz = bmps.front().GetSize();
+        m_tree_images = new wxImageList(sz.x, sz.y);
+        for (const wxBitmap& b : bmps)
+            m_tree_images->Add(b);
+        m_tree->AssignImageList(m_tree_images);   // takes ownership; frees the previous list
+    };
+    tree_images();
+    m_icon_refresh.push_back(tree_images);
     tree_inner->Add(m_tree, 0, wxEXPAND | wxALL, 12);
 
     // Selecting a body-producing feature (Extrude/Fillet/Chamfer/Hole/Thread) in the
@@ -3164,7 +3175,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
         wxBoxSizer* trow = m_hdr_tree_row;
         auto edit_btn = [this](const char* icon, const wxString& tip) {
             // Header-sized: reads as a section action, not a primary control.
-            auto* b = new ScalableButton(m_tree_box, wxID_ANY, icon, "", wxSize(24, 24),
+            auto* b = new ScalableButton(m_tree_box, wxID_ANY, icon, "", FromDIP(wxSize(24, 24)),
                                          wxDefaultPosition, wxBU_EXACTFIT | wxBORDER_NONE, false, 20);
             b->SetToolTip(tip);
             return b;
@@ -3202,7 +3213,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
         trow->Add(down, 0, wxALIGN_CENTER_VERTICAL);
         // Interference check sits after a rule: it reports, it does not edit the recipe.
         trow->AddSpacer(8);
-        trow->Add(new wxStaticLine(m_tree_box, wxID_ANY, wxDefaultPosition, wxSize(1, 22), wxLI_VERTICAL),
+        trow->Add(new wxStaticLine(m_tree_box, wxID_ANY, wxDefaultPosition, FromDIP(wxSize(1, 22)), wxLI_VERTICAL),
                   0, wxALIGN_CENTER_VERTICAL);
         trow->AddSpacer(8);
         trow->Add(m_btn_interfere, 0, wxALIGN_CENTER_VERTICAL);
@@ -3230,7 +3241,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
     // policy — the card only gives them a home next to the rows they act on.
     {
         auto body_btn = [this](const char* icon, const wxString& tip) {
-            auto* b = new ScalableButton(m_parts_box, wxID_ANY, icon, "", wxSize(24, 24),
+            auto* b = new ScalableButton(m_parts_box, wxID_ANY, icon, "", FromDIP(wxSize(24, 24)),
                                          wxDefaultPosition, wxBU_EXACTFIT | wxBORDER_NONE, false, 20);
             b->SetToolTip(tip);
             return b;
@@ -3268,10 +3279,10 @@ DesignPanel::DesignPanel(wxWindow* parent)
               FromDIP(SidebarProps::TitlebarMargin()));
     m_parts_hdr->ShowItems(false);   // no bodies yet on a fresh document
     m_parts_rule->Hide();
-    m_parts = new wxTreeCtrl(m_parts_box, wxID_ANY, wxDefaultPosition, wxSize(-1, 48),
+    m_parts = new wxTreeCtrl(m_parts_box, wxID_ANY, wxDefaultPosition, FromDIP(wxSize(-1, 48)),
                              wxTR_HIDE_ROOT | wxTR_SINGLE | wxTR_NO_LINES |
                              wxTR_FULL_ROW_HIGHLIGHT | wxBORDER_SIMPLE | wxTR_EDIT_LABELS);
-    if (!dp_dark()) m_parts->SetBackgroundColour(dp_panel_bg());
+    m_parts->SetBackgroundColour(dp_panel_bg());
     parts_inner->Add(m_parts, 0, wxEXPAND | wxALL, 12);
     // Start hidden: a fresh document has no bodies, and refresh_parts() only runs on the first
     // tree rebuild — until then an empty box would sit under the header.
@@ -3358,9 +3369,16 @@ DesignPanel::DesignPanel(wxWindow* parent)
         var_hdr->Add(card_header(m_var_box, "design_constrain", _L("Variables"), var_hdr_title), 0,
                      wxALIGN_CENTER_VERTICAL);
         var_hdr->AddStretchSpacer();
-        m_btn_add_var  = new wxButton(m_var_box, wxID_ANY, _L("+"), wxDefaultPosition, wxSize(30, 24));
-        m_btn_edit_var = new wxButton(m_var_box, wxID_ANY, _L("Edit"), wxDefaultPosition, wxSize(50, 24));
-        m_btn_del_var  = new wxButton(m_var_box, wxID_ANY, _L("Del"), wxDefaultPosition, wxSize(42, 24));
+        // Icon actions in the card header, as the Feature tree and Bodies cards have them.
+        auto var_btn = [this](const char* icon, const wxString& tip) {
+            auto* b = new ScalableButton(m_var_box, wxID_ANY, icon, "", FromDIP(wxSize(24, 24)),
+                                         wxDefaultPosition, wxBU_EXACTFIT | wxBORDER_NONE, false, 20);
+            b->SetToolTip(tip);
+            return b;
+        };
+        m_btn_add_var  = var_btn("add",           _L("Add variable"));
+        m_btn_edit_var = var_btn("design_edit",   _L("Edit variable"));
+        m_btn_del_var  = var_btn("design_delete", _L("Delete variable"));
         m_btn_add_var->Bind(wxEVT_BUTTON,  [this](wxCommandEvent&) { on_add_variable(); });
         m_btn_edit_var->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_edit_variable(); });
         m_btn_del_var->Bind(wxEVT_BUTTON,  [this](wxCommandEvent&) { on_remove_variable(); });
@@ -3375,7 +3393,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
 
         m_var_list = new wxListCtrl(m_var_box, wxID_ANY, wxDefaultPosition,
                                     wxSize(-1, FromDIP(64)), wxLC_REPORT | wxLC_SINGLE_SEL);
-        if (!dp_dark()) m_var_list->SetBackgroundColour(dp_panel_bg());
+        m_var_list->SetBackgroundColour(dp_panel_bg());
         m_var_list->AppendColumn(_L("Name"),       wxLIST_FORMAT_LEFT, FromDIP(90));
         m_var_list->AppendColumn(_L("Expression"), wxLIST_FORMAT_LEFT, FromDIP(120));
         var_inner->Add(m_var_list, 0, wxEXPAND | wxALL, FromDIP(SidebarProps::ContentMargin()));
@@ -3388,7 +3406,6 @@ DesignPanel::DesignPanel(wxWindow* parent)
 
     m_status = new wxStaticText(m_form, wxID_ANY, "");
     m_status->Hide();   // storage only — the line is drawn over the viewport, see set_status()
-    m_status_default_fg = m_status->GetForegroundColour();   // capture BEFORE any caller writes
     root->Add(m_status, 0, wxLEFT | wxRIGHT | wxBOTTOM, 12);
 
     // DoF / constraint-state readout (P3). Dedicated line so it never clobbers the
@@ -3460,11 +3477,13 @@ DesignPanel::DesignPanel(wxWindow* parent)
 
     m_form->FitInside();
     m_form->SetScrollRate(0, 10);   // vertical only, like Prepare's sidebar: never scroll labels out
-    m_form->SetMinSize(wxSize(264, -1));
+    m_form->SetMinSize(FromDIP(wxSize(264, -1)));
 
+    build_phase("sidebar and tool cards");
     // Right column: a small view toolbar over the live 3D viewport that mirrors
     // the CadDocument body.
     m_viewport = new DesignCanvas(this);
+    build_phase("3D canvas");
 
     m_viewport->set_on_sketch_commit([this](const SketchProfile& prof, const SketchPlane& plane) {
         m_doc.checkpoint();   // undo boundary: committing a sketch
@@ -4346,6 +4365,8 @@ DesignPanel::DesignPanel(wxWindow* parent)
     }
 
     set_ui_mode(UiMode::Feature);
+    build_phase("wiring");
+    BOOST_LOG_TRIVIAL(info) << "Design tab build: total " << build_clock.Time() << " ms";
 }
 
 void DesignPanel::set_active_tool_btn(ScalableButton* b)
@@ -4928,7 +4949,8 @@ void DesignPanel::on_import_mesh()
                "merging, so importing it may take a long time and leave a body that is slow to "
                "edit. Decimating the mesh first is usually better.\n\nImport anyway?"),
             int(mesh.its.indices.size()));
-        if (wxMessageBox(q, _L("Large mesh"), wxYES_NO | wxICON_WARNING, this) != wxYES)
+        MessageDialog dlg(this, q, _L("Large mesh"), wxYES_NO | wxICON_WARNING);
+        if (dlg.ShowModal() != wxID_YES)
             return;
     }
 
@@ -6288,14 +6310,11 @@ void DesignPanel::set_status(StatusKind kind, const wxString& body)
     // 8cc), which silently length-limited every hint in the tab. The viewport's bottom
     // margin has the whole window width, so a sentence can be a sentence.
     if (m_viewport != nullptr) {
-        // wxNullColour means "no opinion", and the dark default text colour is nearly invisible
-        // on the dark HUD; only a colour a caller actually chose (the error red, the plane-pick
-        // green) is carried over. Compared against the colour the label was CREATED with —
-        // comparing against the parent's foreground instead reported "chosen" for every line,
-        // and the neutral text came out the panel's grey.
-        const wxColour fg = m_status->GetForegroundColour();
-        m_viewport->set_status_text(text, fg != m_status_default_fg ? fg
-                                                                    : wxColour(0xDD, 0xE1, 0xE6));
+        // Only a colour a caller actually chose (the error red, the plane-pick green) is carried
+        // over; a neutral line (wxNullColour above) takes the viewport overlay's own text colour,
+        // which follows the theme.
+        m_viewport->set_status_text(text, m_status->UseForegroundColour() ? m_status->GetForegroundColour()
+                                                                          : wxNullColour);
     }
 }
 
@@ -7155,28 +7174,78 @@ wxString DesignPanel::idle_hint() const
 // Nothing else in the panel needs to know: the popup keeps its text and comes straight back.
 void DesignPanel::on_tab_hidden()
 {
-    if (m_viewport) {
-        m_viewport->show_status_hud(false);
+    if (m_viewport)
         m_viewport->leave_viewport();   // hand the shared camera back to the editor tabs
-    }
 }
 
 void DesignPanel::on_tab_shown()
 {
-    if (m_viewport) {
-        m_viewport->show_status_hud(true);   // ...and back on the way in
+    if (m_viewport)
         m_viewport->enter_viewport();        // borrow the shared camera; on_tab_hidden gives it back
-    }
 
     if (m_active == Tool::None && m_doc.display_mesh.its.indices.empty())
         set_status(idle_hint());   // first paint: the tab has never been edited
 
+    wxStopWatch show_clock;
     if (m_viewport) m_viewport->refresh_bed();
 
     hydrate_from_model();
     update_reference_planes();   // entering the Design tab: show the XY/XZ/YZ planes if no object yet
+    if (show_clock.Time() > 100)   // a slow first show is what users report; the usual one is not news
+        BOOST_LOG_TRIVIAL(info) << "Design tab shown: bed, project recipe and planes in " << show_clock.Time() << " ms";
     sync_sidebar_width();        // keep the panel as wide as Prepare's so the canvas edge doesn't jump
     if (m_viewport) m_viewport->force_repaint();   // the page was just re-shown: paint it for real
+}
+
+void DesignPanel::refresh_icons()
+{
+    // Plain ScalableButtons re-read their icon for the current scale and theme, and the Orca
+    // widgets re-measure themselves...
+    std::function<void(wxWindow*)> walk = [&walk](wxWindow* w) {
+        if (auto* b = dynamic_cast<ScalableButton*>(w))
+            b->msw_rescale();
+        else if (auto* b = dynamic_cast<::Button*>(w))
+            b->Rescale();
+        else if (auto* c = dynamic_cast<::CheckBox*>(w))
+            c->Rescale();
+        else if (auto* c = dynamic_cast<::ComboBox*>(w))
+            c->Rescale();
+        for (wxWindow* child : w->GetChildren())
+            walk(child);
+    };
+    walk(this);
+    // ...then the icons that are not a button face (and the buttons that swap to a "_dark" twin).
+    for (auto& refresh : m_icon_refresh)
+        refresh();
+}
+
+void DesignPanel::msw_rescale()
+{
+    refresh_icons();
+    if (m_viewport) m_viewport->Refresh();
+    Layout();
+}
+
+void DesignPanel::on_sys_color_changed()
+{
+    // Every chrome colour here was set from a DpToken in the theme that was current at the time.
+    // Move each one, background and text, onto the same token in the new theme; any other colour
+    // (the teal accents, the status colours) is the same in both and stays.
+    const bool to_dark = dp_dark();
+    std::function<void(wxWindow*)> walk = [&walk, to_dark](wxWindow* w) {
+        if (w->UseBackgroundColour())
+            w->SetBackgroundColour(dp_retheme(w->GetBackgroundColour(), to_dark));
+        if (w->UseForegroundColour())
+            w->SetForegroundColour(dp_retheme(w->GetForegroundColour(), to_dark));
+        for (wxWindow* child : w->GetChildren())
+            walk(child);
+    };
+    walk(this);
+    // The native controls (trees, lists, spins) take the app's own dark pass.
+    wxGetApp().UpdateDarkUIWin(this);
+    refresh_icons();
+    refresh_tree();   // the rows carry their own text colours
+    Refresh();
 }
 
 // Rehydrate the parametric model from a freshly loaded project (the 3MF carried the recipe in
@@ -7671,7 +7740,7 @@ void DesignPanel::after_tree_edit(bool ok)
 void DesignPanel::on_new_design()
 {
     if (m_doc.features.empty() && m_doc.bodies.empty()) { set_status_ok(); return; }
-    wxMessageDialog dlg(this,
+    MessageDialog dlg(this,
         _L("Erase all features and bodies and start a new design? This cannot be undone."),
         _L("New Design"), wxYES_NO | wxICON_EXCLAMATION);
     if (dlg.ShowModal() != wxID_YES) return;
@@ -8188,14 +8257,14 @@ void DesignPanel::rebuild_constraint_list()
         auto* row = new wxBoxSizer(wxHORIZONTAL);
         // Delete button first (fixed left position, always visible — long labels can
         // horizontally scroll but ✗ stays put and clickable). BMP-safe ✗ glyph.
-        auto* del = new wxButton(m_cards, wxID_ANY, wxString::FromUTF8("✗"),
-                                 wxDefaultPosition, wxSize(26, -1));
+        auto* del = new ScalableButton(m_cards, wxID_ANY, "design_delete", "", FromDIP(wxSize(24, 24)),
+                                       wxDefaultPosition, wxBU_EXACTFIT | wxBORDER_NONE, false, 16);
         del->SetToolTip(_L("Delete constraint"));
         del->Bind(wxEVT_BUTTON, [this, i](wxCommandEvent&) { delete_constraint(i); });
         // Clickable label: selecting it highlights the referenced entities.
-        auto* lbl = new wxButton(m_cards, wxID_ANY, constraint_label(cons[i]),
-                                 wxDefaultPosition, wxDefaultSize, wxBU_LEFT | wxBORDER_NONE);
-        lbl->Bind(wxEVT_BUTTON, [this, i](wxCommandEvent&) { highlight_constraint_entities(i); });
+        auto* lbl = new wxStaticText(m_cards, wxID_ANY, constraint_label(cons[i]));
+        lbl->SetCursor(wxCursor(wxCURSOR_HAND));
+        lbl->Bind(wxEVT_LEFT_UP, [this, i](wxMouseEvent&) { highlight_constraint_entities(i); });
         row->Add(del, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
         row->Add(lbl, 1, wxALIGN_CENTER_VERTICAL);
         m_constraint_rows->Add(row, 0, wxEXPAND | wxTOP, 2);
@@ -10792,7 +10861,7 @@ void DesignPanel::refresh_preview()
         default:             ready = _L("Sketch ready");    break;
         }
         set_status(StatusKind::Ok, ready);
-        for (wxButton* b : m_confirm_btns) if (b) b->Enable(true);
+        for (::Button* b : m_confirm_btns) if (b) b->Enable(true);
         m_status->Refresh();
         update_datum_gizmo();   // Plane card: show/refresh the in-canvas resize handles
         update_helix_gizmo();   // Helix card: draw the live curve + drag handles (no solid ghost)
@@ -10835,7 +10904,7 @@ void DesignPanel::refresh_preview()
                 set_status(StatusKind::Error, wxString::Format(_L("Invalid: %s"), kernel_error_text(err)));
             }
         }
-        for (wxButton* b : m_confirm_btns) if (b) b->Enable(ok);
+        for (::Button* b : m_confirm_btns) if (b) b->Enable(ok);
         m_status->Refresh();
         return;
     }
@@ -10881,7 +10950,7 @@ void DesignPanel::refresh_preview()
     }
     // Onshape parity: a broken candidate cannot be committed. Grey the active dialog's
     // Confirm so the user sees the gate before clicking; the red status says why.
-    for (wxButton* b : m_confirm_btns)
+    for (::Button* b : m_confirm_btns)
         if (b != nullptr) b->Enable(ok);
     // Fillet/Chamfer/Draft: once the target edge/face yields a valid result, show ONLY the
     // preview (hide the base bodies) so the user sees the finished shape, not the old solid
@@ -11450,7 +11519,7 @@ void DesignPanel::tool_cancel()
         // the user to press the very button they had just pressed: a sketch could be kept but
         // never discarded.
         if (m_viewport && m_viewport->live_sketch_has_work()) {
-            wxMessageDialog dlg(this,
+            RichMessageDialog dlg(this,
                                 _L("Discard this sketch and everything drawn in it?"),
                                 _L("Discard sketch"),
                                 wxYES_NO | wxNO_DEFAULT | wxICON_EXCLAMATION);
@@ -11481,9 +11550,9 @@ bool DesignPanel::confirm_enabled() const
         return (m_viewport && m_viewport->moving_body())
                || m_ui_mode == UiMode::Sketch || m_ui_mode == UiMode::Constrain;
     if (m_active == Tool::Insert) return true;
-    for (wxButton* b : m_confirm_btns)
+    for (::Button* b : m_confirm_btns)
         if (b != nullptr && b->IsShownOnScreen()) return b->IsEnabled();
-    for (wxButton* b : m_confirm_btns)
+    for (::Button* b : m_confirm_btns)
         if (b != nullptr) return b->IsEnabled();
     return true;
 }
@@ -11582,18 +11651,10 @@ bool DesignPanel::menu_can_undo_redo(bool redo) const
 
 void DesignPanel::update_undo_redo_buttons()
 {
-    // Grey Undo/Redo to mirror exactly what do_undo_redo will do: it acts only in Feature
-    // mode with no tool/dialog open (otherwise Esc is the way out), so reflect that gate here
-    // as well as the document's available history.
-    if (m_btn_undo == nullptr || m_btn_redo == nullptr) return;
-    if (m_ui_mode == UiMode::Sketch && m_viewport && m_viewport->is_sketching()) {
-        m_btn_undo->Enable(m_viewport->can_undo_sketch_entity());
-        m_btn_redo->Enable(m_viewport->can_redo_sketch_entity());
-        return;
-    }
-    const bool gated = (m_ui_mode != UiMode::Feature) || (m_active != Tool::None);
-    m_btn_undo->Enable(!gated && m_doc.can_undo());
-    m_btn_redo->Enable(!gated && m_doc.can_redo());
+    // The tab has no Undo/Redo of its own: the app's (the top bar, Ctrl+Z, Edit) drive this
+    // history while the tab is shown, greyed to exactly what do_undo_redo will do.
+    if (MainFrame* frame = wxGetApp().mainframe; frame != nullptr && IsShownOnScreen())
+        frame->set_undo_redo_enabled(menu_can_undo_redo(false), menu_can_undo_redo(true));
 }
 
 void DesignPanel::update_action_bar()
@@ -11674,19 +11735,78 @@ void DesignPanel::refresh_variables()
     }
 }
 
+// A design variable's name and expression, in Orca's dialog style: one dialog for both fields
+// rather than two bare text prompts. Editing an existing variable keeps its name fixed.
+class DesignVariableDialog : public DPIDialog
+{
+public:
+    DesignVariableDialog(wxWindow* parent, const wxString& title, const wxString& name,
+                         const wxString& expr, bool name_editable)
+        : DPIDialog(parent, wxID_ANY, title, wxDefaultPosition, wxDefaultSize, wxCAPTION | wxCLOSE_BOX)
+    {
+        SetBackgroundColour(*wxWHITE);
+        SetFont(Label::Body_14);
+        auto* grid = new wxFlexGridSizer(2, FromDIP(8), FromDIP(12));
+        grid->AddGrowableCol(1);
+        auto field = [this, grid](const wxString& label, const wxString& value) {
+            grid->Add(new wxStaticText(this, wxID_ANY, label), 0, wxALIGN_CENTER_VERTICAL);
+            auto* in = new ::TextInput(this, value, "", "", wxDefaultPosition, wxSize(FromDIP(240), -1),
+                                       wxTE_PROCESS_ENTER);
+            in->Bind(wxEVT_TEXT_ENTER, [this](wxCommandEvent&) { EndModal(wxID_OK); });
+            grid->Add(in, 1, wxEXPAND);
+            return in;
+        };
+        m_name = field(_L("Name"), name);
+        m_expr = field(_L("Expression"), expr);
+        m_name->Enable(name_editable);
+
+        m_buttons = new DialogButtons(this, {"OK", "Cancel"});
+        m_buttons->GetOK()->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { EndModal(wxID_OK); });
+        m_buttons->GetCANCEL()->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { EndModal(wxID_CANCEL); });
+
+        auto* sizer = new wxBoxSizer(wxVERTICAL);
+        sizer->Add(grid, 1, wxEXPAND | wxALL, FromDIP(16));
+        sizer->Add(m_buttons, 0, wxEXPAND);
+        SetSizerAndFit(sizer);
+        CenterOnParent();
+        (name_editable ? m_name : m_expr)->GetTextCtrl()->SetFocus();
+        wxGetApp().UpdateDlgDarkUI(this);
+    }
+
+    wxString name() const { return trimmed(m_name); }
+    wxString expression() const { return trimmed(m_expr); }
+
+protected:
+    void on_dpi_changed(const wxRect&) override
+    {
+        m_name->Rescale();
+        m_expr->Rescale();
+        GetSizer()->SetSizeHints(this);
+        Refresh();
+    }
+
+private:
+    static wxString trimmed(const ::TextInput* in)
+    {
+        wxString v = in->GetTextCtrl()->GetValue();
+        return v.Trim(true).Trim(false);
+    }
+    ::TextInput*   m_name{nullptr};
+    ::TextInput*   m_expr{nullptr};
+    DialogButtons* m_buttons{nullptr};
+};
+
 void DesignPanel::on_add_variable()
 {
-    wxString name = ::wxGetTextFromUser(_L("Variable name:"), _L("Add Variable"), "", this);
-    if (name.IsEmpty()) return;
-    name.Trim(true).Trim(false);
+    DesignVariableDialog dlg(this, _L("Add Variable"), "", "0", true);
+    if (dlg.ShowModal() != wxID_OK) return;
+    const wxString name = dlg.name();
+    const wxString expr = dlg.expression();
+    if (name.IsEmpty() || expr.IsEmpty()) return;
     if (name.Contains(' ')) {
         set_status(StatusKind::Error, _L("Variable name must not contain spaces"));
         return;
     }
-    wxString expr = ::wxGetTextFromUser(
-        wxString::Format(_L("Expression for '%s':"), name),
-        _L("Add Variable"), "0", this);
-    if (expr.IsEmpty()) return;
 
     const std::string name_str = name.ToUTF8().data();
     const std::string expr_str = expr.ToUTF8().data();
@@ -11712,9 +11832,10 @@ void DesignPanel::on_edit_variable()
     }
     const std::string name_str = m_var_list->GetItemText(sel, 0).ToUTF8().data();
     const std::string old_expr  = m_var_list->GetItemText(sel, 1).ToUTF8().data();
-    wxString expr = ::wxGetTextFromUser(
-        wxString::Format(_L("Expression for '%s':"), m_var_list->GetItemText(sel, 0)),
-        _L("Edit Variable"), wxString::FromUTF8(old_expr), this);
+    DesignVariableDialog dlg(this, _L("Edit Variable"), m_var_list->GetItemText(sel, 0),
+                             wxString::FromUTF8(old_expr), false);
+    if (dlg.ShowModal() != wxID_OK) return;
+    const wxString expr = dlg.expression();
     if (expr.IsEmpty()) return;
 
     const std::string expr_str = expr.ToUTF8().data();

@@ -8988,6 +8988,8 @@ void DesignSketchTool::render(GLCanvas3D& canvas)
     // not there — there is no window to fall back to any more.
     if (inline_editor != nullptr)
         inline_editor->render(*wxGetApp().imgui(), m_render_scale);
+    if (render_overlays)
+        render_overlays();
     (void)canvas;
     if (!has_display()) {
         if (on_readout) on_readout(std::string());   // nothing to show -> hide HUD
@@ -10510,9 +10512,9 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
         // Left-drag rubber band -> whole body. Past the click budget the press becomes a sweep:
         // the rectangle is anchored at the ORIGINAL press point (not at the frame where the
         // threshold was crossed, which would lose the first few pixels) and the events are
-        // consumed from here on. Left-drag no longer orbits in this canvas — DesignCanvas puts
-        // orbit on middle-drag and pan on right-drag, the CAD convention — so nothing downstream
-        // is being starved of a gesture it used to own.
+        // consumed from here on. The camera follows Preferences > Control as in Prepare, so while
+        // left-drag is given to Rotate or Pan the band takes Shift+left-drag, Prepare's own
+        // rectangle selection.
         // HOVER PRE-HIGHLIGHT (9xw part 3): say what a click would take, before it is
         // taken. Plain motion only — no button down, no band running — because during a drag the
         // pointer is doing something else and a promise about clicking would be a lie. Returns
@@ -10522,7 +10524,9 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
             if (update_solid_hover(canvas, evt)) canvas.set_as_dirty();
             return false;
         }
-        if (evt.Dragging() && evt.LeftIsDown() && m_pick_pending) {
+        const bool left_drag_sweeps =
+            evt.ShiftDown() || std::atoi(wxGetApp().app_config->get("left_mouse_drag_action").c_str()) == 0;
+        if (evt.Dragging() && evt.LeftIsDown() && m_pick_pending && (left_drag_sweeps || m_rubber.is_dragging())) {
             if (!m_rubber.is_dragging()) {
                 if (std::max(std::abs(evt.GetX() - m_pick_press_x),
                              std::abs(evt.GetY() - m_pick_press_y)) <= 8)
