@@ -1126,6 +1126,10 @@ void MainFrame::shutdown()
     if (m_project != nullptr)
         m_project->shutdown();
     m_plugin_pages.shutdown();
+#ifdef SLIC3R_CAD
+    if (m_design_panel != nullptr)
+        m_design_panel->shutdown();
+#endif
 #ifdef __WXGTK__
     // Edge panels are child windows — wxWidgets destroys them automatically.
     m_edge_bottom = nullptr;
@@ -1249,6 +1253,15 @@ void MainFrame::show_option(bool show)
     }
 }
 
+void MainFrame::set_undo_redo_enabled(bool undo, bool redo)
+{
+#ifndef __APPLE__
+    m_topbar->EnableUndoRedo(undo, redo);
+#else
+    (void) undo; (void) redo;   // macOS has no top bar; Edit asks the tab when it opens
+#endif
+}
+
 #ifdef SLIC3R_CAD
 DesignPanel* MainFrame::shown_design_panel() const
 {
@@ -1260,9 +1273,15 @@ DesignPanel* MainFrame::ensure_design_panel()
 {
     if (m_design_panel == nullptr && m_design_page != nullptr) {
         wxBusyCursor busy;
+        // Built into a hidden page: on MSW every control created or moved inside a shown window
+        // re-clips and repaints its shown siblings, so building the panel into the page the
+        // notebook has just shown took seconds.
+        const bool page_shown = m_design_page->IsShown();
+        if (page_shown) m_design_page->Hide();
         m_design_panel = new DesignPanel(m_design_page);
         m_design_page->GetSizer()->Add(m_design_panel, 1, wxEXPAND);
         m_design_page->Layout();
+        if (page_shown) m_design_page->Show();
     }
     return m_design_panel;
 }
@@ -1335,6 +1354,11 @@ void MainFrame::init_tabpanel() {
         else {
             m_topbar->DisableUndoRedoItems();
         }
+#endif
+#ifdef SLIC3R_CAD
+        // Design keeps its own history, and the top bar's Undo/Redo drive it while it is shown.
+        if (m_design_panel != nullptr && panel == m_design_page)
+            m_design_panel->update_undo_redo_buttons();
 #endif
 
         if (panel)
@@ -2641,6 +2665,10 @@ void MainFrame::on_dpi_changed(const wxRect& suggested_rect)
         m_multi_machine->msw_rescale();
     if(m_calibration)
         m_calibration->msw_rescale();
+#ifdef SLIC3R_CAD
+    if (m_design_panel)
+        m_design_panel->msw_rescale();
+#endif
 
     // BBS
 #if 0
@@ -2706,6 +2734,10 @@ void MainFrame::on_sys_color_changed()
         m_monitor->on_sys_color_changed();
     if(m_calibration)
         m_calibration->on_sys_color_changed();
+#ifdef SLIC3R_CAD
+    if (m_design_panel)
+        m_design_panel->on_sys_color_changed();
+#endif
     // update Tabs
     for (auto tab : wxGetApp().tabs_list)
         tab->sys_color_changed();
@@ -3311,8 +3343,19 @@ void MainFrame::init_menubar_as_editor()
 
         append_menu_item(
             viewMenu, wxID_ANY, _L("Reset Window Layout"), _L("Reset to default window layout"),
-            [this](wxCommandEvent&) { m_plater->reset_window_layout(); }, "", this,
+            [this](wxCommandEvent&) {
+                m_plater->reset_window_layout();
+#ifdef SLIC3R_CAD
+                // The Design tab docks its own sidebar.
+                if (m_design_panel != nullptr)
+                    m_design_panel->reset_window_layout();
+#endif
+            }, "", this,
             [this]() {
+#ifdef SLIC3R_CAD
+                if (shown_design_panel() != nullptr)
+                    return true;
+#endif
                 return is_prepare_or_preview_tab() && m_plater->is_sidebar_enabled();
             },
             this);

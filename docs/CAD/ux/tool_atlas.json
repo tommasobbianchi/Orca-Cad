@@ -1773,7 +1773,7 @@
       "action": "btn:text",
       "mode": "sketch",
       "icon": "design_text",
-      "hint": "Type text; its outline is added to this sketch as editable lines"
+      "hint": "Type text; it becomes a Text feature on this sketch's plane, editable later"
     },
     {
       "id": "sk_svg",

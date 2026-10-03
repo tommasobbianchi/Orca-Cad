@@ -404,6 +404,8 @@ public:
     // the tab that is shown: its own history when that is Design, the plater's otherwise.
     DesignPanel*          shown_design_panel() const;
 #endif
+    // The top bar's Undo/Redo, for a tab that keeps its own history (Design).
+    void set_undo_redo_enabled(bool undo, bool redo);
     //BBS: GUI refactor
     MonitorPanel*         m_monitor{ nullptr };
 

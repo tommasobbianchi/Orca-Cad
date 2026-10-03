@@ -6,6 +6,7 @@
 #include "libslic3r/CAD/GeometryEngine.hpp"
 
 #include <gp_Pln.hxx>
+#include <gp_Ax1.hxx>
 #include <gp_Ax3.hxx>
 #include <TopoDS_Wire.hxx>
 #include <TopoDS_Shape.hxx>
@@ -164,6 +165,15 @@ int  sketch_entity_ends(const SketchEntity& e, std::pair<SketchPointRole, Vec2d>
 bool sketch_closest_ends(const SketchEntity& A, const SketchEntity& B,
                          SketchPointRole& ra, SketchPointRole& rb, Vec2d& pa, Vec2d& pb);
 
+// Where a CLOSED loop fails to bound one region, although every joint meets: two of its
+// entities touch somewhere other than a joint they share (the loop crosses itself), or a joint
+// where the curve turns straight back along itself (a cusp: an arc leaving a line tangent to it
+// but heading the other way). Either makes a face OCCT accepts and then builds an invalid solid
+// from. `order` lists the loop's entity indices in traversal order, as the chainer found them.
+// Lines and arcs are judged exactly; a loop holding any other kind is not judged (false).
+// On true, `at` is the offending point in sketch coordinates.
+bool sketch_loop_defect(const std::vector<SketchEntity>& ents, const std::vector<int>& order, Vec2d& at);
+
 // Why an entity-constraint pick is refused. The caller maps a reason to a localized string;
 // the planner itself stays translation-free.
 enum class ConstraintReject {
@@ -253,12 +263,10 @@ public:
         const std::vector<std::vector<std::vector<Vec2d>>>& regions,
         const SketchPlane& plane, double length, bool symmetric = false);
 
-    // Revolve a planar profile wire about an axis lying in the sketch plane and
-    // passing through the plane origin: axis_sel 0 = plane X axis, 1 = plane Y axis.
-    // A negative angle_deg sweeps the opposite direction (Flip). The profile must
-    // lie to one side of the axis (Onshape rule); a straddling profile self-intersects.
-    static TopoDS_Shape make_revolve(const TopoDS_Wire& wire, const SketchPlane& plane,
-                                     double angle_deg = 360.0, int axis_sel = 0);
+    // Revolve the closed profile wire about `axis` (world) by angle_deg; a negative angle sweeps
+    // the other way (Flip). The profile must lie to one side of the axis (Onshape rule): one that
+    // straddles it sweeps through itself, and that is refused rather than returned broken.
+    static TopoDS_Shape make_revolve(const TopoDS_Wire& wire, const gp_Ax1& axis, double angle_deg = 360.0);
 
     // Sweep a planar profile wire along a path (spine) wire. The profile is turned
     // into a face and swept with BRepOffsetAPI_MakePipe, which keeps the profile

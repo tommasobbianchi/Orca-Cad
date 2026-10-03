@@ -8,6 +8,8 @@
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
 #include <BRepClass_FaceClassifier.hxx>
@@ -334,20 +336,35 @@ TopoDS_Shape SketchEngine::make_extrude_regions(
     return count == 1 ? last : TopoDS_Shape(comp);   // avoid a compound-of-one
 }
 
-TopoDS_Shape SketchEngine::make_revolve(const TopoDS_Wire& wire, const SketchPlane& plane,
-                                        double angle_deg, int axis_sel)
+TopoDS_Shape SketchEngine::make_revolve(const TopoDS_Wire& wire, const gp_Ax1& axis_in, double angle_deg)
 {
     BRepBuilderAPI_MakeFace faceMaker(wire);
     if (!faceMaker.IsDone())
         throw std::runtime_error("Failed to make face from wire");
     TopoDS_Face face = faceMaker.Face();
 
-    // Revolution axis lies in the sketch plane through its origin: X (0) or Y (1).
-    const Vec3d& adir = (axis_sel == 1) ? plane.y_axis : plane.x_axis;
-    gp_Pnt o(plane.origin.x(), plane.origin.y(), plane.origin.z());
-    gp_Dir xd(adir.x(), adir.y(), adir.z());
-    gp_Ax1 axis(o, xd);
-
+    // A profile on both sides of the axis sweeps through itself; MakeRevol then fails with no
+    // reason, or builds an invalid solid. Sample every edge and name the cause instead.
+    {
+        const gp_Pnt o = axis_in.Location();
+        const gp_Dir d = axis_in.Direction();
+        bool pos = false, neg = false;
+        gp_Vec side_ref;
+        for (TopExp_Explorer ex(wire, TopAbs_EDGE); ex.More(); ex.Next()) {
+            BRepAdaptor_Curve c(TopoDS::Edge(ex.Current()));
+            for (int i = 0; i <= 16; ++i) {
+                const gp_Pnt p = c.Value(c.FirstParameter() + (c.LastParameter() - c.FirstParameter()) * i / 16.0);
+                const gp_Vec off = gp_Vec(o, p) - gp_Vec(d) * gp_Vec(o, p).Dot(gp_Vec(d));   // from the axis
+                if (off.Magnitude() < 1e-6)
+                    continue;
+                if (side_ref.Magnitude() == 0.0) { side_ref = off; pos = true; continue; }
+                (off.Dot(side_ref) > 0.0 ? pos : neg) = true;
+            }
+        }
+        if (pos && neg)
+            throw std::runtime_error("the profile crosses the revolve axis — it must lie on one side of it");
+    }
+    gp_Ax1 axis = axis_in;
     double angle_rad = angle_deg * M_PI / 180.0;
     // A negative angle is expressed as a positive sweep about the reversed axis,
     // since BRepPrimAPI_MakeRevol expects an angle in (0, 2*pi].
@@ -355,6 +372,8 @@ TopoDS_Shape SketchEngine::make_revolve(const TopoDS_Wire& wire, const SketchPla
     BRepPrimAPI_MakeRevol rev(face, axis, angle_rad);
     if (!rev.IsDone())
         throw std::runtime_error("Failed to revolve");
+    if (!BRepCheck_Analyzer(rev.Shape()).IsValid())
+        throw std::runtime_error("the profile crosses the revolve axis — it must lie on one side of it");
     return rev.Shape();
 }
 
@@ -881,6 +900,18 @@ std::vector<Vec2d> sketch_open_ends(const std::vector<SketchEntity>& entities,
     return out;
 }
 
+// A closed wire can still fail to bound a region: a loop that crosses itself, or one that
+// doubles back along itself (a cusp, e.g. an arc leaving a line tangent to it but in the
+// opposite direction). MakeFace reports success on both and the prism built from the face is
+// an invalid solid with no caps. Refuse it here, with the reason, instead of shipping that.
+static TopoDS_Face checked_profile_face(const TopoDS_Face& f)
+{
+    BRepCheck_Analyzer an(f);
+    if (!an.IsValid())
+        throw std::runtime_error("the profile crosses or folds back on itself, so it does not bound one region");
+    return f;
+}
+
 TopoDS_Face SketchEngine::wires_to_face(const std::vector<TopoDS_Wire>& wires,
                                         const SketchPlane& plane)
 {
@@ -900,7 +931,7 @@ TopoDS_Face SketchEngine::wires_to_face(const std::vector<TopoDS_Wire>& wires,
     if (wires.size() == 1) {
         BRepBuilderAPI_MakeFace fm(wires[0]);
         if (!fm.IsDone()) throw std::runtime_error("sketch loop does not bound a face");
-        return fm.Face();
+        return checked_profile_face(fm.Face());
     }
 
     // Two or more loops: build a face per wire and let the largest area be the outer
@@ -956,7 +987,7 @@ TopoDS_Face SketchEngine::wires_to_face(const std::vector<TopoDS_Wire>& wires,
     // while a holed SKETCH did not.
     ShapeFix_Face sff(fm.Face());
     sff.FixOrientation();
-    return sff.Face();
+    return checked_profile_face(sff.Face());
 }
 
 std::vector<SketchEntity> SketchEngine::mirror_entities(
@@ -2105,6 +2136,153 @@ int sketch_entity_ends(const SketchEntity& e, std::pair<SketchPointRole, Vec2d> 
         out[0] = {R::Center, e.center}; return 1;
     }
     return 0;
+}
+
+namespace {
+
+// An arc's signed angular offset of `ang` from its start, within its sweep: true when the angle
+// lies on the arc (with `tol` radians of slack at either end).
+bool angle_on_arc(const SketchEntity& e, double ang, double tol)
+{
+    const double TWO_PI = 2.0 * M_PI;
+    const double sweep  = e.end_angle - e.start_angle;
+    double d = (sweep >= 0.0) ? ang - e.start_angle : e.start_angle - ang;
+    d = std::fmod(d, TWO_PI);
+    if (d < 0.0) d += TWO_PI;
+    if (d > TWO_PI - tol) d -= TWO_PI;     // just before the start counts as the start
+    return d >= -tol && d <= std::abs(sweep) + tol;
+}
+
+// Every point where two lines/arcs meet (tangent contact included). Exact, no sampling.
+void entity_intersections(const SketchEntity& A, const SketchEntity& B, std::vector<Vec2d>& out)
+{
+    using T = SketchEntity::Type;
+    const double eps = 1e-9;
+    auto on_seg = [](const SketchEntity& L, const Vec2d& p) {
+        const Vec2d d = L.p1 - L.p0;
+        const double l2 = d.squaredNorm();
+        if (l2 < 1e-24) return false;
+        const double t = (p - L.p0).dot(d) / l2;
+        return t >= -1e-9 && t <= 1.0 + 1e-9;
+    };
+    if (A.type == T::Line && B.type == T::Line) {
+        const Vec2d r = A.p1 - A.p0, q = B.p1 - B.p0, w = B.p0 - A.p0;
+        const double den = r.x() * q.y() - r.y() * q.x();
+        if (std::abs(den) < eps * r.norm() * q.norm()) {
+            // Parallel. Collinear overlap is a crossing wherever it is: report the overlap's
+            // nearest end, which the caller then tests against the shared joints.
+            if (std::abs(r.x() * w.y() - r.y() * w.x()) > 1e-9 * std::max(1.0, r.norm())) return;
+            for (const Vec2d& p : { B.p0, B.p1 }) if (on_seg(A, p)) out.push_back(p);
+            for (const Vec2d& p : { A.p0, A.p1 }) if (on_seg(B, p)) out.push_back(p);
+            return;
+        }
+        const double t = (w.x() * q.y() - w.y() * q.x()) / den;
+        const double u = (w.x() * r.y() - w.y() * r.x()) / den;
+        if (t >= -1e-9 && t <= 1.0 + 1e-9 && u >= -1e-9 && u <= 1.0 + 1e-9) out.push_back(A.p0 + t * r);
+        return;
+    }
+    if (A.type == T::Arc && B.type == T::Line) { entity_intersections(B, A, out); return; }
+    if (A.type == T::Line && B.type == T::Arc) {
+        const Vec2d d = A.p1 - A.p0, f = A.p0 - B.center;
+        const double a = d.squaredNorm(), b = 2.0 * f.dot(d), c = f.squaredNorm() - B.radius * B.radius;
+        if (a < 1e-24) return;
+        double disc = b * b - 4.0 * a * c;
+        if (disc < -1e-9 * a * B.radius * B.radius) return;
+        disc = std::sqrt(std::max(0.0, disc));
+        for (double t : { (-b - disc) / (2.0 * a), (-b + disc) / (2.0 * a) }) {
+            if (t < -1e-9 || t > 1.0 + 1e-9) continue;
+            const Vec2d p = A.p0 + t * d;
+            if (angle_on_arc(B, std::atan2(p.y() - B.center.y(), p.x() - B.center.x()), 1e-9))
+                out.push_back(p);
+        }
+        return;
+    }
+    if (A.type == T::Arc && B.type == T::Arc) {
+        const Vec2d dc = B.center - A.center;
+        const double dd = dc.norm();
+        if (dd < 1e-12) {
+            // Concentric: they overlap only on the same circle, and then everywhere they share.
+            if (std::abs(A.radius - B.radius) > 1e-9) return;
+            for (const Vec2d& p : { B.p0, B.p1 })
+                if (angle_on_arc(A, std::atan2(p.y() - A.center.y(), p.x() - A.center.x()), 1e-9)) out.push_back(p);
+            for (const Vec2d& p : { A.p0, A.p1 })
+                if (angle_on_arc(B, std::atan2(p.y() - B.center.y(), p.x() - B.center.x()), 1e-9)) out.push_back(p);
+            return;
+        }
+        if (dd > A.radius + B.radius + 1e-9 || dd < std::abs(A.radius - B.radius) - 1e-9) return;
+        const double x = (dd * dd + A.radius * A.radius - B.radius * B.radius) / (2.0 * dd);
+        const double h = std::sqrt(std::max(0.0, A.radius * A.radius - x * x));
+        const Vec2d  u = dc / dd, m = A.center + x * u, n(-u.y(), u.x());
+        for (const Vec2d& p : { Vec2d(m + h * n), Vec2d(m - h * n) }) {
+            if (angle_on_arc(A, std::atan2(p.y() - A.center.y(), p.x() - A.center.x()), 1e-9) &&
+                angle_on_arc(B, std::atan2(p.y() - B.center.y(), p.x() - B.center.x()), 1e-9))
+                out.push_back(p);
+            if (h < 1e-12) break;
+        }
+    }
+}
+
+} // namespace
+
+bool sketch_loop_defect(const std::vector<SketchEntity>& ents, const std::vector<int>& order, Vec2d& at)
+{
+    using T = SketchEntity::Type;
+    const size_t n = order.size();
+    if (n < 2) return false;
+    for (int ei : order)
+        if (ei < 0 || ei >= int(ents.size()) || (ents[ei].type != T::Line && ents[ei].type != T::Arc))
+            return false;
+    const double tol = std::max(1e-6, sketch_join_tol());
+
+    // Traversal direction of each entity: the end it shares with the NEXT one is where it
+    // finishes. start[k]/end[k] are the traversal's ends.
+    std::vector<Vec2d> start(n), end(n);
+    std::vector<bool>  rev(n, false);
+    for (size_t k = 0; k < n; ++k) {
+        const SketchEntity& e = ents[order[k]];
+        const SketchEntity& nx = ents[order[(k + 1) % n]];
+        const double to_next_p1 = std::min((e.p1 - nx.p0).norm(), (e.p1 - nx.p1).norm());
+        const double to_next_p0 = std::min((e.p0 - nx.p0).norm(), (e.p0 - nx.p1).norm());
+        rev[k]   = to_next_p0 < to_next_p1;
+        start[k] = rev[k] ? e.p1 : e.p0;
+        end[k]   = rev[k] ? e.p0 : e.p1;
+    }
+    auto tangent = [&](size_t k, bool at_end) {
+        const SketchEntity& e = ents[order[k]];
+        Vec2d t;
+        if (e.type == T::Line) {
+            t = e.p1 - e.p0;
+        } else {
+            const double a = at_end ? (rev[k] ? e.start_angle : e.end_angle)
+                                    : (rev[k] ? e.end_angle   : e.start_angle);
+            const double s = (e.end_angle >= e.start_angle) ? 1.0 : -1.0;
+            t = s * Vec2d(-std::sin(a), std::cos(a));
+        }
+        if (rev[k]) t = -t;
+        const double l = t.norm();
+        return l > 1e-15 ? Vec2d(t / l) : Vec2d(0, 0);
+    };
+
+    // Cusps: the curve arriving at a joint and the one leaving it point opposite ways.
+    for (size_t k = 0; k < n; ++k) {
+        const size_t j = (k + 1) % n;
+        if (tangent(k, true).dot(tangent(j, false)) < -0.9999) { at = end[k]; return true; }
+    }
+
+    // Crossings: any contact between two entities away from the joints they share.
+    for (size_t i = 0; i < n; ++i)
+        for (size_t j = i + 1; j < n; ++j) {
+            std::vector<Vec2d> hits;
+            entity_intersections(ents[order[i]], ents[order[j]], hits);
+            const bool next = (j == i + 1), prev = (i == 0 && j == n - 1);
+            for (const Vec2d& p : hits) {
+                bool joint = false;
+                if (next && (p - end[i]).norm() < tol) joint = true;
+                if (prev && (p - start[i]).norm() < tol) joint = true;
+                if (!joint) { at = p; return true; }
+            }
+        }
+    return false;
 }
 
 bool sketch_closest_ends(const SketchEntity& A, const SketchEntity& B,

@@ -928,6 +928,19 @@ int CadDocument::add_fillet(double radius, int edge_id, const std::string& name)
     return int(features.size()) - 1;
 }
 
+int CadDocument::add_fillet(double radius, const std::vector<int>& edge_ids, const std::string& name)
+{
+    if (edge_ids.size() == 1) return add_fillet(radius, edge_ids.front(), name);
+    CadFeature f;
+    f.type          = CadFeatureType::Fillet;
+    f.name          = name;
+    f.dressup_size  = radius;
+    f.dressup_edges = edge_ids;
+    f.dressup_edge  = edge_ids.empty() ? -1 : edge_ids.front();
+    features.push_back(f);
+    return int(features.size()) - 1;
+}
+
 int CadDocument::add_chamfer(double distance, FaceGroup faces, const std::string& name)
 {
     CadFeature f;
@@ -946,6 +959,19 @@ int CadDocument::add_chamfer(double distance, int edge_id, const std::string& na
     f.name         = name;
     f.dressup_size = distance;
     f.dressup_edge = edge_id;
+    features.push_back(f);
+    return int(features.size()) - 1;
+}
+
+int CadDocument::add_chamfer(double distance, const std::vector<int>& edge_ids, const std::string& name)
+{
+    if (edge_ids.size() == 1) return add_chamfer(distance, edge_ids.front(), name);
+    CadFeature f;
+    f.type          = CadFeatureType::Chamfer;
+    f.name          = name;
+    f.dressup_size  = distance;
+    f.dressup_edges = edge_ids;
+    f.dressup_edge  = edge_ids.empty() ? -1 : edge_ids.front();
     features.push_back(f);
     return int(features.size()) - 1;
 }
@@ -2412,6 +2438,26 @@ static std::string open_loop_message(const CadFeature& sketch,
     return msg;
 }
 
+// World axis of a Revolve / Surface Revolve whose profile is `sk`: the Line of that sketch named
+// by revolve_axis_entity, else the sketch plane's X or Y axis through its origin.
+static gp_Ax1 revolve_axis_of(const CadFeature& f, const CadFeature& sk)
+{
+    if (f.revolve_axis_entity >= 0) {
+        if (f.revolve_axis_entity >= int(sk.entities.size())
+            || sk.entities[f.revolve_axis_entity].type != SketchEntity::Type::Line)
+            throw std::runtime_error("revolve: the axis line is no longer in the sketch — pick the axis again");
+        const SketchEntity& e = sk.entities[f.revolve_axis_entity];
+        const Vec3d a = sk.plane.to_world(e.p0), b = sk.plane.to_world(e.p1);
+        if ((b - a).norm() < 1e-9)
+            throw std::runtime_error("revolve: the axis line has no length");
+        const Vec3d d = (b - a).normalized();
+        return gp_Ax1(gp_Pnt(a.x(), a.y(), a.z()), gp_Dir(d.x(), d.y(), d.z()));
+    }
+    const Vec3d& adir = (f.revolve_axis == 1) ? sk.plane.y_axis : sk.plane.x_axis;
+    return gp_Ax1(gp_Pnt(sk.plane.origin.x(), sk.plane.origin.y(), sk.plane.origin.z()),
+                  gp_Dir(adir.x(), adir.y(), adir.z()));
+}
+
 TopoDS_Wire CadDocument::build_sketch_wire(const CadFeature& sketch, bool closed_only) const
 {
     if (!sketch.entities.empty()) {
@@ -2625,7 +2671,7 @@ void CadDocument::apply_feature(TopoDS_Shape& result, bool& have_body,
                                ? features[f.sketch_ref] : f;
         TopoDS_Wire wire = build_sketch_wire(sk, true);
         const double ang = f.flip ? -f.revolve_angle : f.revolve_angle;
-        TopoDS_Shape tool = SketchEngine::make_revolve(wire, sk.plane, ang, f.revolve_axis);
+        TopoDS_Shape tool = SketchEngine::make_revolve(wire, revolve_axis_of(f, sk), ang);
         if (!have_body || f.mode == BooleanMode::New) {
             result = tool;
             have_body = true;
@@ -2667,10 +2713,7 @@ void CadDocument::apply_feature(TopoDS_Shape& result, bool& have_body,
             throw std::runtime_error("surface-revolve: ref is not a sketch");
         TopoDS_Wire wire = build_sketch_wire(sk);
         if (wire.IsNull()) throw std::runtime_error("surface-revolve: empty profile");
-        const Vec3d& adir = (f.revolve_axis == 1) ? sk.plane.y_axis : sk.plane.x_axis;
-        gp_Pnt o(sk.plane.origin.x(), sk.plane.origin.y(), sk.plane.origin.z());
-        gp_Dir xd(adir.x(), adir.y(), adir.z());
-        gp_Ax1 axis(o, xd);
+        gp_Ax1 axis = revolve_axis_of(f, sk);
         // Same angle rules as the solid Revolve (flip reverses it, and a negative sweep is a
         // positive one about the reversed axis — MakeRevol wants (0, 2 pi]); this surface
         // version used to ignore both.
@@ -2886,15 +2929,15 @@ void CadDocument::apply_feature(TopoDS_Shape& result, bool& have_body,
     }
     case CadFeatureType::Fillet:
         if (!have_body) throw std::runtime_error("fillet needs a body");
-        if (f.dressup_edge >= 0)
-            result = GeometryEngine::apply_fillet(result, f.dressup_size, f.dressup_edge);
+        if (f.dressup_edge >= 0 || !f.dressup_edges.empty())
+            result = GeometryEngine::apply_fillet(result, f.dressup_size, f.dressup_edge_ids());
         else
             result = GeometryEngine::apply_fillet(result, f.dressup_size, f.face_group);
         break;
     case CadFeatureType::Chamfer:
         if (!have_body) throw std::runtime_error("chamfer needs a body");
-        if (f.dressup_edge >= 0)
-            result = GeometryEngine::apply_chamfer(result, f.dressup_size, f.dressup_edge);
+        if (f.dressup_edge >= 0 || !f.dressup_edges.empty())
+            result = GeometryEngine::apply_chamfer(result, f.dressup_size, f.dressup_edge_ids());
         else
             result = GeometryEngine::apply_chamfer(result, f.dressup_size, f.face_group);
         break;

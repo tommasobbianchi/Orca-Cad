@@ -38,7 +38,14 @@ tool"*. It is also where a refusal explains itself.
 - One left-click selects what is under the cursor. There is no click-cycling through
   face → edge → body.
 - A click near a corner takes the corner, not the face behind it.
-- Left-drag sweeps a rubber band, and a rubber band takes the whole body.
+- A rubber band takes the whole body. It is swept with Shift+left-drag, Prepare's rectangle
+  selection, while Preferences > Control give left-drag to the camera (the default), and with
+  plain left-drag when they do not.
+- Shift+click (or Ctrl+click) on an edge of the body already picked adds that edge, or removes
+  it if it is already picked. The set belongs to one body. **Fillet / Chamfer** then dresses
+  every picked edge in one feature, at one size. The edge ids are resolved together against
+  the same body. A chain of single-edge features would resolve each against a body the
+  previous one had already changed.
 - An open sketch line can be clicked, even where it bounds a region.
 - Double-click a sketch stroke to edit it — the gesture belongs on the geometry.
 - Editing a dimension's value **updates** that dimension instead of adding a second one next
@@ -47,13 +54,18 @@ tool"*. It is also where a refusal explains itself.
 - Sketching happens on the face you clicked, first click.
 - A sketch whose entities form no wire **fails** instead of extruding a default box. A
   subtraction that removes nothing is reported as an error instead of a silent success.
+- A loop whose ends all meet can still fail to bound one region. It may cross itself, or turn
+  straight back along itself at a joint (an arc leaving a line tangent to it but heading the
+  other way). The sketch tints such a loop red, marks the point, and says so once on the status
+  line. The extrude refuses a crossing loop with the same reason; before this check it produced a
+  body with no caps.
 
 ---
 
 ## The offer
 
 Right-click on the geometry, released without moving the mouse (a 3 px budget — a
-right-drag that orbits the camera does not open it). How long the button is held does not
+right-drag that moves the camera does not open it). How long the button is held does not
 matter. Left-click still only selects, so
 pointing at things stays quiet.
 
@@ -217,6 +229,12 @@ Grouped in the toolbar by what they do, one concept per drawer.
 Extrude offers blind, symmetric, two-sided, through-all and up-to-face end conditions, plus
 a draft angle on the side wall, and can add, subtract, intersect or start a new body.
 
+Revolve turns the profile about the sketch plane's X or Y axis, or about any line of the same
+sketch: a construction centerline drawn beside the half-profile (picked for you when the sketch
+has exactly one), or an edge of the profile itself. The axis is drawn dashed while the card is
+open. A profile on both sides of the axis would sweep through itself, and is refused with that
+reason. Surface Revolve takes the same axes.
+
 ### Surface
 Sheet bodies — surfaces with no thickness — for shapes that are easier to build as skins and
 solidify afterwards.
@@ -305,9 +323,22 @@ variable and the whole model follows.
 
 ## Import and export
 
-**Text** asks for the words, the font (any installed font, bold, italic) and the height, and
-shows the outline that will be inserted with its size in millimetres before anything is added.
-The last font and height are remembered.
+**Text** is a feature of its own, "Text N" in the tree. Its dialog asks for the words, the
+font (any installed font, bold, italic) and the height, and shows the size in millimetres. The
+dialog does not block the window and can be moved aside. As you type, the text is drawn in the
+view where it will go:
+- on the plane of the sketch that is open (a sketch holding anything is committed first);
+- else centred on the picked face;
+- else on the reference plane.
+
+Enter inserts the text; then drag or scale it and Confirm. Esc takes it out again. Editing
+a Text feature reopens the dialog with its words, font and height, and redraws it in place.
+The outlines are saved with the project, so it opens the same on a machine without that font.
+A new text starts from the last font and height used.
+
+To engrave or emboss, extrude the Text feature onto the solid, Cut or Join. A text is no
+longer loose lines inside another sketch, so it no longer acts as a hole in that sketch's
+profile.
 
 **Import STEP** brings in a real B-rep solid, not a mesh: its faces and edges can be filleted,
 shelled and cut like anything modelled here.
@@ -338,6 +369,23 @@ same thing at once.
 the plane, `F` flips which half is kept. **Place on Face** (`F`, when section is off) lays a
 picked face flat on the bed. Origin planes (`P`) and world axes (`A`) can be toggled on while
 you orient yourself.
+
+Bodies are lit as in a studio, whatever the realistic-view preferences of the slicer: faces
+facing up read cooler and brighter than faces facing down, a key light from the upper left
+separates the sides of a part, and curved faces darken toward their outline. Every edge of a
+body is drawn as a thin dark line, except the seam OCCT puts down the side of a cylinder or
+cone; the edges of bodies faded by body focus are fainter, and a dress-up previewing its
+result alone hides them with the bodies.
+
+The camera follows Preferences > Control as in Prepare: which button rotates and which pans
+is set there, for every tab. The tab follows the app's light or dark theme and the display
+scale, live; the status line and the active tool's values are drawn in the viewport itself,
+so they go away with the tab and with the window.
+
+The sidebar docks like Prepare's: drag its caption to the other side or out into its own window,
+drag its edge to resize it, and collapse it with the button on the canvas edge or `Shift+Tab`.
+Its layout is remembered separately from Prepare's and starts where Prepare's sidebar is, at its
+width; View > Reset Window Layout resets both tabs. A floating sidebar hides with the tab.
 
 ---
 

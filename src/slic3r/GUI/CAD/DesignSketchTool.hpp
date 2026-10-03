@@ -154,6 +154,8 @@ public:
     // The in-canvas value field, drawn by render() before any early return. Owned by
     // DesignCanvas; null until it sets it. Not a window — see SketchInlineEditor.hpp.
     class SketchInlineEditor* inline_editor{nullptr};
+    // The canvas's own overlays (its status and readout chips), drawn in this tool's ImGui pass.
+    std::function<void()> render_overlays;
 
     // Persistent committed sketches to draw even when no session is active (e.g. an
     // un-consumed sketch left visible after its extrude is removed). Each carries its
@@ -198,8 +200,15 @@ public:
     // another solid is reachable without hiding anything. -1 = no restriction.
     // Survives set_solid_pick() — it is owned by the panel, not by the mesh feed.
     void set_pick_only_body(int b) { m_pick_only_body = b; }
+    // Off while the bodies themselves are hidden (a dress-up previewing its result alone), so
+    // their edges do not float over the preview.
+    void set_body_edges_hidden(bool h) { m_body_edges_hidden = h; }
     void clear_solid_selection();
     bool has_solid_selection() const { return m_solid_sel != SolidSel::None; }
+    // Every picked edge when the selection is an edge set (Shift/Ctrl+click adds and removes
+    // edges of the same body): the earlier picks first, the last-clicked edge at the end.
+    // Empty unless the selection is at edge level.
+    std::vector<int> selected_edges() const;
     // Select a whole body by index (from the Parts list) — Whole-level highlight, no face/edge.
     // body < 0 or out of range clears the selection.
     void select_body(int body);
@@ -242,6 +251,8 @@ public:
     // sketch there is nothing left that would set this — and selected_loop_entities(), which is
     // what Extrude consumes, reads exactly these two fields.
     void set_display_pick(int feature, int region) { m_display_pick = feature; m_display_pick_region = region; }
+    int  display_pick() const { return m_display_pick; }
+    int  display_pick_region() const { return m_display_pick_region; }
 
     // Visual Extrude gizmo (C5b). The Extrude tool is a DesignPanel docked card, so the
     // sketch tool is NOT active during it; the panel feeds the profile plane + a 2D centroid
@@ -367,12 +378,12 @@ public:
     void set_mate_links(std::vector<std::pair<Vec3d, Vec3d>> l) { m_mate_links = std::move(l); }
     void clear_mate_connectors() { m_mate_connectors.clear(); m_mate_links.clear(); }
 
-    // Visual Revolve gizmo. The panel feeds the sketch plane + profile centroid + axis (0=plane X,
-    // 1=plane Y) + angle + flip while its Revolve card is open; an angle-arc is drawn in the
-    // revolve plane at the profile radius. Dragging the tip sweeps the angle, a stationary click
+    // Visual Revolve gizmo. The panel feeds the sketch plane + profile centroid + the world axis
+    // (a point on it and its direction) + angle + flip while its Revolve card is open; an
+    // angle-arc is drawn in the revolve plane at the profile radius, and the axis dashed. Dragging the tip sweeps the angle, a stationary click
     // edits it; both fire on_revolve_angle_changed.
     void set_revolve_gizmo(const SketchPlane& plane, const Vec2d& centroid,
-                           int axis_sel, double angle, bool flip);
+                           const Vec3d& axis_origin, const Vec3d& axis_dir, double angle, bool flip);
     void clear_revolve_gizmo();
     bool revolving() const { return m_rv_active; }
     std::function<void(double angle)> on_revolve_angle_changed;
@@ -519,6 +530,8 @@ public:
         std::vector<int>   holes;        // indices into LoopReport::loops that this loop encloses
         bool               closed{false};
         double             area{0.0};    // signed shoelace area of the loop polyline
+        bool               defect{false};      // crosses or folds back on itself (see RegionLoop)
+        Vec2d              defect_at{0, 0};
     };
     struct LoopReport {
         std::vector<LoopInfo> loops;
@@ -697,6 +710,8 @@ private:
     bool selection_valid() const;                         // all selection indices in range
     void record_dimension_constraint(double v);           // append the driving def for the selection
     void resolve_live();                                  // solve accumulated constraints on m_entities now
+    void announce_loop_defects();                         // status line, once, when a loop starts crossing itself
+    bool m_loop_defect_shown{false};
     // Drag-aware re-solve: pins the dragged point at its current coord and lets the
     // solver move the rest (Slvs dragged[]). Used live while a point grab is active.
     void resolve_live_drag(int dragged_ei, SketchPointRole dragged_role);
@@ -961,6 +976,10 @@ private:
         std::vector<Vec2d> poly;
         std::vector<int>   ents;
         std::vector<int>   holes;   // indices into the same vector; one nesting level
+        // Closed, but crossing itself or turning straight back somewhere (sketch_loop_defect):
+        // it does not bound one region, whatever the chainer says. defect_at names the place.
+        bool               defect{false};
+        Vec2d              defect_at{0, 0};
     };
     std::vector<RegionLoop> region_loops(const std::vector<SketchEntity>& ents) const;
     // Index of the closed region containing plane-point p (point-in-polygon), or -1.
@@ -1085,6 +1104,10 @@ private:
     std::vector<SketchEntity> m_op_ghost;   // live result preview (recomputed on value change)
     bool   m_op_dragging_arrow{false};      // arrowhead drag in progress
     std::vector<int> m_mirror_targets;      // Mirror: entities to be mirrored (axis = m_op_a)
+    // Offset: the whole chain the picked entity belongs to (connected by shared endpoints), so
+    // an outline offsets as one outline. A single entity when it is not part of a chain.
+    std::vector<int> m_op_chain;
+    std::vector<SketchEntity> op_chain_entities() const;
 
     // In-canvas imported-art transform gizmo (Mode::TransformArt). GUI-only. The art's
     // untransformed contours + its bbox in base coords; the live offset/scale; the grabbed
@@ -1188,12 +1211,25 @@ private:
     int m_pick_only_body{-1};        // >=0: only this body catches clicks (body-focus x-ray for CoordSys picking)
     const std::vector<Transform3d>* m_solid_xform{nullptr};  // per-body display transform (for edge sampling)
     Vec3d body_xform_pt(int body, const Vec3d& p) const;     // map an OCCT-shape point through the body xform
+    // The bodies' B-rep edges, drawn as dark lines over the solids so faces and features read
+    // apart. One polyline set per body in its own shape coordinates, resampled only for a body
+    // whose shape changed (keyed by the TShape), since set_solid_pick runs on every recompute.
+    std::vector<std::vector<std::vector<Vec3d>>> m_body_edges;
+    std::vector<const void*>                     m_body_edges_key;
+    bool                                         m_body_edges_hidden{false};
+    void refresh_body_edges();
+    void render_body_edges();
     bool body_pickable(int b) const;                    // false when the body is explicitly hidden
     SolidSel                m_solid_sel{SolidSel::None};
     int                     m_sel_body{-1};   // which body the face/edge selection is on
     int                     m_sel_face{-1};
     int                     m_sel_edge{-1};
     std::vector<Vec3d>      m_sel_edge_pts;
+    // Edges picked BEFORE m_sel_edge in a Shift/Ctrl+click set, same body, with their world
+    // polylines for the highlight. m_sel_edge stays the last-clicked one, so everything that
+    // reads a single edge (the radius gizmo, the offer header) keeps working unchanged.
+    std::vector<int>                m_sel_edges_more;
+    std::vector<std::vector<Vec3d>> m_sel_edges_more_pts;
     Vec3d                   m_sel_vertex_pt{Vec3d::Zero()};   // world point of a picked vertex
     bool handle_solid_click(GLCanvas3D& canvas, const wxMouseEvent& evt);  // pick + notify
     // What a click at (mx,my) WOULD take, resolved without touching the selection. One
@@ -1212,9 +1248,8 @@ private:
     // change) read honestly — the change has to be predictable before the click, not only after.
     SolidPick m_pre;                       // what the pointer is currently over (kind None = nothing)
     bool update_solid_hover(GLCanvas3D& canvas, const wxMouseEvent& evt);  // true when it changed
-    // Left-drag rubber band: sweep a rectangle over the plate to take a whole body. Orbit
-    // moves to middle-drag in this canvas (DesignCanvas::set_cad_navigation) so the left
-    // button is free for it, which is the CAD convention (Onshape/SolidWorks).
+    // Left-drag rubber band: sweep a rectangle over the plate to take a whole body. While
+    // Preferences give left-drag to the camera it takes Shift+left-drag, as in Prepare.
     GLSelectionRectangle m_rubber;
     void pick_bodies_in_rectangle();       // resolve the swept rectangle -> whole-body selection
     bool on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas);   // the body; on_mouse wraps it
@@ -1248,6 +1283,7 @@ private:
     GLModel m_mc_fill_model;      // the face treatment's shaded facets
     GLModel m_solid_face_model;
     GLModel m_solid_edge_model;
+    GLModel m_body_edges_model;
     GLModel m_solid_vertex_model;
     int m_display_pick_region{-1}; // selected closed-region index within that feature (-1 none)
 

@@ -32,6 +32,8 @@
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakeCone.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
@@ -2347,12 +2349,14 @@ TEST_CASE("a truncated feature keeps what it could read", "[CadDocument][recipe]
     }
 
     // Shorten feature 1 so it ends right after coordsys_face_kind: drop coordsys_face_edges
-    // (4 bytes) and the two flags appended after it (thread_major_nominal, pattern_inclusive:
-    // 1 byte each). Rewrite its length prefix and erase the tail bytes. The reader then runs
-    // out inside fa(f), throws, and keeps everything it had already assigned — that is the
-    // whole point of the try/catch. (Cut on a field boundary: a field cut in half is read as
-    // whatever half arrived.)
-    const size_t drop = sizeof(uint32_t) + 2 * sizeof(bool);
+    // (4 bytes), the two flags appended after it (thread_major_nominal, pattern_inclusive:
+    // 1 byte each), the empty dressup_edges list and the two empty text strings (an 8-byte size
+    // tag each), text_height (a double) and revolve_axis_entity (an int). Rewrite its length prefix and erase the tail bytes.
+    // The reader then runs out inside fa(f), throws, and keeps everything it had already
+    // assigned — that is the whole point of the try/catch. (Cut on a field boundary: a field
+    // cut in half is read as whatever half arrived.)
+    const size_t drop = sizeof(uint32_t) + 2 * sizeof(bool) + 3 * sizeof(cereal::size_type) + sizeof(double)
+                        + sizeof(int);
     REQUIRE(f_len[1] > drop);
     std::string shortened = blob;
     shortened.erase(f_off[1] + 4 + f_len[1] - drop, drop);
@@ -2370,6 +2374,8 @@ TEST_CASE("a truncated feature keeps what it could read", "[CadDocument][recipe]
     REQUIRE(loaded.features[1].coordsys_face_edges == -1);    // defaulted by the cut
     REQUIRE_FALSE(loaded.features[1].thread_major_nominal);   // ...and so were the later flags
     REQUIRE_FALSE(loaded.features[1].pattern_inclusive);
+    REQUIRE(loaded.features[1].dressup_edges.empty());
+    REQUIRE_FALSE(loaded.features[1].is_text());
     REQUIRE(loaded.features[0].name == doc.features[0].name);
     REQUIRE(loaded.features[2].name == doc.features[2].name);
 }
@@ -7986,6 +7992,204 @@ TEST_CASE("dressup: four chamfer ids captured up-front drift as earlier chamfers
     REQUIRE(ok);
 }
 
+// A closed chain that fails to bound one region although every joint meets, recorded on the rig:
+// a top line, an arc that leaves its end heading back over it (crossing it again 2.5 mm on), and
+// a 241 deg clockwise arc that leaves a 0.28 mm line tangent to it but the other way (a cusp).
+// MakeFace accepted it and the prism came out as walls with no caps. The loop analysis must name
+// the point, and the extrude must refuse it with a reason; the same arcs swept the other way round
+// are an ordinary profile.
+namespace {
+enum class Fold { None, Crossing, Cusp, Both };
+std::vector<SketchEntity> folding_profile(Fold fold)
+{
+    auto line = [](Vec2d a, Vec2d b) { SketchEntity e; e.type = SketchEntity::Type::Line; e.p0 = a; e.p1 = b; return e; };
+    auto arc  = [](Vec2d a, Vec2d b, Vec2d c, double r, double a0, double a1) {
+        SketchEntity e; e.type = SketchEntity::Type::Arc; e.p0 = a; e.p1 = b; e.center = c; e.radius = r;
+        e.start_angle = a0; e.end_angle = a1; return e; };
+    const Vec2d A(3.745882, 40.003810), B(54.449392, 40.003810), C(52.800871, -34.610853),
+                D(7.730833, -51.667501), E(-32.425978, -102.110463), F(-48.295291, -47.364094),
+                G(-48.017198, -47.364094);
+    const double TWO_PI = 2.0 * M_PI;
+    const bool cross = fold == Fold::Crossing || fold == Fold::Both;
+    const bool cusp  = fold == Fold::Cusp     || fold == Fold::Both;
+    // B->C: clockwise it bulges out to the right; counter-clockwise (recorded) it leaves B back
+    // over the top line and crosses it. G->A, centred right above G so it is tangent to F->G:
+    // counter-clockwise it carries on from F->G; clockwise (recorded) it turns straight back.
+    const double b0 = 1.536417, b1 = 4.702588;
+    const double g0 = -M_PI / 2.0, g1 = std::atan2(A.y() - 11.653958, A.x() + 48.017198);
+    return {
+        line(A, B),
+        arc(B, C, Vec2d(53.166645, 2.706608), 37.319254, b0, cross ? b1 : b1 - TWO_PI),
+        line(C, D),
+        line(D, E),
+        line(E, F),
+        line(F, G),
+        arc(G, A, Vec2d(-48.017198, 11.653958), 59.018053, g0, cusp ? g1 - TWO_PI : g1),
+    };
+}
+} // namespace
+
+TEST_CASE("loop analysis: a closed loop that crosses or folds back names the point", "[sketch]")
+{
+    const std::vector<int> order{ 0, 1, 2, 3, 4, 5, 6 };
+    Vec2d at;
+    REQUIRE_FALSE(sketch_loop_defect(folding_profile(Fold::None), order, at));
+
+    REQUIRE(sketch_loop_defect(folding_profile(Fold::Cusp), order, at));
+    INFO("cusp at " << at.transpose());
+    REQUIRE((at - Vec2d(-48.017198, -47.364094)).norm() < 1e-3);    // the joint G
+
+    REQUIRE(sketch_loop_defect(folding_profile(Fold::Crossing), order, at));
+    INFO("crossing at " << at.transpose());
+    REQUIRE(std::abs(at.y() - 40.003810) < 1e-3);                     // on the top line...
+    REQUIRE(at.x() > 50.0);                                           // ...a little before B
+    REQUIRE(at.x() < 54.4);
+
+    // Traversal order does not matter: the same loop walked backwards.
+    const std::vector<int> back{ 6, 5, 4, 3, 2, 1, 0 };
+    REQUIRE(sketch_loop_defect(folding_profile(Fold::Cusp), back, at));
+    REQUIRE_FALSE(sketch_loop_defect(folding_profile(Fold::None), back, at));
+
+    // Ordinary joints are not defects: a fillet-like tangent join and a straight continuation.
+    SketchEntity l1; l1.type = SketchEntity::Type::Line; l1.p0 = Vec2d(0, 0);  l1.p1 = Vec2d(10, 0);
+    SketchEntity l2; l2.type = SketchEntity::Type::Line; l2.p0 = Vec2d(10, 0); l2.p1 = Vec2d(20, 0);
+    SketchEntity a1; a1.type = SketchEntity::Type::Arc;  a1.center = Vec2d(20, 5); a1.radius = 5;
+    a1.start_angle = -M_PI / 2; a1.end_angle = M_PI / 2; a1.p0 = Vec2d(20, 0); a1.p1 = Vec2d(20, 10);
+    SketchEntity l3; l3.type = SketchEntity::Type::Line; l3.p0 = Vec2d(20, 10); l3.p1 = Vec2d(0, 10);
+    SketchEntity l4; l4.type = SketchEntity::Type::Line; l4.p0 = Vec2d(0, 10); l4.p1 = Vec2d(0, 0);
+    REQUIRE_FALSE(sketch_loop_defect({ l1, l2, a1, l3, l4 }, { 0, 1, 2, 3, 4 }, at));
+}
+
+TEST_CASE("extrude: a profile that folds back on itself is refused with a reason", "[CadDocument][sketch]")
+{
+    // A cusp alone still makes a face OCCT calls valid (the spike it leaves is 0.009 mm wide), so
+    // the kernel builds it; the viewport's loop analysis is what flags it. A crossing does not.
+    for (Fold f : { Fold::Crossing, Fold::Both }) {
+        CadDocument bad;
+        const int sk = bad.add_sketch_entities(folding_profile(f), SketchPlane::XY(), "Sketch");
+        bad.add_extrude(sk, 69.42, false, BooleanMode::New, "Extrude");
+        INFO("fold kind " << int(f) << ": " << bad.error);
+        REQUIRE_FALSE(bad.recompute());
+        REQUIRE(bad.error.find("folds back") != std::string::npos);
+    }
+
+    CadDocument good;
+    const int sk2 = good.add_sketch_entities(folding_profile(Fold::None), SketchPlane::XY(), "Sketch");
+    good.add_extrude(sk2, 69.42, false, BooleanMode::New, "Extrude");
+    REQUIRE(good.recompute());
+    REQUIRE(good.error.empty());
+    REQUIRE(good.bodies.size() == 1);
+    const auto mp = GeometryEngine::mass_properties(good.bodies[0].shape);
+    REQUIRE(mp.is_solid);
+    REQUIRE(mp.volume > 0.0);
+}
+
+TEST_CASE("text feature: its string, font and height survive a save and load", "[CadDocument][recipe]")
+{
+    CadDocument doc;
+    CadFeature f;
+    f.type = CadFeatureType::Sketch;
+    f.name = "Text 1";
+    f.plane = SketchPlane::XY();
+    f.imported_regions = { { { Vec2d(0, 0), Vec2d(4, 0), Vec2d(4, 6), Vec2d(0, 6) } } };
+    f.text_string = "Ab ÷ 12";
+    f.text_font   = "Noto Sans;Bold";
+    f.text_height = 7.5;
+    doc.features.push_back(f);
+    REQUIRE(doc.recompute());
+
+    CadDocument back;
+    REQUIRE(back.deserialize_recipe(doc.serialize_recipe()));
+    REQUIRE(back.features.size() == 1);
+    const CadFeature& g = back.features[0];
+    REQUIRE(g.is_text());
+    REQUIRE(g.text_string == f.text_string);
+    REQUIRE(g.text_font == f.text_font);
+    REQUIRE(g.text_height == f.text_height);
+    REQUIRE(g.imported_regions == f.imported_regions);   // the outline is saved, not re-derived
+}
+
+// Several picked edges dressed by ONE feature: every id is resolved against the same body, so
+// capturing them up-front is correct here (unlike the chain of single-edge features above).
+TEST_CASE("dressup: one fillet on four picked edges equals the Top face group", "[CadDocument][dressup]")
+{
+    const double half = 10.0, h = 10.0, r = 1.0;
+    CadDocument doc = make_centred_box(half, h);
+    REQUIRE(doc.recompute());
+    const double v0 = solid_volume(doc.bodies[0].shape);
+
+    std::vector<int> ids;
+    for (const Vec3d& t : { Vec3d(half, 0.0, h), Vec3d(0.0, half, h), Vec3d(-half, 0.0, h), Vec3d(0.0, -half, h) }) {
+        const int id = edge_near(doc.bodies[0].shape, t, 1.5);
+        REQUIRE(id >= 0);
+        ids.push_back(id);
+    }
+    const int fi = doc.add_fillet(r, ids, "Fillet");
+    REQUIRE(doc.features[fi].dressup_edges == ids);
+    REQUIRE(doc.features[fi].dressup_edge == ids.front());   // what an older build falls back to
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    const double v_list = solid_volume(doc.bodies[0].shape);
+
+    CadDocument ref = make_centred_box(half, h);
+    ref.add_fillet(r, FaceGroup::Top, "Fillet");
+    REQUIRE(ref.recompute());
+    const double v_group = solid_volume(ref.bodies[0].shape);
+
+    INFO("v0=" << v0 << " list=" << v_list << " group=" << v_group);
+    REQUIRE(v_list < v0);
+    REQUIRE(std::abs(v_list - v_group) < 1e-6 * v0);
+
+    SECTION("the list survives a save and load") {
+        const std::string blob = doc.serialize_recipe();
+        CadDocument back;
+        REQUIRE(back.deserialize_recipe(blob));
+        REQUIRE(back.features.size() == doc.features.size());
+        REQUIRE(back.features[fi].dressup_edges == ids);
+        REQUIRE(std::abs(solid_volume(back.bodies[0].shape) - v_list) < 1e-6 * v0);
+    }
+}
+
+TEST_CASE("dressup: one chamfer on two picked edges, a single id still takes the one-edge path", "[CadDocument][dressup]")
+{
+    const double half = 10.0, h = 10.0, d = 0.5;
+    CadDocument doc = make_centred_box(half, h);
+    REQUIRE(doc.recompute());
+    const double v0 = solid_volume(doc.bodies[0].shape);
+    const int a = edge_near(doc.bodies[0].shape, Vec3d(half, 0.0, h), 1.5);
+    const int b = edge_near(doc.bodies[0].shape, Vec3d(-half, 0.0, h), 1.5);
+    REQUIRE(a >= 0);
+    REQUIRE(b >= 0);
+
+    CadDocument one = make_centred_box(half, h);
+    REQUIRE(one.recompute());
+    const int f1 = one.add_chamfer(d, std::vector<int>{ a }, "Chamfer");
+    REQUIRE(one.features[f1].dressup_edges.empty());       // a single pick stays a plain edge feature
+    REQUIRE(one.features[f1].dressup_edge == a);
+    REQUIRE(one.recompute());
+    const double single = v0 - solid_volume(one.bodies[0].shape);
+
+    doc.add_chamfer(d, std::vector<int>{ a, b }, "Chamfer");
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    const double both = v0 - solid_volume(doc.bodies[0].shape);
+    INFO("single=" << single << " both=" << both);
+    REQUIRE(single > 0.0);
+    // Two opposite rim edges share no corner: removing both takes exactly twice one.
+    REQUIRE(std::abs(both - 2.0 * single) < 1e-6 * v0);
+}
+
+TEST_CASE("dressup: an edge list naming a missing edge fails with a reason", "[CadDocument][dressup]")
+{
+    CadDocument doc = make_centred_box(10.0, 10.0);
+    REQUIRE(doc.recompute());
+    const int good = edge_near(doc.bodies[0].shape, Vec3d(10.0, 0.0, 10.0), 1.5);
+    REQUIRE(good >= 0);
+    doc.add_fillet(1.0, std::vector<int>{ good, 9999 }, "Fillet");
+    REQUIRE_FALSE(doc.recompute());
+    REQUIRE_FALSE(doc.error.empty());
+}
+
 // --- Face-drift fingerprint: a FaceAndDirection connector warns when its face index slides ---
 
 TEST_CASE("a connector records its face fingerprint on first recompute", "[CadDocument][mate]")
@@ -8644,7 +8848,9 @@ TEST_CASE("A circular pattern spans its whole angle", "[CadDocument][pattern]")
     CHECK(doc.display_mesh.bounding_box().max.y() > 10.5);
 }
 
-TEST_CASE("Hole standards: inch sizes by either name, with their 82° countersink", "[CadDocument][hole]")
+// ASCII only: CTest passes the name to Catch on the command line, and on Windows a "°" arrives in
+// the ANSI code page, matches no test and fails the run.
+TEST_CASE("Hole standards: inch sizes by either name, with their 82 degree countersink", "[CadDocument][hole]")
 {
     CadDocument doc;
     const int a = doc.add_hole_standard("1/4-20", 2, true, 10, 0, 0, SketchPlane::XY(), "H1");
@@ -8718,4 +8924,120 @@ TEST_CASE("CadDocument: a profile on a body face touches it, one in free space d
     CHECK(doc.body_touching_sketch(in_air) == -1);
     CHECK(doc.body_touching_sketch(-1) == -1);
     CHECK(doc.body_touching_sketch(base + 1) == -1);       // the extrude: not a sketch
+}
+
+TEST_CASE("display edges: every real edge once, no seams, no degenerate apex", "[CadDocument][display]")
+{
+    const auto box = GeometryEngine::display_edges(BRepPrimAPI_MakeBox(10., 20., 30.).Shape(), 0.01);
+    CHECK(box.size() == 12);
+    for (const auto& pl : box) {
+        REQUIRE(pl.size() >= 2);
+        const double len = (pl.back() - pl.front()).norm();
+        CHECK((std::abs(len - 10.) < 1e-6 || std::abs(len - 20.) < 1e-6 || std::abs(len - 30.) < 1e-6));
+    }
+
+    // A cylinder has three edges in OCCT: the two rims and the seam down its side. Only the rims
+    // are drawn, each sampled finely enough to look round and closed.
+    const auto cyl = GeometryEngine::display_edges(BRepPrimAPI_MakeCylinder(5., 8.).Shape(), 0.01);
+    REQUIRE(cyl.size() == 2);
+    for (const auto& pl : cyl) {
+        CHECK(pl.size() > 16);
+        CHECK((pl.front() - pl.back()).norm() < 1e-6);
+        for (const Vec3d& p : pl)
+            CHECK(std::abs(std::hypot(p.x(), p.y()) - 5.) < 0.02);
+    }
+
+    // A cone keeps its base rim; the apex is a degenerate edge and the side has a seam.
+    const auto cone = GeometryEngine::display_edges(BRepPrimAPI_MakeCone(5., 0., 8.).Shape(), 0.01);
+    CHECK(cone.size() == 1);
+}
+
+namespace {
+// A 10 x 20 rectangle standing on the plane X axis between u = 5 and u = 15, and a construction
+// centerline x = 0 from (0,0) to (0,20): the half-profile of a tube, drawn the usual way.
+Slic3r::CadFeature tube_half_profile()
+{
+    using namespace Slic3r;
+    CadFeature sk;
+    sk.type  = CadFeatureType::Sketch;
+    sk.plane = SketchPlane::XY();
+    auto line = [](Vec2d a, Vec2d b, bool c) {
+        SketchEntity e; e.type = SketchEntity::Type::Line; e.p0 = a; e.p1 = b; e.construction = c; return e; };
+    sk.entities = { line({5, 0}, {15, 0}, false), line({15, 0}, {15, 20}, false),
+                    line({15, 20}, {5, 20}, false), line({5, 20}, {5, 0}, false),
+                    line({0, 0}, {0, 20}, true) };
+    return sk;
+}
+} // namespace
+
+TEST_CASE("revolve about a line of the sketch", "[CadDocument][revolve]")
+{
+    using namespace Slic3r;
+
+    SECTION("a construction centerline: the profile sweeps into a tube around it") {
+        CadDocument doc;
+        doc.features.push_back(tube_half_profile());
+        const int r = doc.add_revolve(0, 360.0, 0, false, BooleanMode::New, "Rev");
+        doc.features[r].revolve_axis_entity = 4;
+        REQUIRE(doc.recompute());
+        REQUIRE(doc.error.empty());
+        REQUIRE(doc.bodies.size() == 1);
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(doc.bodies[0].shape, props);
+        CHECK(props.Mass() == Approx(M_PI * (15. * 15. - 5. * 5.) * 20.).epsilon(1e-6));   // 4000 pi
+        Bnd_Box box;
+        BRepBndLib::Add(doc.bodies[0].shape, box);
+        double x0, y0, z0, x1, y1, z1;
+        box.Get(x0, y0, z0, x1, y1, z1);
+        CHECK(y0 == Approx(0.).margin(0.01));       // the axis runs along Y, as drawn
+        CHECK(y1 == Approx(20.).margin(0.01));
+        CHECK(x1 == Approx(15.).margin(0.01));
+    }
+
+    SECTION("an edge of the profile itself: a solid cylinder") {
+        CadDocument doc;
+        doc.features.push_back(tube_half_profile());
+        const int r = doc.add_revolve(0, 360.0, 0, false, BooleanMode::New, "Rev");
+        doc.features[r].revolve_axis_entity = 3;   // the rectangle's left side, u = 5
+        REQUIRE(doc.recompute());
+        REQUIRE(doc.error.empty());
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(doc.bodies[0].shape, props);
+        CHECK(props.Mass() == Approx(M_PI * 10. * 10. * 20.).epsilon(1e-6));
+    }
+
+    SECTION("an axis through the profile is refused with the reason") {
+        CadDocument doc;
+        CadFeature sk = tube_half_profile();
+        sk.entities[4].p0 = Vec2d(10, 0);
+        sk.entities[4].p1 = Vec2d(10, 20);   // straight through the middle of the rectangle
+        doc.features.push_back(sk);
+        const int r = doc.add_revolve(0, 360.0, 0, false, BooleanMode::New, "Rev");
+        doc.features[r].revolve_axis_entity = 4;
+        CHECK_FALSE(doc.recompute());
+        INFO(doc.error);
+        CHECK(doc.error.find("crosses the revolve axis") != std::string::npos);
+    }
+
+    SECTION("an axis index that no longer names a line fails with a reason") {
+        CadDocument doc;
+        doc.features.push_back(tube_half_profile());
+        const int r = doc.add_revolve(0, 360.0, 0, false, BooleanMode::New, "Rev");
+        doc.features[r].revolve_axis_entity = 9;
+        CHECK_FALSE(doc.recompute());
+        CHECK(doc.error.find("axis line") != std::string::npos);
+    }
+
+    SECTION("the axis line survives save and load") {
+        CadDocument doc;
+        doc.features.push_back(tube_half_profile());
+        const int r = doc.add_revolve(0, 270.0, 0, false, BooleanMode::New, "Rev");
+        doc.features[r].revolve_axis_entity = 4;
+        REQUIRE(doc.recompute());
+        CadDocument loaded;
+        REQUIRE(loaded.deserialize_recipe(doc.serialize_recipe()));
+        REQUIRE(loaded.features.size() == 2);
+        CHECK(loaded.features[1].revolve_axis_entity == 4);
+        CHECK(loaded.features[1].revolve_angle == Approx(270.));
+    }
 }
