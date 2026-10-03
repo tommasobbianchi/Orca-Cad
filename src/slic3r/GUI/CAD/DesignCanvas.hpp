@@ -116,7 +116,12 @@ public:
     // consumed loop must be compared against.
     std::vector<std::vector<int>> region_entity_indices_with_holes(const std::vector<SketchEntity>& ents) const;
     void clear_loop_pick();  // drop the click-selected loop highlight (e.g. after extrude)
+    void clear_solid_pick(); // drop the solid pick and its highlight; no callback, no repaint
     void set_loop_pick(int feature, int region);  // adopt a loop pick made before the commit
+    // The picked committed sketch (feature index, -1 = none) and its closed region (-1 also when
+    // the click hit a stroke on no closed loop). The panel reads the pick here and keeps no copy.
+    int  loop_pick_feature() const;
+    int  loop_pick_region() const;
     void set_escalate_on_repick(bool on);         // off while a card has armed a face/edge pick
     // Solid whole/face/edge selection: point the tool at the bodies + concatenated
     // tessellation (with per-triangle face & body ids), and a callback fired on each
@@ -304,8 +309,8 @@ public:
     bool sketch_disarm_tool();       // CadLevel::Tool    — armed sketch tool falls back to Select
     bool sketch_confirm_pending();   // Enter — apply a ready edit-op or transform
     bool drawing_in_progress() const;// clicks or picks are down but nothing is committed yet
-    bool has_any_selection() const;  // model pick or sketch pick
-    bool clear_any_selection();      // CadLevel::Idle — drop both; true if anything was dropped
+    bool has_any_selection() const;  // model pick, committed-loop pick or sketch pick
+    bool clear_any_selection();      // CadLevel::Idle — drop all three; true if anything was dropped
     bool sketch_first_selected_type(SketchEntity::Type& out) const;
     // Live sketch session (Fase 4.2 live constraint path): the panel reads the in-session
     // selection and entities, and commits a planned constraint through the tool's

@@ -251,6 +251,8 @@ public:
     // sketch there is nothing left that would set this — and selected_loop_entities(), which is
     // what Extrude consumes, reads exactly these two fields.
     void set_display_pick(int feature, int region) { m_display_pick = feature; m_display_pick_region = region; }
+    int  display_pick() const { return m_display_pick; }
+    int  display_pick_region() const { return m_display_pick_region; }
 
     // Visual Extrude gizmo (C5b). The Extrude tool is a DesignPanel docked card, so the
     // sketch tool is NOT active during it; the panel feeds the profile plane + a 2D centroid

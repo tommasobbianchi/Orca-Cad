@@ -667,7 +667,8 @@ DesignPanel::DesignPanel(wxWindow* parent)
                 // Onshape push/pull: an explicitly picked solid face (Face-level cycle, no loop
                 // selected) is extruded as the profile — this takes priority over re-extruding an
                 // already-consumed sketch (resolve_extrude_sketch always returns the last Sketch).
-                if (m_sel_solid_face >= 0 && !m_doc.body.IsNull() && m_sel_sketch_region < 0) {
+                if (m_sel_solid_face >= 0 && !m_doc.body.IsNull()
+                    && (m_viewport == nullptr || m_viewport->loop_pick_region() < 0)) {
                     m_extrude_face_src   = m_sel_solid_face;
                     m_extrude_sketch_ref = -1;
                     open_tool(Tool::Extrude);
@@ -3594,8 +3595,6 @@ DesignPanel::DesignPanel(wxWindow* parent)
         open_tool(Tool::Extrude);
         // AFTER open_tool, not before: opening the tool re-derives the selection state, so a
         // region recorded ahead of it is wiped before Extrude ever reads it.
-        m_sel_sketch_feat   = m_extrude_sketch_ref;
-        m_sel_sketch_region = region;
         m_sel_solid_face = m_sel_solid_edge = -1;
         m_pick_face = m_pick_face_body = -1;
         m_viewport->set_loop_pick(m_extrude_sketch_ref, region);
@@ -3604,11 +3603,9 @@ DesignPanel::DesignPanel(wxWindow* parent)
 
     // Clicking a committed sketch loop on the plate (no live session) selects THAT loop:
     // the viewport highlights only it (cyan) and its Sketch feature's tree row is selected.
-    // The (feature, region) pair is remembered so Extrude builds just that one loop.
+    // The viewport keeps the (feature, region) pair so Extrude builds just that one loop.
     m_viewport->set_on_display_sketch_selected([this](int feat, int region, int entity) {
         if (feat < 0 || feat >= int(m_doc.features.size())) return;
-        m_sel_sketch_feat   = feat;
-        m_sel_sketch_region = region;
         // Last pick wins (symmetric with the solid-pick handler): selecting a sketch loop drops
         // any stale solid face/edge pick so Extrude treats this loop as the profile.
         m_sel_solid_face = m_sel_solid_edge = -1;
@@ -3694,12 +3691,9 @@ DesignPanel::DesignPanel(wxWindow* parent)
         // but the user pointed AT a face and a sketch should be able to use it. 3a2.
         m_pick_face_body = (level >= 1) ? body : -1;
         m_pick_face      = (level >= 1) ? face : -1;
-        // Last pick wins: selecting a solid drops any stale committed-sketch loop selection.
-        // Otherwise a leftover loop keeps `m_sel_sketch_region >= 0`, which blocks the face
-        // push/pull branch in Extrude (`m_sel_solid_face >= 0 && m_sel_sketch_region < 0`) and
-        // makes Extrude build a DETACHED new body from the last sketch instead of push/pulling
-        // the face the user just clicked.
-        if (level >= 1) { m_sel_sketch_region = -1; m_sel_sketch_feat = -1; }
+        // Last pick wins: a leftover loop pick would block Extrude's face push/pull branch, so
+        // Extrude would extrude a sketch instead of push/pulling the clicked face.
+        if (level >= 1) m_viewport->clear_loop_pick();
         // Say what got picked. Without this the ONLY feedback is the viewport highlight, so a
         // pick that registers but draws faintly is indistinguishable from one that never
         // happened — which is precisely how this failure was reported and why it resisted
@@ -4431,6 +4425,10 @@ void DesignPanel::set_ui_mode(UiMode m)
 {
     m_ui_mode = m;
     if (m != UiMode::Sketch) m_sketch_on.clear();   // no stale "on the picked face" on the next hint
+    // A committed loop picked before the session means nothing to the sketch map, but it would
+    // still count as a selection and swallow the first Esc. The double-click that opens a sketch
+    // for editing makes one with its first click.
+    if (m == UiMode::Sketch && m_viewport != nullptr) m_viewport->clear_loop_pick();
     // The DoF readout describes a SKETCH's constraint state, so it means nothing back in Feature
     // mode — where it nonetheless stayed on screen after every Confirm, Cancel and Escape
     // (752). Cleared here rather than at those three exits because this is the one place
@@ -5167,9 +5165,9 @@ void DesignPanel::on_add_sketch()
 bool DesignPanel::extrude_uses_loop() const
 {
     return m_viewport != nullptr
-        && m_sel_sketch_region >= 0
+        && m_viewport->loop_pick_region() >= 0
         && m_extrude_sketch_ref >= 0
-        && m_extrude_sketch_ref == m_sel_sketch_feat
+        && m_extrude_sketch_ref == m_viewport->loop_pick_feature()
         && m_extrude_sketch_ref < int(m_doc.features.size())
         && !m_viewport->selected_loop_entities().empty();
 }
@@ -5196,13 +5194,12 @@ void DesignPanel::on_add_extrude()
         // other loops intact and still selectable.
         if (::getenv("ORCA_CAD_PICK_TRACE"))
             std::fprintf(stderr, "[pick] on_add_extrude: feat=%d reg=%d ents=%zu\n",
-                         m_extrude_sketch_ref, m_sel_sketch_region,
+                         m_extrude_sketch_ref, m_viewport->loop_pick_region(),
                          m_viewport->selected_loop_entities().size());
         idx = m_doc.add_extrude_entities(m_viewport->selected_loop_entities(),
                                          m_doc.features[m_extrude_sketch_ref].plane,
                                          m_distance->GetValue(), false, mode, name);
-        m_sel_sketch_region = -1;        // consume the loop selection
-        m_viewport->clear_loop_pick();   // drop the now-stale loop highlight
+        m_viewport->clear_loop_pick();   // consume the loop selection
     } else {
         idx = m_doc.add_extrude(m_extrude_sketch_ref, m_distance->GetValue(), false, mode, name);
     }
@@ -6205,7 +6202,12 @@ int DesignPanel::offer_selection_kind() const
                                                             m_sel_solid_face);
         return int(GeometryEngine::cylinder_of_face(f).ok ? OfferSel::FaceCyl : OfferSel::FaceOther);
     }
-    if (m_sel_sketch_region >= 0)
+    // Validated like the body index above: a loop pick that names no sketch, or no closed region
+    // of one, must not title the menu "Sketch profile" and grey Create, which is what a stale one
+    // did over an empty document.
+    if (const int lf = m_viewport ? m_viewport->loop_pick_feature() : -1;
+        lf >= 0 && lf < int(m_doc.features.size()) && m_doc.features[lf].type == CadFeatureType::Sketch
+        && m_viewport->loop_pick_region() >= 0)
         return int(OfferSel::SkLoop);
     if (m_sel_solid_body >= 0 && m_sel_solid_body < nb)
         return int(CadDocument::is_sheet_shape(m_doc.bodies[m_sel_solid_body].shape)
@@ -7407,6 +7409,7 @@ void DesignPanel::load_recipe(const std::string& blob)
         return;
     }
     m_feature_counter = int(m_doc.features.size());
+    drop_selection();
     feed_bodies();    // push the restored bodies into the viewport
     refresh_tree();   // rebuild the feature tree from the restored recipe
     set_status_ok();
@@ -7794,14 +7797,52 @@ void DesignPanel::set_tree_selection(int row)
         m_tree->SelectItem(m_tree_items[row]);
 }
 
+// The selection (the solid pick, the hit face and the committed-loop pick) names bodies, faces and
+// features by index, so replacing or renumbering the feature list (undo/redo, New Design, load,
+// delete, reorder) drops it, the viewport's highlights with it. The solid highlight too: a rebuild
+// that leaves no body never reaches set_solid_pick. The callers repaint.
+void DesignPanel::drop_selection()
+{
+    m_sel_solid_body = m_sel_solid_face = m_sel_solid_edge = -1;
+    m_sel_solid_edges.clear();
+    m_sel_solid_vertex = false;
+    m_pick_face = m_pick_face_body = -1;
+    if (m_viewport != nullptr) {
+        m_viewport->clear_loop_pick();
+        m_viewport->clear_solid_pick();
+    }
+}
+
+// The shared front of delete and reorder, which renumber the feature list. A sketch or constrain
+// session, the Text dialog, an Insert placement and the standalone move gizmo can each hold a
+// feature or body index (m_edit_index, m_constrain_feat, m_text_feat, m_insert_feat, m_move_body)
+// that a renumber would point at something else, so they are refused until Finish or Cancel; Undo
+// and mcp_busy() refuse most of the same states. An open feature card is closed instead,
+// discarding its candidate, rather than linger out of step with the tree.
+bool DesignPanel::begin_renumber()
+{
+    if (m_ui_mode != UiMode::Feature || m_text_dlg != nullptr || m_active == Tool::Insert
+        || (m_active == Tool::None && m_viewport != nullptr && m_viewport->moving_body())) {
+        set_status(StatusKind::Info, _L("Finish or cancel what is open first"));
+        return false;
+    }
+    if (m_active != Tool::None || m_edit_index >= 0) cancel_tool();
+    m_doc.checkpoint();   // undo boundary
+    drop_selection();
+    return true;
+}
+
 void DesignPanel::after_tree_edit(bool ok)
 {
     update_undo_redo_buttons();
     refresh_tree();
     refresh_variables();
     if (!ok) {
-        // The edit was rolled back (recompute failed); the body is unchanged.
+        // The edit was refused or rolled back; the body is unchanged. Repaint anyway: picks the
+        // caller dropped before trying it are still drawn, and set_status() repaints only when
+        // its text changes.
         set_status(StatusKind::Error, wxString::Format(_L("Edit rejected: %s"), kernel_error_text(m_doc.error)));
+        if (m_viewport != nullptr) m_viewport->request_repaint();
         return;
     }
     sync_recipe_to_model();   // deletes, reorders and suppressions change the document too
@@ -7847,6 +7888,7 @@ void DesignPanel::clear_document()
     m_doc.clear();                 // features + bodies + meshes + history
     m_doc.auto_close_loops = wxGetApp().is_auto_close_sketch_loops();   // a new design: today's preference
     Slic3r::set_sketch_auto_close(m_doc.auto_close_loops);
+    drop_selection();
     m_edit_index = -1;
     m_move_body  = -1;
     show_move_card(false);
@@ -7880,15 +7922,7 @@ void DesignPanel::on_delete_body()
     const std::string& raw = m_doc.features[src].name;
     const wxString fname = raw.empty() ? wxString::Format(_L("feature %d"), src + 1)
                                        : wxString::FromUTF8(raw);
-    // A card left open over a feature that is about to vanish goes stale — same reason
-    // on_delete_feature() closes it.
-    if (m_active != Tool::None || m_edit_index >= 0) {
-        reset_edit_state();
-        close_tool();
-    }
-    m_doc.checkpoint();   // undo boundary: deleting a body's feature
-    m_sel_solid_body = m_sel_solid_face = m_sel_solid_edge = -1;   // the selection is about to
-    m_sel_solid_vertex = false;                                    // name a body that is gone
+    if (!begin_renumber()) return;
     const bool ok = m_doc.remove_feature(src);
     after_tree_edit(ok);
     if (ok)
@@ -7908,14 +7942,7 @@ void DesignPanel::on_delete_feature()
         set_status(StatusKind::Info, _L("Select a feature in the tree first"));
         return;
     }
-    // If a feature dialog is open (e.g. the feature is being edited), dismiss it first —
-    // otherwise the deleted feature's settings card lingers in the left panel, out of sync
-    // with the tree. reset_edit_state() drops the stale m_edit_index; close_tool() hides the card.
-    if (m_active != Tool::None || m_edit_index >= 0) {
-        reset_edit_state();
-        close_tool();
-    }
-    m_doc.checkpoint();   // undo boundary: deleting a feature
+    if (!begin_renumber()) return;
     after_tree_edit(m_doc.remove_feature(sel));
 }
 
@@ -7982,7 +8009,7 @@ void DesignPanel::on_move_feature(int delta)
     int target = sel + delta;
     if (target < 0 || target >= int(m_doc.features.size()))
         return; // already at the end
-    m_doc.checkpoint();   // undo boundary: reordering a feature
+    if (!begin_renumber()) return;
     if (m_doc.move_feature(sel, delta)) {
         after_tree_edit(true);
         set_tree_selection(target); // keep the moved feature selected
@@ -8018,9 +8045,8 @@ void DesignPanel::on_begin_constrain(int sel_override)
     // this verb from a SkLoop selection (a region clicked on screen), which carries no tree
     // selection — without this, choosing "Constrain sketch" from the offer would answer
     // "Select a sketch in the tree first" about a sketch the user has visibly selected.
-    if ((sel == wxNOT_FOUND || sel >= int(m_doc.features.size())) && m_sel_sketch_feat >= 0
-        && m_sel_sketch_feat < int(m_doc.features.size())) {
-        sel = m_sel_sketch_feat;
+    if (sel == wxNOT_FOUND || sel >= int(m_doc.features.size())) {
+        sel = m_viewport ? m_viewport->loop_pick_feature() : wxNOT_FOUND;   // range-checked below
         set_tree_selection(sel);       // keep the tree in step with what the viewport says
     }
     if (sel == wxNOT_FOUND || sel >= int(m_doc.features.size())) {
@@ -10951,7 +10977,8 @@ void DesignPanel::refresh_preview()
         default:             ready = _L("Sketch ready");    break;
         }
         set_status(StatusKind::Ok, ready);
-        for (::Button* b : m_confirm_btns) if (b) b->Enable(true);
+        m_candidate_ok = true;
+        update_confirm_button();
         m_status->Refresh();
         update_datum_gizmo();   // Plane card: show/refresh the in-canvas resize handles
         update_helix_gizmo();   // Helix card: draw the live curve + drag handles (no solid ghost)
@@ -10994,7 +11021,8 @@ void DesignPanel::refresh_preview()
                 set_status(StatusKind::Error, wxString::Format(_L("Invalid: %s"), kernel_error_text(err)));
             }
         }
-        for (::Button* b : m_confirm_btns) if (b) b->Enable(ok);
+        m_candidate_ok = ok;
+        update_confirm_button();
         m_status->Refresh();
         return;
     }
@@ -11040,8 +11068,8 @@ void DesignPanel::refresh_preview()
     }
     // Onshape parity: a broken candidate cannot be committed. Grey the active dialog's
     // Confirm so the user sees the gate before clicking; the red status says why.
-    for (::Button* b : m_confirm_btns)
-        if (b != nullptr) b->Enable(ok);
+    m_candidate_ok = ok;
+    update_confirm_button();
     // Fillet/Chamfer/Draft: once the target edge/face yields a valid result, show ONLY the
     // preview (hide the base bodies) so the user sees the finished shape, not the old solid
     // doubled with the ghost. Before a valid pick the body stays visible so it can be picked.
@@ -11138,6 +11166,7 @@ void DesignPanel::push_polygon_params()
 void DesignPanel::open_tool(Tool t)
 {
     m_active = t;
+    m_candidate_ok = true;   // a fresh card is confirmable until its preview says otherwise
     // Fillet/Chamfer/Draft no longer fade the body see-through; instead, once a valid target
     // is picked, refresh_preview hides the base bodies entirely (preview-only). Keep it opaque
     // here so the body is fully visible for picking the edge/face.
@@ -11640,11 +11669,14 @@ bool DesignPanel::confirm_enabled() const
         return (m_viewport && m_viewport->moving_body())
                || m_ui_mode == UiMode::Sketch || m_ui_mode == UiMode::Constrain;
     if (m_active == Tool::Insert) return true;
+    return m_candidate_ok;
+}
+
+void DesignPanel::update_confirm_button()
+{
+    const bool ok = confirm_enabled();
     for (::Button* b : m_confirm_btns)
-        if (b != nullptr && b->IsShownOnScreen()) return b->IsEnabled();
-    for (::Button* b : m_confirm_btns)
-        if (b != nullptr) return b->IsEnabled();
-    return true;
+        if (b != nullptr) b->Enable(ok);
 }
 
 // Which level of the interaction stack one Esc press belongs to. The rule itself lives in
@@ -11712,8 +11744,6 @@ void DesignPanel::escape()
         // both of which say which one they are, and never through a key pressed on the way out of
         // something else.
         if (m_viewport && m_viewport->clear_any_selection()) {
-            m_sel_sketch_region = -1;
-            m_sel_sketch_feat   = -1;
             set_status(StatusKind::Info, wxString());
             return;
         }
@@ -11750,6 +11780,7 @@ void DesignPanel::update_undo_redo_buttons()
 void DesignPanel::update_action_bar()
 {
     update_undo_redo_buttons();   // mode/tool changes flip the do_undo_redo gate -> refresh greying
+    update_confirm_button();      // ...and the ✓'s greying
     if (m_tb_action == nullptr || m_toolbar == nullptr) return;
     wxSizer* s = m_toolbar->GetSizer();
     if (s == nullptr) return;
@@ -11801,10 +11832,9 @@ void DesignPanel::do_undo_redo(bool redo)
         set_status(StatusKind::Info, redo ? _L("Nothing to redo") : _L("Nothing to undo"));
         return;
     }
-    // The solid whole/face/edge pick and any in-place edit reference ids that recompute()
-    // invalidates — drop them before refreshing from the restored document.
-    m_sel_solid_body = m_sel_solid_face = m_sel_solid_edge = -1;
-    m_pick_face = m_pick_face_body = -1;   // recompute() invalidated the face ids too
+    // The picks and any in-place edit reference ids that recompute() invalidates — drop them
+    // before refreshing from the restored document.
+    drop_selection();
     reset_edit_state();
     after_tree_edit(true);   // refresh tree + viewport meshes + status from the restored doc
     set_status(StatusKind::Info, wxString::Format(redo ? _L("Redo  (%zu more)") : _L("Undo  (%zu more)"),

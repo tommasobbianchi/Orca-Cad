@@ -130,9 +130,10 @@ private:
     // used to be handled in four places that could not see each other, and that is how two
     // presses in a row reached past a tool and discarded the sketch under it.
     CadLevel escape_level() const;
-    bool confirm_enabled() const;   // would the ✓ act right now (and is it not greyed)?
+    bool confirm_enabled() const;   // would the ✓ act right now? (its greying follows this)
     void     escape();
     void update_action_bar();   // show the ✓/✗ bar iff a tool or mode is active
+    void update_confirm_button();   // grey the ✓ to confirm_enabled()
 
     void on_shape_changed();
     void on_add_sketch();
@@ -284,6 +285,8 @@ private:
     void after_edit_op();                                                // shared edit-op refresh tail
     void on_edit_feature();            // reopen the selected feature's dialog populated
     void after_tree_edit(bool ok);     // shared post-op refresh of tree/viewport/status
+    void drop_selection();             // forget the selection (solid, hit face, sketch loop): the feature list was replaced or renumbered
+    bool begin_renumber();             // before delete/reorder: refuse while an index is held, else close the card, checkpoint, drop picks
     void load_feature_into_dialog(const CadFeature& f);
     void reset_edit_state();           // back to add-mode (m_edit_index = -1)
 
@@ -750,10 +753,6 @@ private:
     int m_pl_edgeA_body{-1}, m_pl_edgeA{-1};
     int m_pl_edgeB_body{-1}, m_pl_edgeB{-1};
     PlanePick m_plane_pick{PlanePick::None};         // which ref the next solid pick fills
-    // Plate loop selection (click a committed sketch loop): the Sketch feature + the
-    // clicked closed-region index, so Extrude builds just that one loop. -1 = none.
-    int               m_sel_sketch_feat{-1};
-    int               m_sel_sketch_region{-1};
     // Click-selected solid topology (whole/face/edge cycle): face id for up-to-face / dress-up.
     int               m_sel_solid_body{-1};   // which body the face/edge selection is on
     int               m_sel_solid_face{-1};
@@ -966,6 +965,9 @@ private:
     int               m_feature_counter{0};
 
     std::vector<::Button*> m_confirm_btns;
+    // refresh_preview's verdict on the open card's candidate (open_tool resets it). Kept here, not
+    // read back from the ✓, which every card and mode shares; the ✓ is greyed from confirm_enabled().
+    bool                   m_candidate_ok{true};
 
     // Edit-in-place state: add-mode is m_edit_index == -1. Single-feature edit
     // (Sketch or Extrude independently) uses only m_edit_index as the row to replace.

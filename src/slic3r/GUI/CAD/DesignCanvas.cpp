@@ -660,10 +660,25 @@ void DesignCanvas::clear_loop_pick()
     m_sketch_tool.clear_display_pick();
 }
 
+void DesignCanvas::clear_solid_pick()
+{
+    m_sketch_tool.clear_solid_selection();
+}
+
 void DesignCanvas::set_loop_pick(int feature, int region)
 {
     m_sketch_tool.set_display_pick(feature, region);
     request_repaint();
+}
+
+int DesignCanvas::loop_pick_feature() const
+{
+    return m_sketch_tool.display_pick();
+}
+
+int DesignCanvas::loop_pick_region() const
+{
+    return m_sketch_tool.display_pick_region();
 }
 
 void DesignCanvas::set_escalate_on_repick(bool on)
@@ -1453,18 +1468,20 @@ bool DesignCanvas::drawing_in_progress() const
 
 bool DesignCanvas::has_any_selection() const
 {
-    return m_sketch_tool.has_solid_selection() || m_sketch_tool.sketch_has_selection();
+    return m_sketch_tool.has_solid_selection() || m_sketch_tool.sketch_has_selection()
+        || m_sketch_tool.display_pick() >= 0;
 }
 
 bool DesignCanvas::clear_any_selection()
 {
     if (!has_any_selection()) return false;
-    // Both, unconditionally: which of the two is live depends on the mode, and Esc at idle means
-    // "nothing is picked" in either of them. clear_selection() reports through the tool's own
+    // All three, unconditionally: which is live depends on the mode, and Esc at idle means
+    // "nothing is picked" in any of them. clear_selection() reports through the tool's own
     // on_selection_changed; the solid side has no such notification, so the panel refreshes what
     // depends on it (see DesignPanel::escape).
     m_sketch_tool.clear_selection();
     m_sketch_tool.clear_solid_selection();
+    m_sketch_tool.clear_display_pick();
     // clear_solid_selection() is silent by design (recomputes call it while ids are invalid), but
     // the panel mirrors the pick to aim Extrude and the dress-up tools. An Esc that cleared the
     // highlight without telling the panel would leave those aimed at a body nothing points to.
