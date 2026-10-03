@@ -7,7 +7,7 @@
 #include "libslic3r/Color.hpp"
 
 #include <imgui/imgui.h>
-#include <imgui/imgui_internal.h>   // BringWindowToDisplayFront / GetCurrentWindow
+#include <imgui/imgui_internal.h>   // FindWindowByName / BringWindowToDisplayFront
 
 #include <cstdio>
 #include <cstdlib>
@@ -18,6 +18,8 @@ namespace Slic3r {
 namespace GUI {
 
 namespace {
+
+const char* const kWindowName = "##sketchvalue";
 
 // Numbers are typed and shown with a POINT, whatever the locale: this field feeds a CAD kernel,
 // and a decimal comma reaching it as a thousands separator is a silent order-of-magnitude error.
@@ -181,10 +183,9 @@ bool SketchInlineEditor::render(ImGuiWrapper& imgui, float scale)
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 3.0f);
     // NoInputs is what every other sketch overlay sets and is exactly what this one must not:
     // it is the only overlay in the tab that the user types into.
-    imgui.begin(std::string("##sketchvalue"),
+    imgui.begin(std::string(kWindowName),
                 ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDecoration
                     | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
-    ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
 
     if (!m_title.empty() || !m_err.empty()) {
         if (m_err.empty()) {
@@ -241,6 +242,14 @@ bool SketchInlineEditor::render(ImGuiWrapper& imgui, float scale)
     else if (ImGui::IsKeyPressed(ImGui::GetKeyIndex(ImGuiKey_Escape)))
         do_cancel();
     return true;
+}
+
+void SketchInlineEditor::bring_to_front()
+{
+    // Not gated on m_open: a commit closes the field after it was drawn, and that frame still
+    // shows it. A window that did not Begin this frame is not rendered, so lifting it is inert.
+    if (ImGuiWindow* w = ImGui::FindWindowByName(kWindowName))
+        ImGui::BringWindowToDisplayFront(w);
 }
 
 }} // namespace Slic3r::GUI

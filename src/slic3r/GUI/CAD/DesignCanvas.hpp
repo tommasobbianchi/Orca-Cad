@@ -9,6 +9,7 @@
 
 #include "slic3r/GUI/3DBed.hpp"
 #include "slic3r/GUI/Camera.hpp"
+#include "slic3r/GUI/GLToolbar.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/CAD/SketchEngine.hpp"
 #include "slic3r/GUI/CAD/DesignSketchTool.hpp"
@@ -79,6 +80,10 @@ public:
     void unbind_canvas_event_handlers();   // app close / language switch, from the plater's teardown
     void reset_canvas_volumes();
     void set_show_bed(bool b);   // view option: draw the printer bed + plate grid, or not
+    // The sidebar's collapse button, as Prepare's: drawn on the edge `side` reports, it runs
+    // `toggle` on a click and on Shift+Tab. Set before the first paint.
+    void set_sidebar_collapse(std::function<CollapseSide()> side, std::function<void()> toggle);
+    void set_sidebar_collapse_tooltip(const std::string& tooltip);
     // N: look straight down the sketch plane's normal, keeping the current zoom. A sketch drawn
     // at an angle is a sketch drawn wrong, and no amount of orbiting by hand lands exactly square.
     bool view_normal_to_sketch();
@@ -360,6 +365,7 @@ private:
     wxGLCanvas* m_canvas_widget{nullptr};
     GLCanvas3D* m_canvas{nullptr};
     int         m_sw_gl{-1};   // -1 unknown, 0 hardware GL, 1 software GL
+    GLToolbar   m_collapse_toolbar{GLToolbar::Normal, "Collapse"};
 
     std::function<void(const wxPoint&)> m_on_context_menu;
     bool        m_ctx_bound{false};   // bind the RIGHT_UP handler once, however often the cb is set

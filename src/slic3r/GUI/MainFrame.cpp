@@ -1126,6 +1126,10 @@ void MainFrame::shutdown()
     if (m_project != nullptr)
         m_project->shutdown();
     m_plugin_pages.shutdown();
+#ifdef SLIC3R_CAD
+    if (m_design_panel != nullptr)
+        m_design_panel->shutdown();
+#endif
 #ifdef __WXGTK__
     // Edge panels are child windows — wxWidgets destroys them automatically.
     m_edge_bottom = nullptr;
@@ -1269,9 +1273,15 @@ DesignPanel* MainFrame::ensure_design_panel()
 {
     if (m_design_panel == nullptr && m_design_page != nullptr) {
         wxBusyCursor busy;
+        // Built into a hidden page: on MSW every control created or moved inside a shown window
+        // re-clips and repaints its shown siblings, so building the panel into the page the
+        // notebook has just shown took seconds.
+        const bool page_shown = m_design_page->IsShown();
+        if (page_shown) m_design_page->Hide();
         m_design_panel = new DesignPanel(m_design_page);
         m_design_page->GetSizer()->Add(m_design_panel, 1, wxEXPAND);
         m_design_page->Layout();
+        if (page_shown) m_design_page->Show();
     }
     return m_design_panel;
 }
@@ -3333,8 +3343,19 @@ void MainFrame::init_menubar_as_editor()
 
         append_menu_item(
             viewMenu, wxID_ANY, _L("Reset Window Layout"), _L("Reset to default window layout"),
-            [this](wxCommandEvent&) { m_plater->reset_window_layout(); }, "", this,
+            [this](wxCommandEvent&) {
+                m_plater->reset_window_layout();
+#ifdef SLIC3R_CAD
+                // The Design tab docks its own sidebar.
+                if (m_design_panel != nullptr)
+                    m_design_panel->reset_window_layout();
+#endif
+            }, "", this,
             [this]() {
+#ifdef SLIC3R_CAD
+                if (shown_design_panel() != nullptr)
+                    return true;
+#endif
                 return is_prepare_or_preview_tab() && m_plater->is_sidebar_enabled();
             },
             this);

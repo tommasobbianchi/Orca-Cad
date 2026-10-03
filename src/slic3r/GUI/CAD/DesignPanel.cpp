@@ -318,10 +318,12 @@ DesignPanel::DesignPanel(wxWindow* parent)
     // Left column: a slim feature-tree + docked tool-dialog column. All form
     // controls are parented to m_form so it can scroll independently of the
     // live GL viewport. The tool buttons live in the top toolbar (built below).
-    m_form = new wxScrolledWindow(this, wxID_ANY);
+    auto* body_panel = new wxPanel(this, wxID_ANY);   // below the toolbar, managed by m_aui
+    m_form = new wxScrolledWindow(body_panel, wxID_ANY);
     // Explicit token background in both themes, so a theme switch can move it (an inherited
     // colour stays whatever the theme was when the panel was built).
     SetBackgroundColour(dp_panel_bg());
+    body_panel->SetBackgroundColour(dp_panel_bg());
     m_form->SetBackgroundColour(dp_panel_bg());
 
     auto* root = new wxBoxSizer(wxVERTICAL);
@@ -3482,7 +3484,9 @@ DesignPanel::DesignPanel(wxWindow* parent)
     build_phase("sidebar and tool cards");
     // Right column: a small view toolbar over the live 3D viewport that mirrors
     // the CadDocument body.
-    m_viewport = new DesignCanvas(this);
+    auto* view_col = new wxPanel(body_panel, wxID_ANY);   // the centre pane: sketch banner over the viewport
+    view_col->SetBackgroundColour(dp_panel_bg());
+    m_viewport = new DesignCanvas(view_col);
     build_phase("3D canvas");
 
     m_viewport->set_on_sketch_commit([this](const SketchProfile& prof, const SketchPlane& plane) {
@@ -4300,7 +4304,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
     // The sketch banner sits ABOVE the viewport rather than floating inside it: a child window
     // over a wxGLCanvas is a platform argument (it is a native window on GTK and does not
     // reliably stack over GL), and the banner's job is to be unmissable, not to be clever.
-    m_sketch_banner = new wxPanel(this, wxID_ANY);
+    m_sketch_banner = new wxPanel(view_col, wxID_ANY);
     m_sketch_banner->SetBackgroundColour(wxColour(0, 122, 116));   // Orca teal: not a plate colour
     m_sketch_banner_txt = new wxStaticText(m_sketch_banner, wxID_ANY, wxString());
     m_sketch_banner_txt->SetForegroundColour(*wxWHITE);
@@ -4317,16 +4321,33 @@ DesignPanel::DesignPanel(wxWindow* parent)
     // The bottom 3D-navigator orb handles all view orientation, so no separate view buttons.
     // Fit view is a double-click on the viewport (the tool intercepts it -> zoom_to_volumes).
     vcol->Add(m_viewport, 1, wxEXPAND);
+    view_col->SetSizer(vcol);
 
-    // Onshape layout: top toolbar over [ slim left column | center viewport ].
-    auto* body = new wxBoxSizer(wxHORIZONTAL);
-    body->Add(m_form, 0, wxEXPAND);
-    body->Add(vcol,   1, wxEXPAND);
+    // Onshape layout: top toolbar over [ slim left column | center viewport ], with the column
+    // docked like Prepare's sidebar: left by default, movable to the right or floating, resizable
+    // and collapsible.
+    m_aui.init(body_panel);
+    m_aui.AddPane(m_form, AuiMgr::sidebar_pane_info().MinSize(m_form->GetMinSize()));
+    m_aui.AddPane(view_col, wxAuiPaneInfo().Name("main").CenterPane().PaneBorder(false));
+    m_default_layout = m_aui.SavePerspective();
+    load_window_layout();
+    m_aui.track_docked_size(m_form);
+    // The collapse button sits on the canvas edge the sidebar is docked on, and is gone while it
+    // floats. A click arrives inside the canvas's mouse handler, so the relayout waits for it.
+    m_viewport->set_sidebar_collapse(
+        [this] {
+            const wxAuiPaneInfo& sidebar = m_aui.GetPane(m_form);
+            if (!sidebar.IsOk() || sidebar.IsFloating())
+                return CollapseSide::None;
+            return sidebar.dock_direction == wxAUI_DOCK_RIGHT ? CollapseSide::Right : CollapseSide::Left;
+        },
+        [this] { CallAfter([this] { collapse_sidebar(!m_sidebar_collapsed); }); });
+    collapse_sidebar(m_sidebar_collapsed);   // the button's tooltip
 
     auto* outer = new wxBoxSizer(wxVERTICAL);
     outer->Add(m_toolbar, 0, wxEXPAND);
     outer->Add(new wxStaticLine(this, wxID_ANY), 0, wxEXPAND);
-    outer->Add(body, 1, wxEXPAND);
+    outer->Add(body_panel, 1, wxEXPAND);
     SetSizer(outer);
 
     // The atlas says a verb is wired; the registrations above say what it runs. Nothing checks
@@ -7176,6 +7197,7 @@ void DesignPanel::on_tab_hidden()
 {
     if (m_viewport)
         m_viewport->leave_viewport();   // hand the shared camera back to the editor tabs
+    update_sidebar_pane();
 }
 
 void DesignPanel::on_tab_shown()
@@ -7193,7 +7215,8 @@ void DesignPanel::on_tab_shown()
     update_reference_planes();   // entering the Design tab: show the XY/XZ/YZ planes if no object yet
     if (show_clock.Time() > 100)   // a slow first show is what users report; the usual one is not news
         BOOST_LOG_TRIVIAL(info) << "Design tab shown: bed, project recipe and planes in " << show_clock.Time() << " ms";
-    sync_sidebar_width();        // keep the panel as wide as Prepare's so the canvas edge doesn't jump
+    m_laid_out = true;
+    update_sidebar_pane();
     if (m_viewport) m_viewport->force_repaint();   // the page was just re-shown: paint it for real
 }
 
@@ -7228,6 +7251,7 @@ void DesignPanel::msw_rescale()
 
 void DesignPanel::on_sys_color_changed()
 {
+    m_aui.apply_color_mode();
     // Every chrome colour here was set from a DpToken in the theme that was current at the time.
     // Move each one, background and text, onto the same token in the new theme; any other colour
     // (the teal accents, the status colours) is the same in both and stays.
@@ -7286,19 +7310,85 @@ void DesignPanel::reset_canvas_volumes()
     if (m_viewport) m_viewport->reset_canvas_volumes();
 }
 
-// Match Prepare's sidebar width instead of hardcoding one. Design used a fixed 264 px against
-// Prepare's ~467, so the canvas edge jumped sideways on every tab switch; reading the live width
-// also means the two stay aligned if Orca ever changes its sidebar.
-void DesignPanel::sync_sidebar_width()
+void DesignPanel::shutdown()
 {
-    if (m_form == nullptr) return;
-    Plater* pl = wxGetApp().plater();
-    if (pl == nullptr) return;
-    const int w = pl->sidebar().GetSize().GetWidth();
-    if (w < 200) return;                       // sidebar not laid out yet — keep what we have
-    if (m_form->GetMinSize().GetWidth() == w) return;
-    m_form->SetMinSize(wxSize(w, -1));
-    Layout();
+    wxAuiPaneInfo& sidebar = m_aui.GetPane(m_form);
+    if (!sidebar.IsOk())   // shut down already, floating: a layout saved now would lack the sidebar
+        return;
+    // Saved hidden only when collapsed, whichever tab is shown.
+    sidebar.Show(!m_sidebar_collapsed);
+    wxGetApp().app_config->set("design_window_layout", m_aui.SavePerspective().utf8_string());
+    // A floating frame is a child of the managed panel and dereferences its manager when it is
+    // deleted, so it must not outlive m_aui, a member. Detaching queues the frame for deletion, which
+    // runs before the main frame destroys its children (~wxTopLevelWindowBase deletes pending child
+    // frames).
+    if (sidebar.IsFloating())
+        m_aui.DetachPane(m_form);
+}
+
+void DesignPanel::reset_window_layout()
+{
+    load_default_layout();
+    collapse_sidebar(false);
+    update_sidebar_pane(true);
+}
+
+// The sidebar where the user left it, collapsed if it was.
+void DesignPanel::load_window_layout()
+{
+    const wxString saved = wxString::FromUTF8(wxGetApp().app_config->get("design_window_layout"));
+    if (saved.empty() || !m_aui.LoadPerspective(saved, false)) {
+        if (!saved.empty())
+            BOOST_LOG_TRIVIAL(warning) << "Design tab: failed to restore the saved window layout";
+        load_default_layout();
+    }
+    wxAuiPaneInfo& sidebar = m_aui.GetPane(m_form);
+    m_sidebar_collapsed = !sidebar.IsShown();
+    if ((m_aui.GetFlags() & wxAUI_MGR_ALLOW_FLOATING) == 0)   // saved where windows can float
+        sidebar.Dock().Floatable(false);
+    update_sidebar_pane(true);
+}
+
+// Docked where Prepare's sidebar is, and as wide, so the canvas edge does not move between the tabs.
+void DesignPanel::load_default_layout()
+{
+    m_aui.LoadPerspective(m_default_layout, false);
+    Plater* plater = wxGetApp().plater();
+    const Sidebar::DockingState prepare = plater != nullptr ? plater->get_sidebar_docking_state() : Sidebar::None;
+    if (prepare == Sidebar::None)
+        return;
+    wxAuiPaneInfo& sidebar = m_aui.GetPane(m_form);
+    if (prepare == Sidebar::Right)
+        sidebar.Right();
+    const int width = plater->sidebar().GetSize().GetWidth();
+    if (width >= sidebar.min_size.GetWidth())   // Prepare's sidebar has been laid out
+        sidebar.BestSize(width, sidebar.best_size.GetHeight());
+}
+
+// The collapse button on the canvas and Shift+Tab, as in Prepare.
+void DesignPanel::collapse_sidebar(bool collapse)
+{
+    m_sidebar_collapsed = collapse;
+    if (m_viewport)
+        m_viewport->set_sidebar_collapse_tooltip(std::string(collapse ? "Expand sidebar" : "Collapse sidebar") +
+                                                 " [Shift+Tab]");
+    update_sidebar_pane();
+}
+
+// The sidebar shows unless collapsed, and not before the tab is first shown: wxAUI caps a new dock at
+// the managed panel's width at that Update() and the dock keeps that size, while the panel is 20 px
+// wide until the page lays it out. A floating one also shows only while the tab is shown, since it is
+// a top-level window and does not hide with the page.
+void DesignPanel::update_sidebar_pane(bool force_update)
+{
+    wxAuiPaneInfo& sidebar = m_aui.GetPane(m_form);
+    const bool     show    = !m_sidebar_collapsed && m_laid_out && (sidebar.IsDocked() || IsShownOnScreen());
+    if (sidebar.IsOk() && sidebar.IsShown() != show) {
+        sidebar.Show(show);
+        force_update = true;
+    }
+    if (force_update)
+        m_aui.Update();
 }
 
 void DesignPanel::load_recipe(const std::string& blob)

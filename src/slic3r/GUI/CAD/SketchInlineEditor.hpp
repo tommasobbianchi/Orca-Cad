@@ -57,6 +57,8 @@ public:
     // Draw it, and let ImGui do the editing. Called from DesignSketchTool::render() inside the
     // frame's ImGui pass; `scale` is the tool's m_render_scale. Returns true if it drew.
     bool render(ImGuiWrapper& imgui, float scale);
+    // Lift the field above every other overlay. Call it after the frame's last overlay is drawn.
+    void bring_to_front();
 
     // Ask for another frame. THE FIELD DOES NOT WORK WITHOUT THIS, and the reason is a deadlock
     // that only a per-frame trace shows:

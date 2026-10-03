@@ -1341,7 +1341,7 @@ void GLCanvas3D::on_change_color_mode(bool is_dark, bool reinit) {
             // set dirty to re-generate icon texture
             m_separator_toolbar.set_icon_dirty();
             m_main_toolbar.set_icon_dirty();
-            wxGetApp().plater()->get_collapse_toolbar().set_icon_dirty();
+            collapse_toolbar().set_icon_dirty();
             m_assemble_view_toolbar.set_icon_dirty();
             m_gizmos.set_icon_dirty();
         }
@@ -1835,6 +1835,12 @@ void GLCanvas3D::enable_collapse_toolbar(bool enable)
     m_collapse_toolbar_enabled = enable;
 }
 
+void GLCanvas3D::set_collapse_toolbar(GLToolbar* toolbar, std::function<CollapseSide()> side)
+{
+    m_collapse_toolbar = toolbar;
+    m_collapse_side    = std::move(side);
+}
+
 void GLCanvas3D::enable_plate_chrome(bool enable)
 {
     m_plate_chrome_enabled = enable;
@@ -1915,24 +1921,33 @@ void GLCanvas3D::update_volumes_colors_by_extruder()
 
 bool GLCanvas3D::is_collapse_toolbar_on_left() const
 {
-    auto state = wxGetApp().plater()->get_sidebar_docking_state();
-    return state == Sidebar::Left;
+    return collapse_side() == CollapseSide::Left;
 }
 
 float GLCanvas3D::get_collapse_toolbar_width() const
 {
-    GLToolbar& collapse_toolbar = wxGetApp().plater()->get_collapse_toolbar();
-    const auto state            = wxGetApp().plater()->get_sidebar_docking_state();
-
-    return state != Sidebar::None ? collapse_toolbar.get_width() : 0;
+    return collapse_side() != CollapseSide::None ? collapse_toolbar().get_width() : 0;
 }
 
 float GLCanvas3D::get_collapse_toolbar_height() const
 {
-    GLToolbar& collapse_toolbar = wxGetApp().plater()->get_collapse_toolbar();
-    const auto state            = wxGetApp().plater()->get_sidebar_docking_state();
+    return collapse_side() != CollapseSide::None ? collapse_toolbar().get_height() : 0;
+}
 
-    return state != Sidebar::None ? collapse_toolbar.get_height() : 0;
+GLToolbar& GLCanvas3D::collapse_toolbar() const
+{
+    return m_collapse_toolbar != nullptr ? *m_collapse_toolbar : wxGetApp().plater()->get_collapse_toolbar();
+}
+
+CollapseSide GLCanvas3D::collapse_side() const
+{
+    if (m_collapse_side)
+        return m_collapse_side();
+    switch (wxGetApp().plater()->get_sidebar_docking_state()) {
+    case Sidebar::Left: return CollapseSide::Left;
+    case Sidebar::Right: return CollapseSide::Right;
+    default: return CollapseSide::None;
+    }
 }
 
 bool GLCanvas3D::make_current_for_postinit() {
@@ -2210,7 +2225,7 @@ void GLCanvas3D::render(bool only_init)
             tooltip = m_assemble_view_toolbar.get_tooltip();
 
 	    if (tooltip.empty())
-            tooltip = wxGetApp().plater()->get_collapse_toolbar().get_tooltip();
+            tooltip = collapse_toolbar().get_tooltip();
 
         // BBS
 #if 0
@@ -3232,7 +3247,7 @@ void GLCanvas3D::on_idle(wxIdleEvent& evt)
     m_dirty |= m_assemble_view_toolbar.update_items_state();
     // BBS
     //m_dirty |= wxGetApp().plater()->get_view_toolbar().update_items_state();
-    m_dirty |= wxGetApp().plater()->get_collapse_toolbar().update_items_state();
+    m_dirty |= collapse_toolbar().update_items_state();
     // apply() DRAINS the 3D-mouse queue, so only the canvas actually on screen may call it: a
     // hidden canvas renders nothing, so the motion it swallowed moves the shared camera without
     // ever being drawn and the next visible frame jumps several states at once.
@@ -4258,6 +4273,13 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
     // (drag/orbit/wheel) so the camera keeps working over the display-only plate.
 #ifdef SLIC3R_CAD
     if (m_design_sketch_tool != nullptr && m_design_sketch_tool->has_display()) {
+        // Except over the sidebar collapse button, which is drawn over the sketch.
+        if (collapse_toolbar().on_mouse(evt, *this)) {
+            if (evt.LeftUp() || evt.MiddleUp() || evt.RightUp())
+                mouse_up_cleanup();
+            m_mouse.set_start_position_3D_as_invalid();
+            return;
+        }
         if (evt.LeftDown() && m_canvas != nullptr)
             m_canvas->SetFocus();   // grab keyboard focus so Delete/keys reach this canvas
         if (m_design_sketch_tool->on_mouse(evt, *this)) {
@@ -4306,7 +4328,7 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
         return;
     }
 
-    if (!mouse_in_layer_editing && wxGetApp().plater()->get_collapse_toolbar().on_mouse(evt, *this)) {
+    if (!mouse_in_layer_editing && collapse_toolbar().on_mouse(evt, *this)) {
         if (evt.LeftUp() || evt.MiddleUp() || evt.RightUp())
             mouse_up_cleanup();
         m_mouse.set_start_position_3D_as_invalid();
@@ -6853,7 +6875,7 @@ void GLCanvas3D::_switch_toolbars_icon_filename()
     m_main_toolbar.init(background_data);
     m_assemble_view_toolbar.init(background_data);
     m_separator_toolbar.init(background_data);
-    wxGetApp().plater()->get_collapse_toolbar().init(background_data);
+    collapse_toolbar().init(background_data);
 
     // main toolbar
     {
@@ -7275,7 +7297,17 @@ bool GLCanvas3D::_init_view_toolbar()
 
 bool GLCanvas3D::_init_collapse_toolbar()
 {
-    return wxGetApp().plater()->init_collapse_toolbar();
+    if (m_collapse_toolbar == nullptr)
+        return wxGetApp().plater()->init_collapse_toolbar();
+
+    // Its owner laid it out; the background needs the GL context.
+    BackgroundTexture::Metadata background_data;
+    background_data.filename = m_is_dark ? "toolbar_background_dark.png" : "toolbar_background.png";
+    background_data.left = 16;
+    background_data.top = 16;
+    background_data.right = 16;
+    background_data.bottom = 16;
+    return m_collapse_toolbar->init(background_data);
 }
 
 bool GLCanvas3D::_set_current()
@@ -8787,11 +8819,12 @@ void GLCanvas3D::_render_sequential_clearance()
 void GLCanvas3D::_check_and_update_toolbar_icon_scale()
 {
     // Update collapse toolbar
-    GLToolbar& collapse_toolbar = wxGetApp().plater()->get_collapse_toolbar();
-    collapse_toolbar.set_enabled(wxGetApp().plater()->get_sidebar_docking_state() != Sidebar::None);
+    GLToolbar& collapse_toolbar = this->collapse_toolbar();
+    collapse_toolbar.set_enabled(collapse_side() != CollapseSide::None);
 
-    // Don't update a toolbar scale, when we are on a Preview
-    if (wxGetApp().plater()->is_preview_shown()) {
+    // Don't update a toolbar scale, when we are on a Preview. Asked of this canvas, not of the
+    // plater: the Design tab's canvas is on screen while the plater's current view may be Preview.
+    if (m_canvas_type == CanvasPreview) {
         IMSlider   *m_layers_slider = get_gcode_viewer().get_layers_slider();
         IMSlider   *m_moves_slider  = get_gcode_viewer().get_moves_slider();
         float sc              = get_scale();
@@ -8863,7 +8896,9 @@ void GLCanvas3D::_check_and_update_toolbar_icon_scale()
     // set minimum scale as a auto scale for the toolbars
     float new_scale = std::min(new_h_scale, new_v_scale);
     new_scale /= get_scale();
-    if (fabs(new_scale - scale) > 0.05) // scale is changed by 5% and more
+    // Only a canvas with toolbars to fit sets the shared size: a collapse button alone (the Design
+    // tab's canvas) always fits at the largest.
+    if (items_cnt > collapse_toolbar.get_visible_items_cnt() && fabs(new_scale - scale) > 0.05) // scale is changed by 5% and more
         wxGetApp().set_auto_toolbar_icon_scale(new_scale);
 }
 
@@ -9871,18 +9906,17 @@ void GLCanvas3D::_render_collapse_toolbar() const
     if (!m_collapse_toolbar_enabled)
         return;
 
-    auto&      plater              = *wxGetApp().plater();
-    const auto sidebar_docking_dir = plater.get_sidebar_docking_state();
-    if (sidebar_docking_dir == Sidebar::None) {
+    const CollapseSide side = collapse_side();
+    if (side == CollapseSide::None) {
         return;
     }
 
-    GLToolbar& collapse_toolbar = plater.get_collapse_toolbar();
+    GLToolbar& collapse_toolbar = this->collapse_toolbar();
 
     const Size cnv_size = get_canvas_size();
     const float top  = 0.5f * (float)cnv_size.get_height();
-    const float left = sidebar_docking_dir == Sidebar::Right ? 0.5f * (float) cnv_size.get_width() - (float) collapse_toolbar.get_width() :
-                                                               -0.5f * (float) cnv_size.get_width();
+    const float left = side == CollapseSide::Right ? 0.5f * (float) cnv_size.get_width() - (float) collapse_toolbar.get_width() :
+                                                     -0.5f * (float) cnv_size.get_width();
 
     collapse_toolbar.set_position(top, left);
     collapse_toolbar.render(*this);
@@ -11160,7 +11194,7 @@ bool GLCanvas3D::_deactivate_layersediting_menu()
 
 bool GLCanvas3D::_deactivate_collapse_toolbar_items()
 {
-    GLToolbar& collapse_toolbar = wxGetApp().plater()->get_collapse_toolbar();
+    GLToolbar& collapse_toolbar = this->collapse_toolbar();
     if (collapse_toolbar.is_item_pressed("print")) {
         collapse_toolbar.force_left_action(collapse_toolbar.get_item_id("print"), *this);
         return true;
