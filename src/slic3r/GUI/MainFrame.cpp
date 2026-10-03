@@ -1126,6 +1126,10 @@ void MainFrame::shutdown()
     if (m_project != nullptr)
         m_project->shutdown();
     m_plugin_pages.shutdown();
+#ifdef SLIC3R_CAD
+    if (m_design_panel != nullptr)
+        m_design_panel->shutdown();
+#endif
 #ifdef __WXGTK__
     // Edge panels are child windows — wxWidgets destroys them automatically.
     m_edge_bottom = nullptr;
@@ -3339,8 +3343,19 @@ void MainFrame::init_menubar_as_editor()
 
         append_menu_item(
             viewMenu, wxID_ANY, _L("Reset Window Layout"), _L("Reset to default window layout"),
-            [this](wxCommandEvent&) { m_plater->reset_window_layout(); }, "", this,
+            [this](wxCommandEvent&) {
+                m_plater->reset_window_layout();
+#ifdef SLIC3R_CAD
+                // The Design tab docks its own sidebar.
+                if (m_design_panel != nullptr)
+                    m_design_panel->reset_window_layout();
+#endif
+            }, "", this,
             [this]() {
+#ifdef SLIC3R_CAD
+                if (shown_design_panel() != nullptr)
+                    return true;
+#endif
                 return is_prepare_or_preview_tab() && m_plater->is_sidebar_enabled();
             },
             this);

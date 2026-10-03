@@ -551,6 +551,21 @@ void DesignCanvas::set_show_bed(bool b)
     request_repaint();
 }
 
+void DesignCanvas::set_sidebar_collapse(std::function<CollapseSide()> side, std::function<void()> toggle)
+{
+    if (!m_canvas || !m_canvas_widget || !setup_collapse_toolbar(m_collapse_toolbar, toggle))
+        return;
+    m_canvas->set_collapse_toolbar(&m_collapse_toolbar, std::move(side));
+    m_canvas->enable_collapse_toolbar(true);
+    // Shift+Tab: the canvas posts this for its sidebar, as Prepare's canvases do.
+    m_canvas_widget->Bind(EVT_GLCANVAS_COLLAPSE_SIDEBAR, [toggle](SimpleEvent&) { toggle(); });
+}
+
+void DesignCanvas::set_sidebar_collapse_tooltip(const std::string& tooltip)
+{
+    m_collapse_toolbar.set_tooltip(m_collapse_toolbar.get_item_id("collapse_sidebar"), tooltip);
+}
+
 bool DesignCanvas::is_sketching() const { return m_sketch_tool.is_active(); }
 
 void DesignCanvas::cancel_sketch()

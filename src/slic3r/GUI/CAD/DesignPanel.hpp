@@ -12,6 +12,7 @@
 
 #include "libslic3r/CAD/CadDocument.hpp"
 #include "slic3r/GUI/CAD/DesignInteraction.hpp"   // CadLevel: what one Esc press means
+#include "slic3r/GUI/AuiMgr.hpp"
 
 class ComboBox;    // Orca dropdown (Widgets/ComboBox.hpp) — replaces wxChoice everywhere here
 class StaticBox;   // Orca rounded card frame (Widgets/StaticBox.hpp)
@@ -60,6 +61,8 @@ public:
     void on_sys_color_changed();
     void unbind_canvas_event_handlers();   // app close / language switch, from the plater's teardown
     void reset_canvas_volumes();
+    void shutdown();            // app close / language switch, from MainFrame: save the window layout
+    void reset_window_layout(); // View > Reset Window Layout, with Prepare's
     void clear_document();      // New Project / Open Project: drop the document with the project
     // Rebuild off the UI thread (progress dialog only if it turns out to be slow), so a feature
     // op on a heavy imported solid does not freeze the window. Returns m_doc.recompute()'s result.
@@ -486,6 +489,18 @@ private:
 
     wxScrolledWindow* m_form{nullptr};
     DesignCanvas*     m_viewport{nullptr};
+
+    // Below the toolbar, m_form docks beside the viewport column like Prepare's sidebar: it can
+    // move to the other side, float, be resized and be collapsed, and the layout is kept between
+    // sessions.
+    AuiMgr   m_aui;
+    wxString m_default_layout;
+    bool     m_sidebar_collapsed{false};
+    bool     m_laid_out{false};   // the tab has been shown, so the panel has its size
+    void load_window_layout();
+    void load_default_layout();
+    void collapse_sidebar(bool collapse);
+    void update_sidebar_pane(bool force_update = false);
 
     // Top contextual toolbar (parented to the panel, above the form/viewport row).
     UiMode    m_ui_mode{UiMode::Feature};
@@ -928,7 +943,6 @@ private:
     int  tree_selection() const;          // selected feature row, or wxNOT_FOUND
     int  tree_body_selection() const;     // selected Parts-list body index, or -1
     void refresh_parts();                 // rebuild the Bodies list under the feature tree
-    void sync_sidebar_width();            // keep the panel as wide as Prepare's sidebar
     void set_tree_selection(int row);
     static int tree_icon_for(CadFeatureType t);
 
