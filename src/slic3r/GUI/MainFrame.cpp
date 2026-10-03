@@ -1269,9 +1269,15 @@ DesignPanel* MainFrame::ensure_design_panel()
 {
     if (m_design_panel == nullptr && m_design_page != nullptr) {
         wxBusyCursor busy;
+        // Built into a hidden page: on MSW every control created or moved inside a shown window
+        // re-clips and repaints its shown siblings, so building the panel into the page the
+        // notebook has just shown took seconds.
+        const bool page_shown = m_design_page->IsShown();
+        if (page_shown) m_design_page->Hide();
         m_design_panel = new DesignPanel(m_design_page);
         m_design_page->GetSizer()->Add(m_design_panel, 1, wxEXPAND);
         m_design_page->Layout();
+        if (page_shown) m_design_page->Show();
     }
     return m_design_panel;
 }
