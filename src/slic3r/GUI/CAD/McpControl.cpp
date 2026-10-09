@@ -268,6 +268,12 @@ json describe_tools()
                      json{{"name", "angle"},   {"type", "number"}, {"unit", "deg"}, {"default", 0}},
                      json{{"name", "copy"},    {"type", "boolean"}, {"default", false}},
                  })}},
+            json{{"name", "plane"}, {"summary", "Create a datum plane: offset (mm) from base 0=XY, 1=XZ, 2=YZ or 3+N = Nth earlier datum, optional tilt (deg) about axis. Sketch on it with sketch_begin plane=datum:N."},
+                 {"params", json::array({
+                     json{{"name", "base"},   {"type", "integer"}, {"default", 0}},
+                     json{{"name", "offset"}, {"type", "number"}, {"unit", "mm"}, {"default", 0}},
+                     json{{"name", "tilt"},   {"type", "number"}, {"unit", "deg"}, {"default", 0}},
+                     json{{"name", "axis"},   {"type", "integer"}, {"default", 0}}})}},
             json{{"name", "axis"}, {"summary", "Create a datum axis (reference line): two points, face normal, cylinder centreline, plane intersection, or along edge."},
                  {"params", json::array({
                      json{{"name", "type"},     {"type", "string"}, {"enum", json::array({"two_points", "face_normal", "cylinder", "plane_intersection", "along_edge"})}, {"default", "two_points"}},
@@ -1360,7 +1366,14 @@ json action_sketch_begin(DesignPanel* panel, const json& params)
     SketchPlane plane = SketchPlane::XY();
     if      (pl == "XZ") plane = SketchPlane::XZ();
     else if (pl == "YZ") plane = SketchPlane::YZ();
-    else if (pl != "XY") throw std::runtime_error("plane must be XY, XZ or YZ");
+    else if (pl.rfind("datum:", 0) == 0) {
+        // "datum:N" = the Nth enabled datum plane, the same row (3+N) the Plane card's base combo names.
+        const auto datums = panel->mcp_doc().resolve_datum_planes();
+        const int  n      = std::atoi(pl.c_str() + 6);
+        if (n < 0 || n >= int(datums.size())) throw std::runtime_error("no such datum plane: " + pl);
+        plane = datums[n].second;
+    }
+    else if (pl != "XY") throw std::runtime_error("plane must be XY, XZ, YZ or datum:N");
     vp->begin_sketch(plane, DesignSketchTool::Mode::Select);
     // The panel has to enter sketch mode too, or the app is half in it: the tool sketches, the
     // offer menu offers sketch verbs, and every sketch KEY is dead because key dispatch tests
@@ -1870,6 +1883,17 @@ json action_bridge(DesignPanel* panel, const json& params)
                 {"bodies", int(doc.bodies.size())}, {"error", doc.error}};
 }
 
+json action_plane(DesignPanel* panel, const json& params)
+{
+    CadDocument& doc = panel->mcp_doc();
+    doc.checkpoint();
+    const int idx = doc.add_plane(params.value("base", 0), params.value("offset", 0.0),
+                                  params.value("tilt", 0.0), params.value("axis", 0), "Plane");
+    doc.recompute();   // datum-only docs yield no body; that is expected
+    panel->mcp_after_change();
+    return json{{"ok", idx >= 0}, {"plane_index", idx}, {"datum_planes", int(doc.resolve_datum_planes().size())}};
+}
+
 json action_axis(DesignPanel* panel, const json& params)
 {
     CadDocument& doc = panel->mcp_doc();
@@ -2117,6 +2141,7 @@ std::string handle_on_main(const std::string& method, const json& params, const 
         if (method == "project")        return rpc_result(id, action_project(panel, params));
         if (method == "delete_face")    return rpc_result(id, action_delete_face(panel, params));
         if (method == "bridge")         return rpc_result(id, action_bridge(panel, params));
+        if (method == "plane")          return rpc_result(id, action_plane(panel, params));
         if (method == "axis")           return rpc_result(id, action_axis(panel, params));
         if (method == "coordsys")       return rpc_result(id, action_coordsys(panel, params));
         if (method == "helix")          return rpc_result(id, action_helix(panel, params));

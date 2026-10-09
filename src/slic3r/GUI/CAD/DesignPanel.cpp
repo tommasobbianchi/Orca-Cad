@@ -11223,9 +11223,16 @@ void DesignPanel::update_reference_planes()
     // takes away; a live session would draw none anyway (DesignSketchTool::draws_reference_axes).
     // They never block selection: clicking existing geometry wins, and a base-plane pick only
     // fires on a click that hit nothing else (see on_mouse fall-through).
-    if (m_show_origin || m_choosing_sketch_plane)
+    if (m_show_origin || m_choosing_sketch_plane) {
+        // Datum planes are sketch planes too (RF47: loft between profiles on parallel planes). Row
+        // 3+i is what ref_plane_name / plane_from_choice read back, so a pick lands on the same
+        // datum the Plane card's base combo would name.
+        const auto datums = m_doc.resolve_datum_planes();
+        for (int i = 0; i < int(datums.size()); ++i) {
+            bp.push_back(datums[i].second); bi.push_back(3 + i); bl.push_back(datums[i].first);
+        }
         m_viewport->set_base_pick(std::move(bp), std::move(bi), std::move(bl));
-    else
+    } else
         m_viewport->clear_base_pick();
 }
 

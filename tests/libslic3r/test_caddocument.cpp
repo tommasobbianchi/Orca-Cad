@@ -9303,3 +9303,42 @@ TEST_CASE("A hole owns its bore", "[CadDocument][highlight]")
         CHECK(made_face_type(doc, bf) == GeomAbs_Cylinder);
     CHECK(doc.faces_made_by(ex).size() == 6);
 }
+
+// Item 4 (sketch on a datum plane): the plane's own frame drives picking, so a point put on ANY
+// frame by to_world must come back unchanged from a ray through it.
+TEST_CASE("A sketch plane's uv survives a ray round trip on arbitrary frames", "[CadDocument][datum]")
+{
+    srand(12345);
+    auto rnd = [] { return (rand() / double(RAND_MAX)) * 2. - 1.; };
+    for (int i = 0; i < 50; ++i) {
+        Slic3r::Vec3d n = Slic3r::Vec3d(rnd(), rnd(), rnd());
+        if (n.norm() < 1e-3) n = Slic3r::Vec3d::UnitZ();
+        n.normalize();
+        const Slic3r::Vec3d seed = std::abs(n.z()) < 0.9 ? Slic3r::Vec3d::UnitZ() : Slic3r::Vec3d::UnitX();
+        Slic3r::SketchPlane p;
+        p.normal = n;
+        p.x_axis = seed.cross(n).normalized();
+        p.y_axis = n.cross(p.x_axis);
+        p.origin = Slic3r::Vec3d(rnd() * 100, rnd() * 100, rnd() * 100);
+        const Slic3r::Vec2d uv(rnd() * 80, rnd() * 80);
+        const Slic3r::Vec3d hit = p.to_world(uv);
+        const Slic3r::Vec3d eye = hit + n * (50. + 10. * std::abs(rnd()));   // in front of the plane
+        const Slic3r::Vec2d back = p.project(eye, (hit - eye).normalized());
+        CHECK(back.x() == Catch::Approx(uv.x()).margin(1e-9));
+        CHECK(back.y() == Catch::Approx(uv.y()).margin(1e-9));
+    }
+}
+
+TEST_CASE("An offset datum plane resolves at its offset, one row per datum", "[CadDocument][datum]")
+{
+    Slic3r::CadDocument doc;
+    const int a = doc.add_plane(0, 20., 0., 0, "P1");
+    const int b = doc.add_plane(3, 5., 0., 0, "P2");   // base 3 = the first datum
+    REQUIRE(a >= 0);
+    REQUIRE(b >= 0);
+    doc.recompute();
+    const auto datums = doc.resolve_datum_planes();
+    REQUIRE(datums.size() == 2);
+    CHECK(datums[0].second.origin.z() == Catch::Approx(doc.modeling_origin.z() + 20.).margin(1e-9));
+    CHECK(datums[1].second.origin.z() == Catch::Approx(doc.modeling_origin.z() + 25.).margin(1e-9));
+}
