@@ -1235,6 +1235,12 @@ private:
     int               m_dof{-1};          // remaining DoF; 0 = fully constrained, <0 = unknown
     bool              m_solve_ok{true};   // solver consistent (no conflicting constraints)
     std::vector<char> m_entity_conflict;  // per-entity flag: touched by a conflicting constraint
+    // Per-entity "still has a free DoF" (sketch_entity_free), recomputed only when the entity list
+    // or constraint set changes — a drag frame keeps both, so it reuses this. Empty = unknown, the
+    // renderer then falls back to the sketch-wide DoF.
+    std::vector<char> m_entity_free;
+    size_t            m_entity_free_key{0};
+    void              refresh_entity_free();
     std::vector<DimAnnot> m_dimensions;           // placed dimension quotes (Mode::Dimension)
     std::vector<int>      m_bad_dims;             // dims whose driving constraint the solver rejected
     int                 m_dim_e0{-1};             // first picked point's entity (Dimension)

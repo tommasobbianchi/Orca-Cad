@@ -682,4 +682,47 @@ SketchSolveResult sketch_solve_drag(std::vector<SketchEntity>& entities,
     return solve_impl(entities, constraints, dragged_ei, dragged_role);
 }
 
+std::vector<char> sketch_entity_free(const std::vector<SketchEntity>& entities,
+                                     const std::vector<SketchEntityConstraintDef>& constraints)
+{
+    std::vector<char> out(entities.size(), 1);
+    if (constraints.empty()) return out;                  // nothing constrains anything
+    std::vector<SketchEntity> work = entities;
+    const SketchSolveResult base = sketch_solve(work, constraints);
+    if (!base.ok || base.dof < 0) return {};
+    if (base.dof == 0) { out.assign(entities.size(), 0); return out; }
+    // One probe per owned role (and per circle radius). A pin that repeats what the constraints
+    // already force is REDUNDANT, which libslvs reports as a failed solve: that role is pinned. A
+    // clean solve whose total DoF drops means the role still had freedom.
+    auto role_free = [&](SketchEntityConstraintDef extra) {
+        std::vector<SketchEntityConstraintDef> probe = constraints;
+        probe.push_back(extra);
+        std::vector<SketchEntity> w = entities;
+        const SketchSolveResult r = sketch_solve(w, probe);
+        return r.ok && r.dof >= 0 && r.dof < base.dof;
+    };
+    for (size_t i = 0; i < entities.size(); ++i) {
+        const SketchEntity& e = entities[i];
+        std::vector<Role> roles;
+        switch (e.type) {
+        case SketchEntity::Type::Line:   roles = {Role::P0, Role::P1}; break;
+        case SketchEntity::Type::Point:  roles = {Role::P0}; break;
+        case SketchEntity::Type::Arc:    roles = {Role::Center, Role::P0, Role::P1}; break;
+        case SketchEntity::Type::Circle: roles = {Role::Center}; break;
+        default: continue;   // ellipse / spline: no probe, stays free while the sketch is
+        }
+        bool is_free = false;
+        for (Role r : roles) {
+            SketchEntityConstraintDef c; c.type = SketchConstraintType::Fix; c.ea = int(i); c.ra = r;
+            if (role_free(c)) { is_free = true; break; }
+        }
+        if (!is_free && e.type == SketchEntity::Type::Circle) {
+            SketchEntityConstraintDef c; c.type = SketchConstraintType::Radius; c.ea = int(i); c.value = e.radius;
+            is_free = role_free(c);
+        }
+        out[i] = is_free ? 1 : 0;
+    }
+    return out;
+}
+
 } // namespace Slic3r

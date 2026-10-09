@@ -869,6 +869,21 @@ void DesignSketchTool::resolve_live()
     resolve_live_drag(-1, SketchPointRole::P0);
 }
 
+// ponytail: N+1 solves, only on a topology change; capped so a 500-entity sketch cannot stall an edit.
+void DesignSketchTool::refresh_entity_free()
+{
+    size_t key = std::hash<size_t>()(m_entities.size()) * 31 + m_constraints.size();
+    for (const SketchEntity& e : m_entities) key = key * 131 + size_t(e.type);
+    for (const SketchEntityConstraintDef& c : m_constraints)
+        key = key * 131 + size_t(c.type) * 7 + size_t(c.ea + 2) * 1009 + size_t(c.eb + 2) * 917 + size_t(c.ec + 2) * 31
+              + size_t(c.ra) * 3 + size_t(c.rb);
+    if (key == m_entity_free_key && m_entity_free.size() == m_entities.size()) return;
+    m_entity_free_key = key;
+    constexpr size_t kMaxProbed = 200;
+    if (m_entities.empty() || m_entities.size() > kMaxProbed || !m_solve_ok) { m_entity_free.clear(); return; }
+    m_entity_free = sketch_entity_free(m_entities, m_constraints);
+}
+
 void DesignSketchTool::resolve_live_drag(int dragged_ei, SketchPointRole dragged_role)
 {
     const bool has = !m_constraints.empty();
@@ -922,6 +937,7 @@ void DesignSketchTool::resolve_live_drag(int dragged_ei, SketchPointRole dragged
         m_dof = -1; m_solve_ok = true;
         m_bad_dims.clear();
     }
+    refresh_entity_free();
     if (on_solve_state) on_solve_state(m_dof, m_solve_ok, has);
     announce_loop_defects();
 }
@@ -9811,6 +9827,8 @@ void DesignSketchTool::render(GLCanvas3D& canvas)
     const ColorRGBA sel_col = design_selection_color();
     const ColorRGBA green(0.30f, 0.85f, 0.42f, 1.0f);
     const ColorRGBA conflict(1.0f, 0.22f, 0.22f, 1.0f);
+    const ColorRGBA under(0.25f, 0.55f, 1.0f, 1.0f);          // under-constrained: blue
+    const ColorRGBA constrained(0.04f, 0.04f, 0.04f, 1.0f);   // fully constrained: black
     const ColorRGBA opref(0.80f, 0.45f, 1.0f, 1.0f);     // violet: the edit-op's reference pick
     const double    upp_dash = 1.0 / std::max(camera.get_zoom(), 1e-6);   // world units per pixel
     const ColorRGBA editing(1.0f, 0.78f, 0.10f, 1.0f);   // amber: entity whose dim is being typed
@@ -9841,7 +9859,11 @@ void DesignSketchTool::render(GLCanvas3D& canvas)
         else if (selected)       col = sel_col;
         else if (bad)            col = conflict;
         else if (e.construction) col = grey;
-        else                     col = fully ? green : orange;
+        else {
+            // Blue = still has freedom, black = pinned down (RF47). Red above is a conflict.
+            const bool pinned = i < m_entity_free.size() ? !m_entity_free[i] : fully;
+            col = pinned ? constrained : under;
+        }
         if (e.type == SketchEntity::Type::Point) {
             (selected ? sel_point_markers : point_markers).push_back(e.p0);
             continue;

@@ -404,3 +404,40 @@ TEST_CASE("slvs: reference-based constraint adds no degrees of freedom", "[slvs]
     REQUIRE(res.ok);
     CHECK(res.dof == 1);
 }
+
+// Item 5 (constraint colouring): per-entity DoF from a total-only solver.
+TEST_CASE("slvs: sketch_entity_free separates pinned, loose and conflicting geometry", "[slvs][constraintcolour]")
+{
+    // A pinned: fixed corner, horizontal, length 10 => fully constrained.
+    // B loose: untouched line. C: circle with fixed centre but free radius.
+    std::vector<SketchEntity> ents = { line({0, 0}, {10, 0}), line({20, 0}, {25, 5}), circle({40, 0}, 3) };
+    std::vector<SketchEntityConstraintDef> cons = {
+        con(CT::Fix,        0, R::P0, 0, R::P0),
+        con(CT::Horizontal, 0, R::P0, 0, R::P1),
+        con(CT::Distance,   0, R::P0, 0, R::P1, 10.0),
+        con(CT::Fix,        2, R::Center, 2, R::Center),
+    };
+    const std::vector<char> f = sketch_entity_free(ents, cons);
+    REQUIRE(f.size() == 3);
+    CHECK(f[0] == 0);   // pinned
+    CHECK(f[1] == 1);   // loose
+    CHECK(f[2] == 1);   // centre pinned, radius still free
+
+    // Add the radius: the circle is now pinned down too.
+    cons.push_back(con(CT::Radius, 2, R::P0, 2, R::P0, 3.0));
+    const std::vector<char> g = sketch_entity_free(ents, cons);
+    REQUIRE(g.size() == 3);
+    CHECK(g[2] == 0);
+    CHECK(g[1] == 1);
+
+    // Fully pinned sketch: nothing is free.
+    cons.push_back(con(CT::Fix, 1, R::P0, 1, R::P0));
+    cons.push_back(con(CT::Fix, 1, R::P1, 1, R::P1));
+    const std::vector<char> h = sketch_entity_free(ents, cons);
+    REQUIRE(h.size() == 3);
+    CHECK(h[0] + h[1] + h[2] == 0);
+
+    // Unconstrained sketch: everything free.
+    const std::vector<char> n = sketch_entity_free(ents, {});
+    CHECK(n[0] + n[1] + n[2] == 3);
+}

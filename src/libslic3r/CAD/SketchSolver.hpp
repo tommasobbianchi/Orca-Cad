@@ -39,6 +39,14 @@ SketchSolveResult sketch_solve_drag(std::vector<SketchEntity>& entities,
                                     const std::vector<SketchEntityConstraintDef>& constraints,
                                     int dragged_ei, SketchPointRole dragged_role);
 
+// Per-entity "still has a free degree of freedom" flags (1 = under-constrained, 0 = pinned down),
+// one per entity. libslvs reports only the total DoF, so each entity is probed: pin everything it
+// owns (its points, plus the radius of a circle) on a copy and see whether the total drops. A
+// topology question, so callers cache it and recompute only when the entities or constraints
+// change, not on every drag frame. Returns {} when the sketch does not solve.
+std::vector<char> sketch_entity_free(const std::vector<SketchEntity>& entities,
+                                     const std::vector<SketchEntityConstraintDef>& constraints);
+
 } // namespace Slic3r
 
 #endif
