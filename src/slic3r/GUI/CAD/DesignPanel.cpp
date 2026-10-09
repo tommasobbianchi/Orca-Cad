@@ -959,25 +959,17 @@ DesignPanel::DesignPanel(wxWindow* parent)
             // geometry, so it is reference/curve creation like the four above, not a finishing op.
             {"design_sketch", _L_CONTEXT("Project", "Design"), _L("Project body edges onto a plane as sketch entities"),
              [this] {
-                if (m_doc.bodies.empty()) {
-                    set_status(StatusKind::Error, _L("Project needs a body — add or import one first"));
+                fill_project_sources(-1, false, selected_body_default());
+                if (m_proj_src_map.empty()) {
+                    set_status(StatusKind::Error, _L("Project needs a body or a sketch — add or import one first"));
                     return;
-                }
-                {
-                    m_proj_source_body->Clear();
-                    for (size_t i = 0; i < m_doc.bodies.size(); ++i) {
-                        const std::string& n = m_doc.bodies[i].name;
-                        m_proj_source_body->Append(n.empty() ? wxString::Format(_L("Body %zu"), i + 1) : wxString::FromUTF8(n));
-                    }
-                    if (m_proj_source_body->GetCount() > 0)
-                        m_proj_source_body->SetSelection(std::min(selected_body_default(),
-                                                       int(m_proj_source_body->GetCount()) - 1));
                 }
                 populate_plane_choices(m_proj_plane);
                 // Keep what the user pointed at (L3): a picked face on the source body is the
                 // face to project, exactly as the offer promised when it showed Project on it.
                 // Only a pick on ANOTHER body is dropped, since it cannot belong to this source.
-                const int src = m_proj_source_body->GetSelection();
+                const int psel = m_proj_source_body->GetSelection();
+                const int src = (psel >= 0 && psel < int(m_proj_src_map.size())) ? m_proj_src_map[psel] : -1;
                 if (m_sel_solid_face >= 0 && m_sel_solid_body != src) m_sel_solid_face = -1;
                 m_proj_face_label->SetLabel(m_sel_solid_face >= 0
                     ? wxString::Format(_L("Face %d"), m_sel_solid_face)
@@ -2692,7 +2684,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
         auto* pform = two_col_form();
         m_proj_source_body = make_combo(m_cards);
         m_proj_source_body->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent&) { refresh_preview(); });
-        pform->Add(new wxStaticText(m_cards, wxID_ANY, _L("Source body")), 0, wxALIGN_CENTER_VERTICAL);
+        pform->Add(new wxStaticText(m_cards, wxID_ANY, _L("Source")), 0, wxALIGN_CENTER_VERTICAL);
         pform->Add(m_proj_source_body, 0, wxEXPAND);
         m_proj_face_label = new wxStaticText(m_cards, wxID_ANY, _L("(all edges)"));
         pform->Add(new wxStaticText(m_cards, wxID_ANY, _L("Face")), 0, wxALIGN_CENTER_VERTICAL);
@@ -2704,7 +2696,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
         pform->Add(m_proj_plane, 0, wxEXPAND);
         m_box_project->Add(pform, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 12);
         m_box_project->Add(new wxStaticText(m_cards, wxID_ANY,
-                              _L("Project the edges of a body onto a plane as sketch entities. Pick a face to project only its edges, or leave the face empty to project the whole body.")),
+                              _L("Project the edges of a body, or a whole sketch (Use), onto a plane. A projected sketch stays linked: edit the original and the projection follows. Pick a face to project only its edges, or leave the face empty to project the whole body.")),
                            0, wxLEFT | wxRIGHT, 12);
     }
     cards->Add(m_box_project, 0, wxEXPAND);
@@ -4664,7 +4656,9 @@ void DesignPanel::sync_sketch_display()
     std::vector<DesignSketchTool::DisplaySketch> ds;
     for (int i = 0; i < n; ++i) {
         const CadFeature& f = m_doc.features[i];
-        if (f.type != CadFeatureType::Sketch || consumed[i] || !f.enabled)
+        // A Project / Use feature is sketch geometry too (it derives entities on a plane), so it is
+        // drawn and picked like one: a projection nobody can see cannot be used as a loft profile.
+        if ((f.type != CadFeatureType::Sketch && f.type != CadFeatureType::Project) || consumed[i] || !f.enabled)
             continue;
         if (!f.entities.empty()) {
             if (consumed_loops.empty()) {
@@ -5856,17 +5850,23 @@ void DesignPanel::on_add_rib()
 
 void DesignPanel::on_add_project()
 {
-    if (m_doc.bodies.empty()) {
-        set_status(StatusKind::Warning, _L("Project needs a body — add or import one first"));
+    const int sel = m_proj_source_body->GetSelection();
+    const int row = (sel >= 0 && sel < int(m_proj_src_map.size())) ? m_proj_src_map[sel] : -1;
+    if (row == -1) {
+        set_status(StatusKind::Warning, _L("Project needs a body or a sketch — add or import one first"));
         return;
     }
-    const int sel = m_proj_source_body->GetSelection();
-    const int src_body = (sel != wxNOT_FOUND) ? sel : -1;
-    const int face = (m_sel_solid_face >= 0) ? m_sel_solid_face : -1;
     m_feature_counter++;
-    m_doc.add_project_edges(src_body, {}, face,
-                            plane_from_choice(m_proj_plane->GetSelection()),
-                            feature_name(_L("Project")));
+    if (row <= -2) {
+        // Use: the sketch (all its entities) onto the target plane, parent-linked.
+        m_doc.add_use_sketch(-row - 2, {}, plane_from_choice(m_proj_plane->GetSelection()),
+                             feature_name(_L("Use")));
+    } else {
+        const int face = (m_sel_solid_face >= 0) ? m_sel_solid_face : -1;
+        m_doc.add_project_edges(row, {}, face,
+                                plane_from_choice(m_proj_plane->GetSelection()),
+                                feature_name(_L("Project")));
+    }
     if (!recompute_guarded(_L("Rebuilding model…")))
         set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
     else
@@ -6099,6 +6099,38 @@ void DesignPanel::populate_body_choices(int as_of_feature)
     // user has to notice and undo. Fall back to the neighbour of whatever was picked.
     fill(m_bool_tool, picked == 0 ? 1 : 0);
     fill(m_cut_target, picked);
+}
+
+// Source rows for the Project card: every body, then every sketch that precedes the feature being
+// edited (a sketch cannot read one that comes after it). `want` is a body index, or a sketch
+// feature index when want_sketch.
+void DesignPanel::fill_project_sources(int editing_feature, bool want_sketch, int want)
+{
+    if (!m_proj_source_body) return;
+    m_proj_src_map.clear();
+    m_proj_source_body->Clear();
+    for (size_t i = 0; i < m_doc.bodies.size(); ++i) {
+        const std::string& n = m_doc.bodies[i].name;
+        m_proj_source_body->Append(n.empty() ? wxString::Format(_L("Body %zu"), i + 1) : wxString::FromUTF8(n));
+        m_proj_src_map.push_back(int(i));
+    }
+    const int limit = editing_feature >= 0 ? editing_feature : int(m_doc.features.size());
+    for (int i = 0; i < limit; ++i) {
+        const CadFeature& s = m_doc.features[i];
+        if ((s.type != CadFeatureType::Sketch && s.type != CadFeatureType::Project) || !s.enabled) continue;
+        m_proj_source_body->Append(_L("Sketch") + ": " + wxString::FromUTF8(s.name));
+        m_proj_src_map.push_back(-i - 2);
+    }
+    int pick = m_proj_src_map.empty() ? wxNOT_FOUND : 0;
+    if (want_sketch) {
+        for (int r = 0; r < int(m_proj_src_map.size()); ++r)
+            if (m_proj_src_map[r] == -want - 2) pick = r;
+    } else if (want >= 0 && want < int(m_doc.bodies.size())) {
+        pick = want;
+    } else if (!m_proj_src_map.empty()) {
+        pick = std::min(selected_body_default(), int(m_proj_src_map.size()) - 1);
+    }
+    if (pick != wxNOT_FOUND) m_proj_source_body->SetSelection(pick);
 }
 
 void DesignPanel::fill_body_choice(ComboBox* c, int as_of_feature, int want)
@@ -9929,7 +9961,8 @@ void DesignPanel::load_feature_into_dialog(const CadFeature& f)
         break;
     }
     case CadFeatureType::Project: {
-        fill_body_choice(m_proj_source_body, m_edit_index, f.project_source_body);
+        fill_project_sources(m_edit_index, f.project_from_sketch,
+                             f.project_from_sketch ? f.project_source_sketch : f.project_source_body);
         populate_plane_choices(m_proj_plane);
         m_proj_plane->SetSelection(index_from_plane(f.plane));
         m_sel_solid_face = f.project_face;
@@ -10558,7 +10591,10 @@ CadFeature DesignPanel::build_candidate(Tool t) const
     case Tool::Project: {
         f.type = CadFeatureType::Project;
         const int sel = m_proj_source_body->GetSelection();
-        f.project_source_body = (sel != wxNOT_FOUND) ? sel : -1;
+        const int row = (sel >= 0 && sel < int(m_proj_src_map.size())) ? m_proj_src_map[sel] : -1;
+        f.project_from_sketch   = row <= -2;
+        f.project_source_sketch = row <= -2 ? -row - 2 : -1;
+        f.project_source_body   = row >= 0 ? row : -1;
         f.plane               = plane_from_choice(m_proj_plane->GetSelection());
         if (m_sel_solid_face >= 0) {
             f.project_face = m_sel_solid_face;

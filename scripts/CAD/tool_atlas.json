@@ -937,16 +937,15 @@
       "accepts": [
         "body_solid",
         "face_planar",
-        "datum_plane"
+        "datum_plane",
+        "sk_loop"
       ],
-      "needs": {
-        "bodies": 1
-      },
-      "refusal": "Project needs a body — add or import one first",
+      "needs": {},
+      "refusal": "Project needs a body or a sketch — add or import one first",
       "gui": true,
       "action": "fly:plane#4",
       "icon": "design_sketch",
-      "hint": "Project body edges onto a plane as sketch entities"
+      "hint": "Project body edges, or a whole sketch (Use), onto a plane"
     },
     {
       "id": "measure",

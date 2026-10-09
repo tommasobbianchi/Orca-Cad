@@ -2394,8 +2394,10 @@ TEST_CASE("a truncated feature keeps what it could read", "[CadDocument][recipe]
     // The reader then runs out inside fa(f), throws, and keeps everything it had already
     // assigned — that is the whole point of the try/catch. (Cut on a field boundary: a field
     // cut in half is read as whatever half arrived.)
-    const size_t drop = sizeof(uint32_t) + 2 * sizeof(bool) + 3 * sizeof(cereal::size_type) + sizeof(double)
-                        + sizeof(int);
+    // + the Use link appended after revolve_axis_entity: project_from_sketch (bool),
+    // project_source_sketch (int) and the empty project_sketch_entities list (a size tag).
+    const size_t drop = sizeof(uint32_t) + 3 * sizeof(bool) + 4 * sizeof(cereal::size_type) + sizeof(double)
+                        + 2 * sizeof(int);
     REQUIRE(f_len[1] > drop);
     std::string shortened = blob;
     shortened.erase(f_off[1] + 4 + f_len[1] - drop, drop);
@@ -9341,4 +9343,74 @@ TEST_CASE("An offset datum plane resolves at its offset, one row per datum", "[C
     REQUIRE(datums.size() == 2);
     CHECK(datums[0].second.origin.z() == Catch::Approx(doc.modeling_origin.z() + 20.).margin(1e-9));
     CHECK(datums[1].second.origin.z() == Catch::Approx(doc.modeling_origin.z() + 25.).margin(1e-9));
+}
+
+// Item 7 (Use / Project a sketch onto another plane).
+namespace {
+SketchEntity use_line(Vec2d a, Vec2d b)
+{
+    SketchEntity e; e.type = SketchEntity::Type::Line; e.p0 = a; e.p1 = b; return e;
+}
+}
+
+TEST_CASE("Use projects a sketch onto a parallel datum plane with identical (u,v), follows edits, refuses orphaning",
+          "[CadDocument][use]")
+{
+    CadDocument doc;
+    const SketchPlane xy = SketchPlane::XY();
+    const int a = doc.add_sketch_entities({use_line({0, 0}, {20, 0}), use_line({20, 0}, {20, 10}),
+                                           use_line({20, 10}, {0, 10}), use_line({0, 10}, {0, 0})},
+                                          xy, "A");
+    doc.add_plane(0, 20., 0., 0, "P");
+    REQUIRE(doc.recompute());
+    const auto datums = doc.resolve_datum_planes();
+    REQUIRE(datums.size() == 1);
+    const SketchPlane z20 = datums[0].second;
+
+    const int u = doc.add_use_sketch(a, {}, z20, "Use A");
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.features[u].entities.size() == 4);
+    // The model origin offsets the XY plane, so compare in each plane's own (u,v): identical.
+    for (int i = 0; i < 4; ++i) {
+        // a.plane origin may be the modeling origin; both frames share axes, so uv of the world point
+        // in the destination equals the source uv shifted by the origin difference.
+        const Vec3d shift = doc.features[a].plane.origin - z20.origin;
+        const Vec2d d(shift.dot(z20.x_axis), shift.dot(z20.y_axis));
+        CHECK((doc.features[u].entities[i].p0 - (doc.features[a].entities[i].p0 + d)).norm() < 1e-9);
+        CHECK((doc.features[u].entities[i].p1 - (doc.features[a].entities[i].p1 + d)).norm() < 1e-9);
+    }
+
+    // Edit the parent: the child follows on the next recompute.
+    const Vec2d before = doc.features[u].entities[0].p1;
+    doc.features[a].entities[0].p1 = {35, 0};
+    REQUIRE(doc.recompute());
+    CHECK((doc.features[u].entities[0].p1 - before).norm() > 14.9);
+
+    // Deleting the parent is refused with a reason; nothing is silently emptied or kept stale.
+    const size_t n = doc.features.size();
+    CHECK_FALSE(doc.remove_feature(a));
+    CHECK_FALSE(doc.error.empty());
+    CHECK(doc.features.size() == n);
+    CHECK(doc.features[u].entities.size() == 4);
+
+    // A recipe that already lost its parent (hand-edited / old undo state) is an Error, not geometry.
+    doc.features[u].project_source_sketch = -1;
+    CHECK_FALSE(doc.recompute());
+    CHECK_FALSE(doc.error.empty());
+}
+
+TEST_CASE("Use link survives the recipe round trip", "[CadDocument][use]")
+{
+    CadDocument doc;
+    const int a = doc.add_sketch_entities({use_line({0, 0}, {5, 0}), use_line({5, 0}, {5, 5})},
+                                          SketchPlane::XY(), "A");
+    const int u = doc.add_use_sketch(a, {0}, SketchPlane::XZ(), "Use A");   // entity 1 would collapse onto XZ
+    REQUIRE(doc.recompute());
+    CadDocument back;
+    REQUIRE(back.deserialize_recipe(doc.serialize_recipe()));
+    REQUIRE(back.features.size() == 2);
+    CHECK(back.features[u].project_from_sketch);
+    CHECK(back.features[u].project_source_sketch == a);
+    REQUIRE(back.features[u].project_sketch_entities.size() == 1);
+    CHECK(back.features[u].project_sketch_entities[0] == 0);
 }

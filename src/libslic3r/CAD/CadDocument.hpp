@@ -346,6 +346,12 @@ struct CadFeature {
     int              project_source_body{-1};   // body owning the edges; -1 = last body
     std::vector<int> project_edges;             // global edge ids to project; empty => use project_face
     int              project_face{-1};          // if project_edges empty, project every edge of this face
+    // "Use": the source is another SKETCH (any plane, incl. a parallel one), not a body. The link is
+    // persistent: entities are re-projected on every recompute, so editing the parent moves them,
+    // and a parent that is gone is an Error, never a silent keep-the-old-geometry.
+    bool             project_from_sketch{false};
+    int              project_source_sketch{-1}; // feature index; remapped on delete (orphan -> -1 = Error)
+    std::vector<int> project_sketch_entities;   // entity indices of the source; empty = all
 
     // Direct edit: faces to remove (global face indices into target_body's shape),
     // healed via BRepAlgoAPI_Defeaturing.
@@ -412,7 +418,8 @@ struct CadFeature {
                thread_major_nominal, pattern_inclusive,
                dressup_edges,
                text_string, text_font, text_height,
-               revolve_axis_entity);
+               revolve_axis_entity,
+               project_from_sketch, project_source_sketch, project_sketch_entities);
     }
     template<class Archive>
     void load(Archive& ar) {
@@ -455,7 +462,8 @@ struct CadFeature {
                thread_major_nominal, pattern_inclusive,
                dressup_edges,
                text_string, text_font, text_height,
-               revolve_axis_entity);
+               revolve_axis_entity,
+               project_from_sketch, project_source_sketch, project_sketch_entities);
         imported_solid = brep_from_string(brep);
     }
     // The pre-framing (v4) layout, FROZEN. A v4 recipe is one flat stream with no per-feature
@@ -605,6 +613,9 @@ public:
     // geometry can be constrained to them. Returns the number of entities appended, or -1 if the
     // sketch or body reference is invalid. Unlike add_project_edges this creates no feature: the
     // references become part of the sketch that borrows them.
+    // "Use": project another sketch (all its entities, or the listed ones) onto `plane`, parent-linked.
+    int  add_use_sketch(int source_sketch, const std::vector<int>& entities,
+                        const SketchPlane& plane, const std::string& name);
     int  project_edges_into_sketch(int sketch_feature, int source_body,
                                    const std::vector<int>& edge_ids, int face);
     // Append a bridging BSpline entity connecting endpoint `end_a` of entity `ent_a` to
@@ -892,7 +903,8 @@ private:
     void apply_thicken(std::vector<CadBody>& bodies, const CadFeature& f) const;
     void apply_thicken_surface(std::vector<CadBody>& bodies, const CadFeature& f) const;
     void apply_surface_offset(std::vector<CadBody>& bodies, const CadFeature& f) const;
-    void apply_project(const std::vector<CadBody>& bodies, CadFeature& f) const;
+    void apply_project(const std::vector<CadBody>& bodies, CadFeature& f, size_t fi) const;
+    void apply_project_from_sketch(CadFeature& f, size_t fi) const;
     static DatumCoordSys datum_frame(const std::vector<CadBody>& bodies, const CadFeature& f);
     void apply_mate(std::vector<CadBody>& bodies, const CadFeature& f) const;
     void detect_mate_conflicts();   // refills mate_conflicts from the feature list alone

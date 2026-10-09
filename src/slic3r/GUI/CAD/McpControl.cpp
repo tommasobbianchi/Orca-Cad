@@ -268,6 +268,11 @@ json describe_tools()
                      json{{"name", "angle"},   {"type", "number"}, {"unit", "deg"}, {"default", 0}},
                      json{{"name", "copy"},    {"type", "boolean"}, {"default", false}},
                  })}},
+            json{{"name", "use"}, {"summary", "Use / Project a sketch onto a plane, parent-linked: editing the source moves the projection; deleting the source is refused. Lines/points/splines project onto any plane, circles and arcs onto parallel planes only."},
+                 {"params", json::array({
+                     json{{"name", "source_sketch"}, {"type", "integer"}, {"description", "feature index of the sketch to project"}},
+                     json{{"name", "plane"},  {"type", "string"}, {"default", "XY"}, {"description", "XY, XZ, YZ or datum:N"}},
+                     json{{"name", "entities"}, {"type", "array"}, {"default", json::array()}, {"description", "entity indices of the source; empty = all"}}})}},
             json{{"name", "plane"}, {"summary", "Create a datum plane: offset (mm) from base 0=XY, 1=XZ, 2=YZ or 3+N = Nth earlier datum, optional tilt (deg) about axis. Sketch on it with sketch_begin plane=datum:N."},
                  {"params", json::array({
                      json{{"name", "base"},   {"type", "integer"}, {"default", 0}},
@@ -1883,6 +1888,32 @@ json action_bridge(DesignPanel* panel, const json& params)
                 {"bodies", int(doc.bodies.size())}, {"error", doc.error}};
 }
 
+json action_use(DesignPanel* panel, const json& params)
+{
+    CadDocument& doc = panel->mcp_doc();
+    const int src = params.value("source_sketch", -1);
+    if (src < 0 || src >= int(doc.features.size())) throw std::runtime_error("source_sketch must be a sketch feature index");
+    const std::string pl = params.value("plane", std::string("XY"));
+    SketchPlane plane = SketchPlane::XY();
+    if      (pl == "XZ") plane = SketchPlane::XZ();
+    else if (pl == "YZ") plane = SketchPlane::YZ();
+    else if (pl.rfind("datum:", 0) == 0) {
+        const auto datums = doc.resolve_datum_planes();
+        const int  n      = std::atoi(pl.c_str() + 6);
+        if (n < 0 || n >= int(datums.size())) throw std::runtime_error("no such datum plane: " + pl);
+        plane = datums[n].second;
+    } else if (pl != "XY") throw std::runtime_error("plane must be XY, XZ, YZ or datum:N");
+    std::vector<int> ents;
+    if (params.contains("entities"))
+        for (const auto& v : params.at("entities")) ents.push_back(v.get<int>());
+    doc.checkpoint();
+    const int idx = doc.add_use_sketch(src, ents, plane, "Use");
+    const bool ok = doc.recompute();
+    panel->mcp_after_change();
+    return json{{"ok", ok}, {"feature_index", idx}, {"error", doc.error},
+                {"entities", ok ? int(doc.features[idx].entities.size()) : 0}};
+}
+
 json action_plane(DesignPanel* panel, const json& params)
 {
     CadDocument& doc = panel->mcp_doc();
@@ -2142,6 +2173,7 @@ std::string handle_on_main(const std::string& method, const json& params, const 
         if (method == "delete_face")    return rpc_result(id, action_delete_face(panel, params));
         if (method == "bridge")         return rpc_result(id, action_bridge(panel, params));
         if (method == "plane")          return rpc_result(id, action_plane(panel, params));
+        if (method == "use")            return rpc_result(id, action_use(panel, params));
         if (method == "axis")           return rpc_result(id, action_axis(panel, params));
         if (method == "coordsys")       return rpc_result(id, action_coordsys(panel, params));
         if (method == "helix")          return rpc_result(id, action_helix(panel, params));
