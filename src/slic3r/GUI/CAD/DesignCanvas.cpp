@@ -1047,6 +1047,11 @@ void DesignCanvas::set_on_datum_base_picked(std::function<void(int)> cb)
     m_sketch_tool.on_datum_base_picked = std::move(cb);
 }
 
+void DesignCanvas::set_on_datum_base_activated(std::function<void(int)> cb)
+{
+    m_sketch_tool.on_datum_base_activated = std::move(cb);
+}
+
 void DesignCanvas::set_selected_base(std::function<int()> cb)
 {
     m_sketch_tool.selected_base = std::move(cb);

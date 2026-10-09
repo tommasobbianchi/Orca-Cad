@@ -10786,6 +10786,7 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
     // projection — the design canvas's viewport isn't valid outside its own paint).
     m_last_mouse_x = evt.GetX();
     m_last_mouse_y = evt.GetY();
+    if (evt.LeftDClick()) dp_pick_trace("dclick x=%d y=%d dbp=%d", evt.GetX(), evt.GetY(), int(m_dbp_active));
 
     // Line draw-then-edit: while the length editor is open right after the second click,
     // freeze the canvas so a stray move/click can't push a third point or rubber-band a
@@ -10824,6 +10825,16 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
         // is the side-panel dependency this tab exists to remove. Fit keeps the rest of the
         // plate, so nothing is taken away.
         if (evt.LeftDClick()) {
+            // A reference or datum plane's label sketches on that plane. The first click of the
+            // pair already picked it (resolved on release); this acts on the second. A label is
+            // a precise target, so it wins over the fit-view fallback below.
+            if (m_dbp_active && on_datum_base_activated) {
+                const int h = hit_test_base_pick(canvas, evt);
+                if (h >= 0 && h < int(m_dbp_base.size())) {
+                    on_datum_base_activated(m_dbp_base[h]);
+                    return true;
+                }
+            }
             int f = -1, r = -1, e = -1, ff = -1, fr = -1; double dbest = 1e30;
             const Linef3 dray  = canvas.mouse_ray(Point(evt.GetX(), evt.GetY()));
             const Linef3 dray8 = canvas.mouse_ray(Point(evt.GetX() + 8, evt.GetY()));

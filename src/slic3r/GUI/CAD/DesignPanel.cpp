@@ -4036,6 +4036,15 @@ DesignPanel::DesignPanel(wxWindow* parent)
             m_status->Refresh();
         }
     });
+    // Double-click a plane = sketch on it. Only from plain Feature mode: inside a card or a
+    // session the click means something else (the Plane card's own base pick above).
+    m_viewport->set_on_datum_base_activated([this](int base) {
+        if (base < 0 || m_active != Tool::None || m_ui_mode != UiMode::Feature) return;
+        m_ref_plane = base;
+        m_plane_picked = true;
+        m_pick_face = m_pick_face_body = -1;
+        start_sketch_on_target(true);
+    });
     // The reference plane drawn selected: the Plane card's base, or else the plane a sketch would go
     // on — chosen, and not overridden by a picked face (sketch_plane_target's test, without its
     // per-face OCCT lookup, as this is asked every frame).
@@ -6284,6 +6293,8 @@ int DesignPanel::offer_selection_kind() const
     if (m_sel_solid_body >= 0 && m_sel_solid_body < nb)
         return int(CadDocument::is_sheet_shape(m_doc.bodies[m_sel_solid_body].shape)
                    ? OfferSel::BodySheet : OfferSel::BodySolid);
+    if (m_plane_picked)   // a reference or datum plane clicked in 3D: say so, not "Nothing selected"
+        return int(OfferSel::DatumPlane);
     return int(OfferSel::None);
 }
 
@@ -6633,6 +6644,7 @@ wxString DesignPanel::offer_header(int kind) const
     };
     switch (OfferSel(kind)) {
     case OfferSel::None:       return _L("Nothing selected");
+    case OfferSel::DatumPlane: return wxString::Format(_L("Plane %s"), ref_plane_name(m_ref_plane));
     case OfferSel::BodySolid:  return wxString::Format(_L("%s — solid body"), body());
     case OfferSel::BodySheet:  return wxString::Format(_L("%s — surface body"), body());
     case OfferSel::FacePlanar: return wxString::Format(_L("Flat face %d of %s"), m_sel_solid_face, body());

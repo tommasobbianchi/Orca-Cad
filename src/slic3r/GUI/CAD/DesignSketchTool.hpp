@@ -370,6 +370,7 @@ public:
                        std::vector<std::string> labels = {});
     void clear_base_pick();
     std::function<void(int base)> on_datum_base_picked;
+    std::function<void(int base)> on_datum_base_activated;   // double-click on a reference/datum plane: sketch on it
     // The base drawn as selected, or -1. Asked once a frame rather than set, because what decides it
     // (the panel's chosen sketch plane, a picked face, the Plane card's base) changes in many places.
     std::function<int()> selected_base;
