@@ -11,7 +11,9 @@
 #include <TopoDS_Wire.hxx>
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Face.hxx>
+#include <charconv>
 #include <cmath>
+#include <string>
 #include <vector>
 #include <utility>
 
@@ -94,6 +96,19 @@ inline constexpr double kSketchJoinTol = 1e-3;   // mm
 inline double snap_to_step(double v, double step)
 {
     return step > 0. ? std::round(v / step) * step : v;
+}
+// A length for a label: at most `decimals` places, trailing zeros dropped, never "-0", always a '.'
+// (std::to_chars ignores LC_NUMERIC, unlike snprintf, which wx points at the user's locale).
+inline std::string format_dim_number(double v, int decimals = 2)
+{
+    char buf[64];
+    const auto r = std::to_chars(buf, buf + sizeof(buf), v, std::chars_format::fixed, decimals);
+    std::string s(buf, r.ptr);
+    if (s.find('.') != std::string::npos) {
+        while (s.back() == '0') s.pop_back();
+        if (s.back() == '.') s.pop_back();
+    }
+    return (s == "-0") ? std::string("0") : s;
 }
 inline Vec2d snap_to_grid(const Vec2d& p, double step) { return {snap_to_step(p.x(), step), snap_to_step(p.y(), step)}; }
 
