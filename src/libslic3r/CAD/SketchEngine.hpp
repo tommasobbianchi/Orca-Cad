@@ -11,6 +11,7 @@
 #include <TopoDS_Wire.hxx>
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Face.hxx>
+#include <cmath>
 #include <vector>
 #include <utility>
 
@@ -87,6 +88,14 @@ struct SketchProfile {
 // kernel refused it at 1e-4, which extruded a solid the user never drew.
 // Nothing legitimate in a mm-scale sketch is 1 um apart.
 inline constexpr double kSketchJoinTol = 1e-3;   // mm
+
+// Nearest multiple of `step` (half-way rounds away from zero, so the grid is symmetric about 0).
+// step <= 0 means "no grid" and returns v untouched.
+inline double snap_to_step(double v, double step)
+{
+    return step > 0. ? std::round(v / step) * step : v;
+}
+inline Vec2d snap_to_grid(const Vec2d& p, double step) { return {snap_to_step(p.x(), step), snap_to_step(p.y(), step)}; }
 
 // Effective sketch joint tolerance. ONE value for the viewport (region_loops /
 // loop_report / connected_loop) and the kernel (entities_to_wires): if these ever

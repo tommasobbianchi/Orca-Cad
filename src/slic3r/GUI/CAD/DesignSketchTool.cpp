@@ -2647,6 +2647,9 @@ Vec2d DesignSketchTool::snap_vertex(GLCanvas3D& canvas, const wxMouseEvent& evt,
     // count as a "vertex" snap for the callers that gate angle inference on it.
     const_cast<DesignSketchTool*>(this)->m_cursor_snap = s;
     snapped = s.snapped();   // any hard snap moves the cursor + suppresses angle lock
+    // Grid last: an endpoint / centre / axis inference wins, and Shift bypasses both. The grid is
+    // not reported as `snapped`, so a line's angle inference still gets to act on the result.
+    if (!snapped && m_grid_on && !evt.ShiftDown()) return snap_to_grid(raw, m_grid_step);
     return s.point;
 }
 
@@ -9833,6 +9836,21 @@ void DesignSketchTool::render(GLCanvas3D& canvas)
     const double    upp_dash = 1.0 / std::max(camera.get_zoom(), 1e-6);   // world units per pixel
     const ColorRGBA editing(1.0f, 0.78f, 0.10f, 1.0f);   // amber: entity whose dim is being typed
     const bool fully = (m_dof == 0 && m_solve_ok);
+    // Snap grid: a patch of dots around the cursor, wide enough to read where a click will land.
+    // Adaptive: the SNAP step is the user's, but the DRAWN step grows x2/x5/x10 until the dots are
+    // at least ~8 px apart, so zooming out never paints a solid carpet.
+    if (m_grid_on && m_grid_step > 0. && m_has_cursor) {
+        double drawn = m_grid_step;
+        static const double kMul[] = {2., 2.5, 2.};   // 1 -> 2 -> 5 -> 10, repeating
+        for (int k = 0; drawn < 8.0 * upp_dash && k < 60; ++k) drawn *= kMul[k % 3];
+        const Vec2d c = snap_to_grid(m_cursor, drawn);
+        const ColorRGBA dot(0.78f, 0.78f, 0.82f, 1.0f);
+        std::vector<Vec2d> dots;
+        for (int ix = -12; ix <= 12; ++ix)
+            for (int iy = -12; iy <= 12; ++iy)
+                dots.emplace_back(c.x() + ix * drawn, c.y() + iy * drawn);
+        draw_vertices(m_vertex_model, dots, dot, std::max(1.2 * upp_dash, 1e-4));
+    }
     // While an auto-edit value field is open, the active step names the entities its dimension
     // drives — light them up so it's obvious WHICH feature the number (e.g. a circle's radius)
     // changes.

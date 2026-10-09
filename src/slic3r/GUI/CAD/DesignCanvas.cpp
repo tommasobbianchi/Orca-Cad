@@ -521,6 +521,12 @@ void DesignCanvas::set_sketch_construction(bool c)
     m_sketch_tool.set_construction(c);
 }
 
+void DesignCanvas::set_sketch_grid_snap(bool on, double step)
+{
+    m_sketch_tool.set_grid_snap(on, step);
+    request_repaint();
+}
+
 bool DesignCanvas::edit_sketch_selection_value()
 {
     const bool ok = m_sketch_tool.open_selection_dimension_editor();

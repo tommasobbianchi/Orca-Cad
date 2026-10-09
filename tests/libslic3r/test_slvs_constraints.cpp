@@ -441,3 +441,20 @@ TEST_CASE("slvs: sketch_entity_free separates pinned, loose and conflicting geom
     const std::vector<char> n = sketch_entity_free(ents, {});
     CHECK(n[0] + n[1] + n[2] == 3);
 }
+
+// Item 6 (grid snap): the quantiser.
+TEST_CASE("snap_to_step quantises to the nearest multiple, symmetrically", "[gridsnap]")
+{
+    CHECK(snap_to_step(2.4, 1.0) == Approx(2.0));
+    CHECK(snap_to_step(2.6, 1.0) == Approx(3.0));
+    CHECK(snap_to_step(-2.4, 1.0) == Approx(-2.0));      // negatives round to the nearest, not toward 0
+    CHECK(snap_to_step(-2.6, 1.0) == Approx(-3.0));
+    CHECK(snap_to_step(2.5, 1.0) == Approx(3.0));        // half-way rounds away from zero ...
+    CHECK(snap_to_step(-2.5, 1.0) == Approx(-3.0));      // ... on both sides: the grid is symmetric
+    CHECK(snap_to_step(7.3, 0.5) == Approx(7.5));        // step change
+    CHECK(snap_to_step(7.3, 5.0) == Approx(5.0));
+    CHECK(snap_to_step(7.3, 0.0) == Approx(7.3));        // 0 = no grid
+    const Vec2d p = snap_to_grid({12.34, -5.67}, 0.25);
+    CHECK(p.x() == Approx(12.25));
+    CHECK(p.y() == Approx(-5.75));
+}

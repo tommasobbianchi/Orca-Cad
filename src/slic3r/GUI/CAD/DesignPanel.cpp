@@ -499,6 +499,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
             start_sketch_on_target(false);
         m_viewport->set_sketch_tool(mode);
         m_viewport->set_sketch_construction(m_construction->GetValue());
+        push_grid_snap();   // also covers a session opened by editing an existing sketch
         set_status(StatusKind::Info, m_sketch_on.IsEmpty() ? hint
                            : wxString::Format(_L("%s  ·  plane: %s"), hint, m_sketch_on));
     };
@@ -1520,6 +1521,25 @@ DesignPanel::DesignPanel(wxWindow* parent)
         // Construction row still toggling a checkbox nobody could see: you could not tell whether
         // the next line would be construction geometry. A stateful toggle has to show its state.
         sadd_bar(m_construction);
+        {
+            // Grid snap: a mode like Construction, so it stays on the bar. Shift bypasses it (the
+            // same modifier that already suppresses inference snapping); Preferences' camera
+            // styles read Shift only on a drag, never on the click that places a point.
+            AppConfig* cfg = wxGetApp().app_config;
+            m_grid_snap = new wxCheckBox(m_toolbar, wxID_ANY, _L("Grid snap"));
+            m_grid_snap->SetForegroundColour(dp_ctl_text());
+            m_grid_snap->SetToolTip(_L("Place points on a grid. Hold Shift to bypass it for one click."));
+            m_grid_snap->SetValue(cfg->get_bool("design_grid_snap"));
+            m_grid_step = make_spin(m_toolbar, 1.0, 0.01, 1000.0);
+            double step = 1.0;
+            if (const std::string s = cfg->get("design_grid_step"); !s.empty()) step = std::atof(s.c_str());
+            m_grid_step->SetValue(step > 0. ? step : 1.0);
+            m_grid_step->SetToolTip(_L("Grid step in mm"));
+            m_grid_snap->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) { push_grid_snap(); });
+            m_grid_step->Bind(wxEVT_SPINCTRLDOUBLE, [this](wxSpinDoubleEvent&) { push_grid_snap(); });
+            sadd_bar(m_grid_snap);
+            sadd_bar(spin_frame(m_grid_step));
+        }
         add_sep(m_tb_sketch);
         auto* b_del = icon_btn("design_delete", _L("Delete selected"));
         b_del->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
@@ -11304,6 +11324,15 @@ void DesignPanel::start_sketch()
     set_status(StatusKind::Info, sketch_plane_prompt());
 }
 
+void DesignPanel::push_grid_snap()
+{
+    if (!m_grid_snap || !m_grid_step) return;
+    AppConfig* cfg = wxGetApp().app_config;
+    cfg->set_bool("design_grid_snap", m_grid_snap->GetValue());
+    cfg->set("design_grid_step", wxString::Format("%g", m_grid_step->GetValue()).ToStdString());
+    if (m_viewport) m_viewport->set_sketch_grid_snap(m_grid_snap->GetValue(), m_grid_step->GetValue());
+}
+
 void DesignPanel::start_sketch_on_target(bool offer_tools)
 {
     if (!m_viewport) return;
@@ -11319,6 +11348,7 @@ void DesignPanel::start_sketch_on_target(bool offer_tools)
     drop_solid_pick();
     m_plane_picked = false;
     m_construction->SetValue(false);   // a fresh session starts non-construction
+    push_grid_snap();                  // the snap mode carries over (and is persisted)
     set_ui_mode(UiMode::Sketch);       // ends the plane choice, so the planes go
     m_sketch_on = on;                  // shown with the tool hint, so the target is visible
     set_status(StatusKind::Info, wxString::Format(_L("Sketch plane: %s — pick a tool"), on));
