@@ -6848,7 +6848,7 @@ void DesignPanel::show_offer_menu(const wxPoint& screen_pos)
             for (const OfferVerb* v : family)
                 if ((v->accepts & bit) && v->refusal) { why = v->refusal; break; }
             wxString s = fam;
-            // No "select something first" tail on an empty selection: the "Nothing selected"
+            // No generic tail on an empty selection: the "Nothing selected"
             // header above already says why, and repeating it on every row was clutter (w4z).
             if (why)
                 s += wxString::FromUTF8("   —   ") + tr(why);
