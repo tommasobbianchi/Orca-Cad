@@ -458,3 +458,18 @@ TEST_CASE("snap_to_step quantises to the nearest multiple, symmetrically", "[gri
     CHECK(p.x() == Approx(12.25));
     CHECK(p.y() == Approx(-5.75));
 }
+
+// Item 12 (dimension text): the label number formatter.
+TEST_CASE("format_dim_number trims zeros, never says -0, always uses a point", "[dimtext]")
+{
+    CHECK(format_dim_number(5.0) == "5");
+    CHECK(format_dim_number(5.2) == "5.2");
+    CHECK(format_dim_number(5.25) == "5.25");
+    CHECK(format_dim_number(-0.5) == "-0.5");
+    CHECK(format_dim_number(1e-9) == "0");
+    CHECK(format_dim_number(-1e-9) == "0");          // not "-0"
+    CHECK(format_dim_number(100.0) == "100");        // zeros before the point survive
+    CHECK(format_dim_number(5.254) == "5.25");       // capped at two places
+    CHECK(format_dim_number(5.256) == "5.26");
+    CHECK(format_dim_number(341.57, 1) == "341.6");  // angles use one place
+}

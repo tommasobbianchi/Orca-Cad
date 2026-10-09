@@ -7311,7 +7311,8 @@ const char* DesignPanel::tree_icon_for(CadFeatureType t)
     case CadFeatureType::Plane:
     case CadFeatureType::Axis:
     case CadFeatureType::CoordSys:
-    case CadFeatureType::Project:        return "design_sketch";    // sketches, datums, projections
+    case CadFeatureType::Project:
+    case CadFeatureType::Sketch3D:       return "design_sketch";    // sketches, datums, projections
     case CadFeatureType::Fillet:
     case CadFeatureType::Chamfer:
     case CadFeatureType::Mate:           return "design_dressup";

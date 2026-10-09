@@ -2418,22 +2418,11 @@ void DesignSketchTool::cancel_dimension_value()
 
 std::string DesignSketchTool::dim_text(const DimAnnot& a) const
 {
-    char buf[32];
     const char* prefix = (a.kind == DimType::Diameter) ? "\xC3\x98"   // 'Ø'
                        : (a.kind == DimType::Radius)   ? "R" : "";
     // Two decimals, trailing zeros dropped: the same precision the HUD readout uses, so a label
-    // and the readout never show the same length two ways.
-    std::snprintf(buf, sizeof(buf), "%.2f", a.value);
-    // Force the international (en) decimal point: wx sets LC_NUMERIC to the user
-    // locale at startup, so snprintf can emit a comma. Normalise it.
-    for (char& ch : buf)
-        if (ch == ',') ch = '.';
-    std::string num(buf);
-    if (num.find('.') != std::string::npos) {
-        while (num.back() == '0') num.pop_back();
-        if (num.back() == '.') num.pop_back();
-    }
-    if (num == "-0") num = "0";
+    // and the readout never show the same length two ways (format_dim_number, locale independent).
+    const std::string num = format_dim_number(a.value, 2);
     // The Design tab models in millimetres whatever the slicer's inch preference says: the
     // kernel, the value fields and the readouts are all mm. The suffix used to follow that
     // preference while the number did not, so an inch user read "25.4 in" for one inch.
@@ -7942,10 +7931,12 @@ void DesignSketchTool::draw_dim_label(const std::string& txt, const Vec2d& plane
     }
     const ImVec2 pos = ImGui::GetCursorScreenPos();
     const ImGuiStyle& st = ImGui::GetStyle();
+    // Dark translucent pill, bright text: legible over the grey canvas, the bed grid, a light theme
+    // and a model alike. The Measure gizmo's white-on-white-50% pill vanished against all of them.
     dl->AddRectFilled(ImVec2(pos.x - st.FramePadding.x, pos.y + st.FramePadding.y),
                       ImVec2(pos.x + ts.x + 2.0f * st.FramePadding.x,
                              pos.y + ts.y + 2.0f * st.FramePadding.y),
-                      ImGuiWrapper::to_ImU32(ColorRGBA(1.0f, 1.0f, 1.0f, 0.5f)));
+                      ImGuiWrapper::to_ImU32(ColorRGBA(0.06f, 0.07f, 0.09f, 0.78f)), 4.0f);
     ImGui::SetCursorScreenPos(ImVec2(pos.x + st.FramePadding.x, pos.y));
     imgui->text(txt);
     imgui->end();
@@ -10289,7 +10280,7 @@ std::string DesignSketchTool::build_readout() const
         !m_points.empty() && m_has_cursor) {
         const Vec2d d = m_cursor - m_points.back();
         double ang = std::atan2(d.y(), d.x()) * 180.0 / M_PI; if (ang < 0.0) ang += 360.0;
-        char b[80]; std::snprintf(b, sizeof(b), "L %.2f mm    %.1f\xC2\xB0", d.norm(), ang);
+        char b[80]; std::snprintf(b, sizeof(b), "L %s mm    %s\xC2\xB0", format_dim_number(d.norm(), 2).c_str(), format_dim_number(ang, 1).c_str());
         en(b);
         std::string out = b;
         // Tell the user how to end a polyline chain — there's no other affordance for it.
