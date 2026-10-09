@@ -2397,7 +2397,8 @@ TEST_CASE("a truncated feature keeps what it could read", "[CadDocument][recipe]
     // cut in half is read as whatever half arrived.)
     // + the Use link appended after revolve_axis_entity: project_from_sketch (bool),
     // project_source_sketch (int) and the empty project_sketch_entities list (a size tag).
-    const size_t drop = sizeof(uint32_t) + 3 * sizeof(bool) + 4 * sizeof(cereal::size_type) + sizeof(double)
+    // + the 3D sketch tail: sk3_points (an empty list: a size tag), sk3_closed, sk3_smooth.
+    const size_t drop = sizeof(uint32_t) + 5 * sizeof(bool) + 5 * sizeof(cereal::size_type) + sizeof(double)
                         + 2 * sizeof(int);
     REQUIRE(f_len[1] > drop);
     std::string shortened = blob;
