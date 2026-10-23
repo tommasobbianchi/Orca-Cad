@@ -86,6 +86,12 @@ if (SLIC3R_GUI)
     add_subdirectory(slic3r)
 endif()
 
+# TaglIAtelle L3 kernel service: standalone headless JSON-RPC 2.0 over a Unix
+# socket, linking libslic3r (the CAD kernel). Only exists under the CAD gate.
+if (SLIC3R_CAD)
+    add_subdirectory(L3Service)
+endif ()
+
 if(ORCA_TOOLS)
     # Snapmaker_Orca_profile_validator
     if(APPLE)
