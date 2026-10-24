@@ -2097,6 +2097,9 @@ static constexpr float NAVIGATOR_SIZE         = 128.f;
 static constexpr float CANVAS_TOOLBAR_MARGIN  = 10.f;   // off the canvas edge, when there is no navigator
 static constexpr float CANVAS_TOOLBAR_PADDING = 2.f;
 static constexpr float CANVAS_TOOLBAR_BUTTON  = 36.f;
+// The navigator and the round buttons beside it sit in the corner chosen in Preferences. The bottom-left one is the
+// only one the plate switcher and the status line must keep clear of.
+static bool navigator_at_bottom_left() { return !wxGetApp().navigator_right() && wxGetApp().navigator_bottom(); }
 
 float GLCanvas3D::get_canvas_toolbar_right() const
 {
@@ -2105,10 +2108,32 @@ float GLCanvas3D::get_canvas_toolbar_right() const
 #ifdef WIN32
     sc *= (float) get_dpi_for_window(wxGetApp().GetTopWindow()) / (float) DPI_DEFAULT;
 #endif // WIN32
-    if (m_design_sketch_tool != nullptr)   // Design: the corner is at the bottom-right; nothing owns the bottom-left
+    if (!navigator_at_bottom_left())   // the bottom-left corner is free
         return CANVAS_TOOLBAR_MARGIN * sc;
     const float left = wxGetApp().show_3d_navigator() ? NAVIGATOR_SIZE : CANVAS_TOOLBAR_MARGIN;
     return (left + 2.f * CANVAS_TOOLBAR_PADDING + CANVAS_TOOLBAR_BUTTON) * sc;
+}
+
+bool GLCanvas3D::navigator_right() const  { return wxGetApp().navigator_right(); }
+bool GLCanvas3D::navigator_bottom() const { return wxGetApp().navigator_bottom(); }
+
+float GLCanvas3D::navigator_width() const
+{
+    float sc = get_scale();
+#ifdef WIN32
+    sc *= (float) get_dpi_for_window(wxGetApp().GetTopWindow()) / (float) DPI_DEFAULT;
+#endif // WIN32
+    const float nav = wxGetApp().show_3d_navigator() ? NAVIGATOR_SIZE : CANVAS_TOOLBAR_MARGIN;
+    return (nav + 2.f * CANVAS_TOOLBAR_PADDING + CANVAS_TOOLBAR_BUTTON) * sc;
+}
+
+float GLCanvas3D::navigator_height() const
+{
+    float sc = get_scale();
+#ifdef WIN32
+    sc *= (float) get_dpi_for_window(wxGetApp().GetTopWindow()) / (float) DPI_DEFAULT;
+#endif // WIN32
+    return wxGetApp().show_3d_navigator() ? NAVIGATOR_SIZE * sc : 0.f;
 }
 
 GLToolbar& GLCanvas3D::collapse_toolbar() const
@@ -6413,10 +6438,10 @@ void GLCanvas3D::_render_3d_navigator()
     sc *= (float) dpi / (float) DPI_DEFAULT;
 #endif // WIN32
 
-    // The Design tab's left panel covers the bottom-left corner, so its navigator sits at the bottom-right.
-    const bool  design_canvas = m_design_sketch_tool != nullptr;
-    const float viewManipulateLeft = design_canvas ? io.DisplaySize.x - NAVIGATOR_SIZE * sc : 0.f;
-    const float viewManipulateTop  = io.DisplaySize.y;
+    // The corner is a preference, the same in Prepare and Design; on the left, Design starts past its panel.
+    const float nav_size           = NAVIGATOR_SIZE * sc;
+    const float viewManipulateLeft = wxGetApp().navigator_right() ? io.DisplaySize.x - nav_size : m_navigator_left_inset;
+    const float viewManipulateTop  = wxGetApp().navigator_bottom() ? io.DisplaySize.y - nav_size : m_navigator_top_inset;
     const float camDistance        = 8.f;
 
     Camera&     camera           = wxGetApp().plater()->get_camera();
@@ -6435,7 +6460,7 @@ void GLCanvas3D::_render_3d_navigator()
     const float size  = NAVIGATOR_SIZE * sc;
     m_canvas_toolbar_pos[0] = size;
     const auto result = ImGuizmo::ViewManipulate(cameraView, cameraProjection, ImGuizmo::OPERATION::ROTATE, ImGuizmo::MODE::WORLD, nullptr,
-                                                 camDistance, ImVec2(viewManipulateLeft, viewManipulateTop - size), ImVec2(size, size),
+                                                 camDistance, ImVec2(viewManipulateLeft, viewManipulateTop), ImVec2(size, size),
                                                  0x00101010);
 
     // Restore the real mouse-down state
@@ -9718,7 +9743,7 @@ void GLCanvas3D::_render_imgui_select_plate_toolbar()
     const float y_offset = is_collapse_toolbar_on_left() ? (get_collapse_toolbar_height() + 5) : 0;
     // Make sure the window does not overlap the 3d navigator
     auto window_height_max = canvas_h - y_offset;
-    if (wxGetApp().show_3d_navigator()) {
+    if (wxGetApp().show_3d_navigator() && navigator_at_bottom_left()) {
         window_height_max -= (128 * f_scale + 5);
     }
     else { // ORCA spacing for canvas menu
@@ -10149,17 +10174,18 @@ void GLCanvas3D::_render_canvas_toolbar()
     ImVec2        margin   = ImVec2(m_canvas_toolbar_pos[0] > 0 ? 0.f : (CANVAS_TOOLBAR_MARGIN * sc), CANVAS_TOOLBAR_MARGIN * sc);
     ImVec2        spacing  = ImVec2(6.f, 6.f)  * sc;
     ImVec2        padding  = ImVec2(CANVAS_TOOLBAR_PADDING, CANVAS_TOOLBAR_PADDING) * sc;
-    Vec2i32       pos      = {
-        m_canvas_toolbar_pos[0]        + margin.x,
-        get_canvas_size().get_height() - margin.y
+    // The column stands beside the navigator, on its inner side, in the same corner.
+    const bool    at_right  = wxGetApp().navigator_right();
+    const bool    at_bottom = wxGetApp().navigator_bottom();
+    const float   tb_w      = btn_size.x + 2.f * padding.x;
+    const float   nav_w     = wxGetApp().show_3d_navigator() ? NAVIGATOR_SIZE * sc : CANVAS_TOOLBAR_MARGIN * sc;
+    Vec2i32       pos       = {
+        int(at_right ? float(get_canvas_size().get_width()) - tb_w - nav_w : m_navigator_left_inset + nav_w),
+        int(at_bottom ? float(get_canvas_size().get_height()) - margin.y : m_navigator_top_inset + margin.y)
     };
-    if (m_design_sketch_tool != nullptr) {   // Design: the column stands left of the navigator at the bottom-right, clear of the panel
-        const float tb_w = btn_size.x + 2.f * padding.x;
-        pos[0] = int(float(get_canvas_size().get_width()) - tb_w - (wxGetApp().show_3d_navigator() ? NAVIGATOR_SIZE * sc : CANVAS_TOOLBAR_MARGIN * sc));
-    }
     bool          zoom_btn = wxGetApp().show_canvas_zoom_button();
 
-    imgui.set_next_window_pos(pos[0], pos[1], ImGuiCond_Always, 0, 1); // pivot bottom-left
+    imgui.set_next_window_pos(pos[0], pos[1], ImGuiCond_Always, 0, at_bottom ? 1 : 0); // pivot: the corner's own
 
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0    );
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding   , {0,0});
