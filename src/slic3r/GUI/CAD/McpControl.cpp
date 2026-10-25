@@ -49,6 +49,7 @@
 #include <wx/base64.h>
 #include <wx/mstream.h>
 #include <tuple>
+#include <sstream>
 #include <wx/dcscreen.h>
 #include <wx/evtloop.h>
 #include <wx/textctrl.h>
@@ -193,7 +194,7 @@ bool read_only_method(const std::string& m)
         "describe_tools", "describe_scene", "query_topology", "measure", "mass_properties",
         "slice_body", "validate_against", "list_verbs", "sketch_describe", "sketch_validate",
         "check_interference", "min_distance", "analyze_printability", "inspect_design", "list_commands", "export", "save", "screenshot", "ui.inspect", "ui.candidates", "ui.worldToScreen", "ui.screenshot", "variables_export", "sketch_dimensions", "list_fields",
-        "set_body_visible", "isolate_body", "set_body_color", "set_body_opacity", "explode", "section_set" };
+        "sweep_variable", "set_body_visible", "isolate_body", "set_body_color", "set_body_opacity", "explode", "section_set" };
     return k.count(m) > 0;
 }
 
@@ -593,6 +594,19 @@ json describe_tools_core()
     };
 }
 
+// A body's id that outlives re-indexing: the feature that made it and which of that feature's bodies it is ("f3.0"). Booleans,
+// undo and deletes shift body INDICES; the recompute carries colour, name and every feature's body reference by this identity,
+// so a caller that keeps the id keeps the body. It changes only when the history is reordered or the maker is deleted.
+int body_by_name(const CadDocument& doc, const std::string& name);   // defined with the other body helpers
+
+std::string body_stable_id(const CadDocument& doc, int i)
+{
+    int ord = 0;
+    for (int j = 0; j < i; ++j)
+        if (doc.bodies[j].source_feature == doc.bodies[i].source_feature) ++ord;
+    return "f" + std::to_string(doc.bodies[i].source_feature) + "." + std::to_string(ord);
+}
+
 json describe_scene(DesignPanel* panel)
 {
     CadDocument& doc = panel->mcp_doc();
@@ -612,6 +626,7 @@ json describe_scene(DesignPanel* panel)
         // The user's name when the body has one, the derived maker name otherwise — the same
         // rule the Bodies row shows, so a driver and a person read the same thing.
         json b{{"index", int(i)},
+               {"id", body_stable_id(doc, int(i))},
                {"name", doc.bodies[i].has_user_name ? doc.bodies[i].user_name : doc.bodies[i].name},
                {"user_name", doc.bodies[i].has_user_name},
                {"has_color", doc.bodies[i].has_color}};
@@ -678,6 +693,7 @@ json describe_tools()
         compact_tool("set_parameter", "Same as set_variable, and says how many features the change rebuilt (recomputed) and how many came from the cache (restored).", {{"name", "string", ""}, {"expr", "string", "number or expression"}}),
         compact_tool("list_commands", "Every tool and every ribbon verb with whether it can run now and, if not, why. filter = a substring of the name.", {{"filter", "string", "optional substring"}}),
         compact_tool("execute", "Run a tool by name or a ribbon verb by id (see list_commands). verbose:false returns only ok and the error.", {{"command", "string", "tool name or verb id"}, {"params", "object", "that command's parameters"}, {"verbose", "boolean", "default true"}}),
+        compact_tool("sweep_variable", "Regression run: set a variable to each of `values`, rebuild, record volume / size / interferences and check them against `expect` ({bodies, volume_min, volume_max, size_min, size_max, no_interference}). The design is restored afterwards.", {{"name", "string", "variable"}, {"values", "array", "expressions or numbers"}, {"expect", "object", "optional limits"}}),
         compact_tool("min_distance", "Shortest distance between two bodies and the closest points; b can be tried at a hypothetical offset (move_b) without changing anything.", {{"a", "integer", "body index or name"}, {"b", "integer", "body index or name"}, {"move_b", "array", "[dx,dy,dz] mm"}}),
         compact_tool("analyze_printability", "Overhang area and levels (a flat pocket ceiling shows as one level), bed contact, height and disconnected solids of a body in a print orientation. rotate [rx,ry,rz] deg; the body rests on its lowest point.", {{"body", "integer", "body index or name"}, {"rotate", "array", "[rx,ry,rz] deg"}, {"overhang_angle", "number", "deg from vertical, default 45"}}),
         compact_tool("rename_body", "Give a body a name. Verbs that take `body` then accept the name as well as the index (extrude, hole, pattern, fillet, boolean...).", {{"body", "integer", "body index"}, {"name", "string", "unique name"}}),
@@ -714,7 +730,7 @@ json describe_tools()
         compact_tool("rename_variable", "Rename a variable; every expression that uses it follows (token-wise).", {{"from", "string", ""}, {"to", "string", ""}}),
         compact_tool("variables_export", "The variables as CSV (name,expression); also written to `path` when given.", {{"path", "string", "optional absolute .csv"}}),
         compact_tool("variables_import", "Add or replace variables from CSV text or a file; all rows are checked first.", {{"csv", "string", ""}, {"path", "string", ""}}),
-        compact_tool("sketch_dimensions", "The dimensions of a committed sketch with their index, value and bound expression. Bind one with set_feature_expr {feature: sketch, field: \"dim:<index>\", expr}.", {{"sketch", "integer", "Sketch feature index"}}),
+        compact_tool("sketch_dimensions", "The dimensions of a committed sketch, in creation order (the index is stable until the sketch is edited), with their kind, value and bound expression. Bind one with set_feature_expr {feature: sketch, field: \"dim:<index>\", expr}.", {{"sketch", "integer", "Sketch feature index"}}),
         compact_tool("rename_feature", "Rename a feature in the history.", {{"feature", "integer", "feature index"}, {"name", "string", "new name"}}),
         compact_tool("move_feature", "Move a feature to another history position; stops where a dependency (a sketch below its consumer) forbids the next step.", {{"feature", "integer", "feature index"}, {"to", "integer", "destination index"}}),
         compact_tool("suppress", "Suppress (or restore) a feature; downstream features rebuild without it.", {{"feature", "integer", "feature index"}, {"suppressed", "boolean", "default true"}}),
@@ -786,7 +802,7 @@ bool profile_from(const json& params, SketchProfile& out)
 const TopoDS_Shape& body_shape(DesignPanel* panel, const json& params)
 {
     CadDocument& doc = panel->mcp_doc();
-    int idx = params.value("body", 0);
+    int idx = params.contains("body") && params["body"].is_string() ? body_by_name(doc, params["body"].get<std::string>()) : params.value("body", 0);
     if (idx < 0 || idx >= int(doc.bodies.size()))
         throw std::runtime_error("body index out of range (have " + std::to_string(doc.bodies.size()) + ")");
     if (doc.bodies[idx].shape.IsNull())
@@ -1223,6 +1239,8 @@ json action_revolve(DesignPanel* panel, const json& params)
 // merges bodies or an earlier feature is undone, a name does not.
 int body_by_name(const CadDocument& doc, const std::string& name)
 {
+    for (int i = 0; i < int(doc.bodies.size()); ++i)   // the stable id inspect_design shows ("f3.0")
+        if (body_stable_id(doc, i) == name) return i;
     int found = -1;
     for (int i = 0; i < int(doc.bodies.size()); ++i) {
         const CadBody& b = doc.bodies[i];
@@ -2804,6 +2822,62 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
                 {"warnings", solids > 1 ? json::array({"the body is " + std::to_string(solids) + " disconnected solids"}) : json::array()}};
 }
 
+// {name, values:[expr...], expect?:{bodies, volume_min, volume_max, size_max:[x,y,z], size_min:[x,y,z], no_interference}}
+// A parametric regression run: for each value the variable is set, the model rebuilt, and volume, bounding size and overlapping
+// pairs recorded; `expect` turns that into pass/fail per value. The design is put back as it was, whatever happens.
+json action_sweep_variable(DesignPanel* panel, const json& params)
+{
+    CadDocument& doc = panel->mcp_doc();
+    const std::string name = params.value("name", std::string());
+    if (!doc.variables.count(name)) throw std::runtime_error("no variable '" + name + "'");
+    if (!params.contains("values") || !params["values"].is_array() || params["values"].empty() || params["values"].size() > 100)
+        throw std::runtime_error("'values' is 1-100 expressions or numbers");
+    const json expect = params.value("expect", json::object());
+    const std::string saved = doc.variables[name];
+    doc.checkpoint();
+    json rows = json::array();
+    int failed = 0;
+    for (const json& v : params["values"]) {
+        std::string expr;
+        if (v.is_string()) expr = v.get<std::string>();
+        else { std::ostringstream os; os.imbue(std::locale::classic()); os << v.get<double>(); expr = os.str(); }   // not to_string: it writes "10,000000" under it_IT
+        doc.variables[name] = expr;
+        json row{{"value", v}};
+        bool ok = false;
+        try { ok = doc.recompute(); } catch (const std::exception& e) { doc.error = e.what(); }
+        row["rebuilt"] = ok;
+        std::vector<std::string> why;
+        if (!ok) { row["error"] = doc.error; why.push_back("rebuild failed: " + doc.error); }
+        else {
+            double vol = 0;
+            for (int i = 0; i < int(doc.bodies.size()); ++i) vol += std::abs(doc.body_mass_properties(i).volume);
+            BoundingBoxf3 bb;
+            for (const TriangleMesh& m : doc.display_body_meshes) if (!m.empty()) bb.merge(m.bounding_box());
+            const Vec3d sz = bb.defined ? bb.size() : Vec3d::Zero();
+            const int pairs = int(doc.check_interference().size());
+            row["bodies"] = int(doc.bodies.size()); row["volume"] = vol; row["size"] = {sz.x(), sz.y(), sz.z()}; row["interferences"] = pairs;
+            if (expect.contains("bodies") && int(doc.bodies.size()) != expect["bodies"].get<int>()) why.push_back("bodies " + std::to_string(doc.bodies.size()) + " != " + std::to_string(expect["bodies"].get<int>()));
+            if (expect.contains("volume_min") && vol < expect["volume_min"].get<double>()) why.push_back("volume below volume_min");
+            if (expect.contains("volume_max") && vol > expect["volume_max"].get<double>()) why.push_back("volume above volume_max");
+            for (int k = 0; k < 3; ++k) {
+                if (expect.contains("size_max") && sz[k] > expect["size_max"][k].get<double>() + 1e-6) why.push_back("size above size_max on axis " + std::to_string(k));
+                if (expect.contains("size_min") && sz[k] < expect["size_min"][k].get<double>() - 1e-6) why.push_back("size below size_min on axis " + std::to_string(k));
+            }
+            if (expect.value("no_interference", false) && pairs > 0) why.push_back(std::to_string(pairs) + " overlapping pairs");
+        }
+        row["pass"] = why.empty();
+        if (!why.empty()) { ++failed; row["why"] = why; }
+        rows.push_back(row);
+    }
+    doc.variables[name] = saved;   // put it back: the checkpoint's undo restores the features, this the variable
+    doc.undo();
+    doc.variables[name] = saved;
+    bool back = false;
+    try { back = doc.recompute(); } catch (const std::exception&) {}
+    panel->mcp_after_change();
+    return json{{"ok", back}, {"variable", name}, {"restored", saved}, {"failed", failed}, {"rows", rows}};
+}
+
 json action_set_variable(DesignPanel* panel, const json& params)
 {
     if (!params.contains("name")) throw std::runtime_error("set_variable needs 'name'");
@@ -3275,8 +3349,8 @@ json action_save(DesignPanel* panel, const json& params)
 json action_rename_body(DesignPanel* panel, const json& params)
 {
     CadDocument& doc = panel->mcp_doc();
-    if (!params.contains("body") || !params["body"].is_number_integer()) throw std::runtime_error("rename_body needs 'body' (index)");
-    const int b = params["body"].get<int>();
+    if (!params.contains("body") || !(params["body"].is_number_integer() || params["body"].is_string())) throw std::runtime_error("rename_body needs 'body' (index, id or name)");
+    const int b = params["body"].is_string() ? body_by_name(doc, params["body"].get<std::string>()) : params["body"].get<int>();
     if (b < 0 || b >= int(doc.bodies.size())) throw std::runtime_error("no body " + std::to_string(b));
     const std::string name = params.value("name", std::string());
     if (name.empty() || name.size() > 80) throw std::runtime_error("'name' must be 1-80 characters");
@@ -3293,8 +3367,8 @@ json action_rename_body(DesignPanel* panel, const json& params)
 // ---- viewport: what the GUI shows per body, the same state its eye / colour / section buttons set ----------------------
 int body_arg(DesignPanel* panel, const json& params, const char* what)
 {
-    if (!params.contains("body") || !params["body"].is_number_integer()) throw std::runtime_error(std::string(what) + " needs 'body' (a body id from inspect_design)");
-    const int b = params["body"].get<int>();
+    if (!params.contains("body") || !(params["body"].is_number_integer() || params["body"].is_string())) throw std::runtime_error(std::string(what) + " needs 'body' (an index, id or name from inspect_design)");
+    const int b = params["body"].is_string() ? body_by_name(panel->mcp_doc(), params["body"].get<std::string>()) : params["body"].get<int>();
     if (b < 0 || b >= int(panel->mcp_doc().bodies.size())) throw std::runtime_error("no body " + std::to_string(b));
     return b;
 }
@@ -4113,6 +4187,7 @@ json call_method_core(DesignPanel* panel, const std::string& method, const json&
     if (method == "mate")          return action_mate(panel, params);
     if (method == "check_interference") return action_check_interference(panel, params);
     if (method == "min_distance")       return action_min_distance(panel, params);
+    if (method == "sweep_variable")     return action_sweep_variable(panel, params);
     if (method == "analyze_printability") return action_analyze_printability(panel, params);
     throw MethodNotFound{};
 }
