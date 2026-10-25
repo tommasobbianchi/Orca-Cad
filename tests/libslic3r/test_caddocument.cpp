@@ -10846,3 +10846,32 @@ TEST_CASE("boolean identity: V(A u B) + V(A n B) = V(A) + V(B) on random overlap
     }
     REQUIRE(checked >= 10);   // enough of the random pairs actually overlapped
 }
+
+TEST_CASE("Expression literals parse with a dot whatever the process locale", "[CadDocument][expr]")
+{
+    // it_IT used to turn "3.6" into 3 and "0.2" into 0 (std::stod reads the locale's decimal separator).
+    std::locale prev;
+    try { std::locale::global(std::locale("it_IT.UTF-8")); } catch (const std::exception&) { /* not installed here: the check below still holds */ }
+    CadDocument doc;
+    const int sk = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(), 10, 10, 0, "S");
+    const int ex = doc.add_extrude(sk, 5, false, BooleanMode::New, "E");
+    doc.features[ex].expr["distance"] = "3.6 + 0.2";
+    const bool ok = doc.recompute();
+    std::locale::global(prev);
+    REQUIRE(ok);
+    CHECK(std::abs(doc.features[ex].distance - 3.8) < 1e-9);
+    doc.features[ex].expr["distance"] = "1.2.3";   // never a silent truncation
+    CHECK_FALSE(doc.recompute());
+}
+
+TEST_CASE("Pattern grid and thin-wall fields can be bound, and the list names them", "[CadDocument][expr]")
+{
+    for (const char* f : { "pattern_spacing2", "pattern_count2", "thin_in", "thin_out" }) {
+        INFO(f);
+        CHECK(CadDocument::is_bindable_field(f));
+    }
+    const auto names = CadDocument::bindable_fields();
+    CHECK(std::find(names.begin(), names.end(), "thread_diameter") != names.end());
+    CHECK(std::find(names.begin(), names.end(), "distance") != names.end());
+    CHECK(std::is_sorted(names.begin(), names.end()));
+}
