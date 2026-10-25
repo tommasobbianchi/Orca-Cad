@@ -193,7 +193,7 @@ bool read_only_method(const std::string& m)
     static const std::set<std::string> k = {
         "describe_tools", "describe_scene", "query_topology", "measure", "mass_properties",
         "slice_body", "validate_against", "list_verbs", "sketch_describe", "sketch_validate",
-        "check_interference", "min_distance", "analyze_printability", "inspect_design", "list_commands", "export", "save", "screenshot", "ui.inspect", "ui.candidates", "ui.worldToScreen", "ui.screenshot", "variables_export", "sketch_dimensions", "list_fields",
+        "check_interference", "select_topology", "min_distance", "analyze_printability", "inspect_design", "list_commands", "export", "save", "screenshot", "ui.inspect", "ui.candidates", "ui.worldToScreen", "ui.screenshot", "variables_export", "sketch_dimensions", "list_fields",
         "sweep_variable", "set_body_visible", "isolate_body", "set_body_color", "set_body_opacity", "explode", "section_set" };
     return k.count(m) > 0;
 }
@@ -675,6 +675,7 @@ json describe_tools()
         compact_tool("sketch_add", "Add entities to the open sketch. Auto-inferred exact relations (coincident joints, H/V, origin) unless infer:false.", {
             {"entities", "array", "[{type:line,p0,p1}|{type:circle,center,radius}|{type:arc,center,radius,start_angle,end_angle}|{type:point,p}...]"},
             {"type", "string", "single-entity shorthand"}, {"rect", "array", "[x0,y0,x1,y1] rectangle shorthand"},
+            {"shape", "string", "rounded_rect {rect, radius} | slot {p0, p1, width} | trapezoid {base:[x0,x1], y, top_width, height, top_x0?}: closed outline, exact geometry, auto-constrained"},
             {"construction", "boolean", "add as construction geometry"}, {"infer", "boolean", "default true; false adds geometry only, so your own constraints are not rejected as redundant"}}),
         compact_tool("sketch_commit", "Close the open sketch into a Sketch feature; returns sketch_index, to hand to extrude/revolve/sweep/loft.", {}),
         compact_tool("sketch_cancel", "Discard the open sketch.", {}),
@@ -694,6 +695,10 @@ json describe_tools()
         compact_tool("list_commands", "Every tool and every ribbon verb with whether it can run now and, if not, why. filter = a substring of the name.", {{"filter", "string", "optional substring"}}),
         compact_tool("execute", "Run a tool by name or a ribbon verb by id (see list_commands). verbose:false returns only ok and the error.", {{"command", "string", "tool name or verb id"}, {"params", "object", "that command's parameters"}, {"verbose", "boolean", "default true"}}),
         compact_tool("sweep_variable", "Regression run: set a variable to each of `values`, rebuild, record volume / size / interferences and check them against `expect` ({bodies, volume_min, volume_max, size_min, size_max, no_interference}). The design is restored afterwards.", {{"name", "string", "variable"}, {"values", "array", "expressions or numbers"}, {"expect", "object", "optional limits"}}),
+        compact_tool("select_topology", "Find faces or edges by what they are, not by id: where {normal '+z'|[x,y,z], kind planar|cylindrical|line|circle, radius/radius_min/radius_max, length_min/length_max, parallel x|y|z, z, extreme max_z|min_x.., near [x,y,z]}. Returns ids with the generation they are good for; use them before the next rebuild (fillet, chamfer, hole...).", {{"body", "integer", "body index, id or name"}, {"type", "string", "face|edge"}, {"where", "object", "filters"}, {"limit", "integer", "default 200"}}),
+        compact_tool("support_fin", "A breakaway support fin against a near-vertical planar face (the Support Fins technique): a thin wall standing off the face by gap, plus horizontal one-layer tines crossing the gap into the part, fused to it. Parameters: gap 0.2, thickness 1.2, tine_width 0.6, tine_height 0.2, tine_reach 0.5, tine_rows 5, tines_per_row 2, margin 1.", {{"face", "integer", "face id (select_topology)"}, {"body", "integer", "body index, id or name; default last"}, {"gap", "number", "mm"}, {"thickness", "number", "mm"}, {"tine_rows", "integer", ""}}),
+        compact_tool("job_status", "Any tool call with async:true in its params answers at once with a job id and runs in the background; this returns {state: running|done, elapsed_s, reply}. Answered even while the app is busy with the job.", {{"job", "string", "job id from the async call"}}),
+        compact_tool("name_dimension", "Name a sketch dimension (index from sketch_dimensions); set_feature_expr then takes field \"dim:<name>\". name \"\" removes it. Names are positions: deleting a constraint from the sketch shifts the ones after it.", {{"sketch", "integer", "Sketch feature index"}, {"index", "integer", "dimension index"}, {"name", "string", "letters, digits, _"}}),
         compact_tool("min_distance", "Shortest distance between two bodies and the closest points; b can be tried at a hypothetical offset (move_b) without changing anything.", {{"a", "integer", "body index or name"}, {"b", "integer", "body index or name"}, {"move_b", "array", "[dx,dy,dz] mm"}}),
         compact_tool("analyze_printability", "Overhang area and levels (a flat pocket ceiling shows as one level), bed contact, height and disconnected solids of a body in a print orientation. rotate [rx,ry,rz] deg; the body rests on its lowest point.", {{"body", "integer", "body index or name"}, {"rotate", "array", "[rx,ry,rz] deg"}, {"overhang_angle", "number", "deg from vertical, default 45"}}),
         compact_tool("rename_body", "Give a body a name. Verbs that take `body` then accept the name as well as the index (extrude, hole, pattern, fillet, boolean...).", {{"body", "integer", "body index"}, {"name", "string", "unique name"}}),
@@ -864,6 +869,82 @@ json query_topology(DesignPanel* panel, const json& params)
                 // The ids above are indices into this exact topology and expire with it. Echo
                 // this back as "generation" on the calls that consume them.
                 {"generation", panel->mcp_doc().topo_generation}};
+}
+
+// Faces and edges by what they ARE, not by an id that means something else after the next rebuild: ask here, then use the ids in
+// the same turn (they carry the `generation` they are good for). {body, type:"face"|"edge", where:{...}, limit?}
+//   normal "+z"|"-z"|"+x"|... or [x,y,z] (faces, within ~1 degree)    kind "planar"|"cylindrical"|"line"|"circle"
+//   radius (+ tol) or radius_min / radius_max                         length_min / length_max (edges)
+//   parallel "x"|"y"|"z" (edges)       z (centroid / mid height, +- tol, default 1e-3)
+//   extreme "max_z"|"min_z"|"max_x"|"min_x"|"max_y"|"min_y"           near [x,y,z] (closest first)
+json action_select_topology(DesignPanel* panel, const json& params)
+{
+    const std::string type = params.value("type", std::string("face"));
+    if (type != "face" && type != "edge") throw std::runtime_error("type is face or edge");
+    const json where = params.value("where", json::object());
+    json topo = query_topology(panel, params);
+    const json& all = topo[type == "face" ? "faces" : "edges"];
+    auto axis_of = [](const std::string& a) -> Vec3d {
+        if (a.size() == 2 && (a[0] == '+' || a[0] == '-')) {
+            const double sg = a[0] == '+' ? 1. : -1.;
+            if (a[1] == 'x') return Vec3d(sg, 0, 0);
+            if (a[1] == 'y') return Vec3d(0, sg, 0);
+            if (a[1] == 'z') return Vec3d(0, 0, sg);
+        }
+        throw std::runtime_error("an axis is \"+x\", \"-x\", \"+y\", \"-y\", \"+z\" or \"-z\"");
+    };
+    auto v3 = [](const json& a) { return Vec3d(a[0].get<double>(), a[1].get<double>(), a[2].get<double>()); };
+    std::vector<const json*> hit;
+    for (const json& e : all) {
+        if (where.contains("kind") && e.value("kind", std::string()) != where["kind"].get<std::string>()) continue;
+        if (where.contains("radius")) {
+            if (!e.contains("radius") || std::abs(e["radius"].get<double>() - where["radius"].get<double>()) > where.value("tol", 1e-3)) continue;
+        }
+        if (where.contains("radius_min") && (!e.contains("radius") || e["radius"].get<double>() < where["radius_min"].get<double>())) continue;
+        if (where.contains("radius_max") && (!e.contains("radius") || e["radius"].get<double>() > where["radius_max"].get<double>())) continue;
+        if (type == "face" && where.contains("normal")) {
+            const Vec3d want = where["normal"].is_string() ? axis_of(where["normal"].get<std::string>()) : Vec3d(v3(where["normal"]).normalized());
+            if (v3(e["normal"]).normalized().dot(want) < 0.9998) continue;
+        }
+        if (type == "edge") {
+            const Vec3d a = v3(e["p0"]), b = v3(e["p1"]);
+            const double len = e["length"].get<double>();
+            if (where.contains("length_min") && len < where["length_min"].get<double>()) continue;
+            if (where.contains("length_max") && len > where["length_max"].get<double>()) continue;
+            if (where.contains("parallel")) {
+                const std::string ax = where["parallel"].get<std::string>();
+                const Vec3d u = axis_of("+" + ax);
+                const Vec3d d = (b - a);
+                if (d.norm() < 1e-9 || std::abs(d.normalized().dot(u)) < 0.9998) continue;
+            }
+        }
+        if (where.contains("z")) {
+            const double z = type == "face" ? v3(e["centroid"]).z() : 0.5 * (v3(e["p0"]).z() + v3(e["p1"]).z());
+            if (std::abs(z - where["z"].get<double>()) > where.value("tol", 1e-3)) continue;
+        }
+        hit.push_back(&e);
+    }
+    auto pos = [&](const json& e) { return type == "face" ? v3(e["centroid"]) : Vec3d(0.5 * (v3(e["p0"]) + v3(e["p1"]))); };
+    if (where.contains("extreme") && !hit.empty()) {
+        const std::string ex = where["extreme"].get<std::string>();
+        if (ex.size() != 5 || (ex.substr(0, 4) != "max_" && ex.substr(0, 4) != "min_")) throw std::runtime_error("extreme is max_x|min_x|max_y|min_y|max_z|min_z");
+        const int k = ex[4] == 'x' ? 0 : ex[4] == 'y' ? 1 : 2;
+        const bool mx = ex[1] == 'a';
+        double best = mx ? -1e300 : 1e300;
+        for (const json* e : hit) best = mx ? std::max(best, pos(*e)[k]) : std::min(best, pos(*e)[k]);
+        std::vector<const json*> keep;
+        for (const json* e : hit) if (std::abs(pos(*e)[k] - best) < 1e-3) keep.push_back(e);
+        hit.swap(keep);
+    }
+    if (where.contains("near")) {
+        const Vec3d q = v3(where["near"]);
+        std::sort(hit.begin(), hit.end(), [&](const json* a, const json* b) { return (pos(*a) - q).norm() < (pos(*b) - q).norm(); });
+    }
+    const size_t limit = size_t(std::max(1, params.value("limit", 200)));
+    if (hit.size() > limit) hit.resize(limit);
+    json ids = json::array(), matches = json::array();
+    for (const json* e : hit) { ids.push_back((*e)["id"]); matches.push_back(*e); }
+    return json{{"ok", true}, {"type", type}, {"count", int(ids.size())}, {"ids", ids}, {"matches", matches}, {"generation", topo["generation"]}};
 }
 
 // One measurement reference -> a representative point and (optionally) a direction.
@@ -1491,8 +1572,10 @@ json action_boolean(DesignPanel* panel, const json& params)
 {
     BooleanMode m = bool_from(params.value("op", std::string("subtract")));
     if (m == BooleanMode::New) throw std::runtime_error("op must be union | subtract | intersect");
-    const int target = params.value("target", 0);
-    const int tool   = params.value("tool", 1);
+    CadDocument& d0 = panel->mcp_doc();
+    auto body_of = [&](const char* k, int dflt) { return !params.contains(k) ? dflt : params[k].is_string() ? body_by_name(d0, params[k].get<std::string>()) : params[k].get<int>(); };
+    const int target = body_of("target", 0);
+    const int tool   = body_of("tool", 1);
     const bool keep  = params.value("keep_tool", false);
     const double tol = params.value("tolerance", 0.0);
     CadDocument& doc = panel->mcp_doc();
@@ -1506,6 +1589,71 @@ json action_boolean(DesignPanel* panel, const json& params)
     if (!ok) { const std::string why = doc.error; doc.undo(); doc.error = why; }
     panel->mcp_after_change();
     return json{{"ok", ok}, {"boolean_index", b}, {"bodies", int(doc.bodies.size())}, {"error", doc.error}};
+}
+
+// Support fin (Slant3D / the Support Fins plugin, docs/FIN-SPEC.md): a thin wall standing off a near-vertical face by `gap`, and
+// horizontal one-layer tines that cross the gap and fuse into the part, so the fin both props and holds. Built from the same
+// features a person would use (a fin extrude, one extrude per row of tines, a union with the part), so the history stays editable.
+// {body?, face, gap=0.2, thickness=1.2, tine_width=0.6, tine_height=0.2, tine_reach=0.5, tine_rows=5, tines_per_row=2, margin=1}
+// Rows crowd toward the base and thin out with height; tines are one layer tall so each prints as a single bead.
+json action_support_fin(DesignPanel* panel, const json& params)
+{
+    CadDocument& doc = panel->mcp_doc();
+    if (!params.contains("face") || !params["face"].is_number_integer()) throw std::runtime_error("support_fin needs 'face' (id from query_topology or select_topology)");
+    const int body = params.contains("body") ? (params["body"].is_string() ? body_by_name(doc, params["body"].get<std::string>()) : params["body"].get<int>()) : int(doc.bodies.size()) - 1;
+    if (body < 0 || body >= int(doc.bodies.size())) throw std::runtime_error("no such body");
+    const TopoDS_Face fc = GeometryEngine::face_by_index(doc.bodies[body].shape, params["face"].get<int>());
+    if (fc.IsNull()) throw std::runtime_error("no such face on that body (ids expire when the model rebuilds)");
+    if (BRepAdaptor_Surface(fc).GetType() != GeomAbs_Plane) throw std::runtime_error("the fin stands against a planar face");
+    const Vec3d n = GeometryEngine::face_normal_world(fc).normalized();
+    if (std::abs(n.z()) > 0.2) throw std::runtime_error("the fin stands against a near-vertical face (normal within 12 degrees of horizontal)");
+    const double gap = params.value("gap", 0.2), thick = params.value("thickness", 1.2);
+    const double tw = params.value("tine_width", 0.6), th = params.value("tine_height", 0.2), reach = params.value("tine_reach", 0.5);
+    const int rows = params.value("tine_rows", 5), per = params.value("tines_per_row", 2);
+    const double margin = params.value("margin", 1.0);
+    if (gap < 0 || thick <= 0 || tw <= 0 || th <= 0 || reach < 0 || rows < 1 || per < 1) throw std::runtime_error("gap >= 0, thickness, tine_width, tine_height > 0, tine_rows and tines_per_row >= 1");
+
+    // The plane frame exactly as plane_from builds it, so profile coordinates mean what extrude will read them as.
+    const Vec3d h = std::abs(n.x()) < 0.9 ? Vec3d(1, 0, 0) : Vec3d(0, 1, 0);
+    const Vec3d ax = (h - n * h.dot(n)).normalized(), ay = n.cross(ax);
+    const Vec3d c = GeometryEngine::face_centroid_world(fc);
+    Bnd_Box bb; BRepBndLib::Add(fc, bb);
+    double x0, y0, z0, x1, y1, z1; bb.Get(x0, y0, z0, x1, y1, z1);
+    double u0 = 1e300, u1 = -1e300, v0 = 1e300, v1 = -1e300;
+    for (int i = 0; i < 8; ++i) {
+        const Vec3d q((i & 1 ? x1 : x0), (i & 2 ? y1 : y0), (i & 4 ? z1 : z0));
+        const double u = (q - c).dot(ax), v = (q - c).dot(ay);
+        u0 = std::min(u0, u); u1 = std::max(u1, u); v0 = std::min(v0, v); v1 = std::max(v1, v);
+    }
+    if (u1 - u0 < 2 * margin + tw || v1 - v0 < 2 * margin) throw std::runtime_error("the face is too small for a fin with that margin");
+    auto model_origin = [&](double shift) { const Vec3d o = c + n * shift - doc.modeling_origin; return json::array({o.x(), o.y(), o.z()}); };
+    auto rect = [](double a0, double b0, double a1, double b1) { return json::array({json::array({a0, b0}), json::array({a1, b0}), json::array({a1, b1}), json::array({a0, b1})}); };
+    const json nrm = json::array({n.x(), n.y(), n.z()});
+
+    // 1. the fin: a wall at `gap` off the face, `thickness` out from it
+    const int part_n = int(doc.bodies.size());
+    json r = action_extrude(panel, json{{"normal", nrm}, {"origin", model_origin(gap)}, {"profile", rect(u0, v0, u1, v1)}, {"distance", thick}, {"boolean", "new"}});
+    if (!r.value("ok", false)) return r;
+    const int fin = int(doc.bodies.size()) - 1;
+    if (fin < part_n) throw std::runtime_error("the fin did not make a body");
+
+    // 2. a row of tines per station, from just inside the fin across the gap to `reach` into the part
+    int tines = 0;
+    for (int k = 0; k < rows; ++k) {
+        const double f = rows == 1 ? 0.0 : std::pow(double(k) / double(rows - 1), 1.6);   // crowded at the base, sparser up the wall
+        const double vz = v0 + margin + f * (v1 - v0 - 2 * margin - th);
+        for (int j = 0; j < per; ++j) {
+            const double uc = u0 + (u1 - u0) * (double(j) + 1.0) / (double(per) + 1.0);
+            json t = action_extrude(panel, json{{"normal", nrm}, {"origin", model_origin(gap + 0.1)}, {"profile", rect(uc - 0.5 * tw, vz, uc + 0.5 * tw, vz + th)},
+                                                {"distance", gap + 0.1 + reach}, {"flip", true}, {"boolean", "union"}, {"body", fin}});
+            if (!t.value("ok", false)) return t;
+            ++tines;
+        }
+    }
+    // 3. the fin and the part become one solid through the tines
+    json b = action_boolean(panel, json{{"op", "union"}, {"target", body}, {"tool", fin}});
+    b["fin_body_was"] = fin; b["tines"] = tines; b["rows"] = rows;
+    return b;
 }
 
 json action_pattern(DesignPanel* panel, const json& params)
@@ -1902,7 +2050,7 @@ std::vector<int> sketch_targets(const json& params, DesignSketchTool& t, bool al
 }
 
 // The face a sketch being drawn is attached to; written onto the Sketch feature by sketch_commit.
-struct PendingAttach { int body{-1}; int face{-1}; };
+struct PendingAttach { int body{-1}; int face{-1}; int datum{-1}; };
 PendingAttach g_pending_attach;
 
 json action_sketch_begin(DesignPanel* panel, const json& params)
@@ -1942,6 +2090,10 @@ json action_sketch_begin(DesignPanel* panel, const json& params)
         const int  n      = std::atoi(pl.c_str() + 6);
         if (n < 0 || n >= int(datums.size())) throw std::runtime_error("no such datum plane: " + pl);
         plane = datums[n].second;
+        int seen = 0;   // the Plane FEATURE behind that datum: the sketch follows it when the plane moves
+        const CadDocument& dd = panel->mcp_doc();
+        for (int j = 0; j < int(dd.features.size()); ++j)
+            if (dd.features[j].type == CadFeatureType::Plane && dd.features[j].enabled && seen++ == n) { g_pending_attach.datum = j; break; }
     }
     else if (pl != "XY") throw std::runtime_error("plane must be XY, XZ, YZ or datum:N");
     // Every plane passes through modeling_origin (the bed centre), as the GUI's, the datum planes', extrude{profile}'s,
@@ -1968,6 +2120,7 @@ json action_sketch_commit(DesignPanel* panel, const json& params)
     const int last = cd.last_added >= 0 && cd.last_added < int(cd.features.size()) ? cd.last_added : int(cd.features.size()) - 1;
     const bool is_sk = last >= 0 && cd.features[last].type == CadFeatureType::Sketch;
     if (is_sk && g_pending_attach.face >= 0) { cd.features[last].attach_body = g_pending_attach.body; cd.features[last].attach_face = g_pending_attach.face; }
+    if (is_sk && g_pending_attach.datum >= 0) cd.features[last].attach_datum = g_pending_attach.datum;
     g_pending_attach = {};
     return json{{"ok", true}, {"features", int(cd.features.size())}, {"sketch_index", is_sk ? last : -1}};
 }
@@ -1983,12 +2136,67 @@ json action_sketch_cancel(DesignPanel* panel, const json& params)
     return json{{"ok", true}};
 }
 
+// The closed outlines a caller would otherwise hand-compute: {shape:"rounded_rect", rect:[x0,y0,x1,y1], radius},
+// {shape:"slot", p0:[x,y], p1:[x,y], width} (centre to centre of the end arcs) and
+// {shape:"trapezoid", base:[x0,x1], y, top_width, height, top_x0?} (top centred over the base unless top_x0 is given).
+// Exact geometry, so the auto-constraint pass welds the corners and tangent joins and sets horizontal / vertical on its own.
+std::vector<SketchEntity> sketch_shape_from(const json& params)
+{
+    const std::string shape = params.at("shape").get<std::string>();
+    const bool cons = params.value("construction", false);
+    std::vector<SketchEntity> out;
+    auto line = [&](Vec2d a, Vec2d b) { SketchEntity e; e.type = SketchEntity::Type::Line; e.p0 = a; e.p1 = b; e.construction = cons; out.push_back(e); };
+    auto arc = [&](Vec2d c, double r, double a0, double a1) {
+        SketchEntity e; e.type = SketchEntity::Type::Arc; e.center = c; e.radius = r; e.start_angle = a0; e.end_angle = a1; e.construction = cons;
+        e.p0 = c + r * Vec2d(std::cos(a0), std::sin(a0)); e.p1 = c + r * Vec2d(std::cos(a1), std::sin(a1));
+        out.push_back(e);
+    };
+    auto pt = [&](const char* k) {
+        if (!params.contains(k) || !params[k].is_array() || params[k].size() < 2) throw std::runtime_error(std::string("'") + k + "' must be [x, y]");
+        return Vec2d(jn(params[k], 0), jn(params[k], 1));
+    };
+    const double H = M_PI / 2.0;
+    if (shape == "rounded_rect") {
+        if (!params.contains("rect") || !params["rect"].is_array() || params["rect"].size() < 4) throw std::runtime_error("rounded_rect needs 'rect' [x0, y0, x1, y1] and 'radius'");
+        const double x0 = std::min(jn(params["rect"], 0), jn(params["rect"], 2)), x1 = std::max(jn(params["rect"], 0), jn(params["rect"], 2));
+        const double y0 = std::min(jn(params["rect"], 1), jn(params["rect"], 3)), y1 = std::max(jn(params["rect"], 1), jn(params["rect"], 3));
+        const double r = params.value("radius", 0.0);
+        if (r <= 0 || 2 * r > (x1 - x0) + 1e-9 || 2 * r > (y1 - y0) + 1e-9) throw std::runtime_error("radius must be > 0 and at most half the shorter side");
+        line({x0 + r, y0}, {x1 - r, y0}); arc({x1 - r, y0 + r}, r, -H, 0.0);
+        line({x1, y0 + r}, {x1, y1 - r}); arc({x1 - r, y1 - r}, r, 0.0, H);
+        line({x1 - r, y1}, {x0 + r, y1}); arc({x0 + r, y1 - r}, r, H, 2 * H);
+        line({x0, y1 - r}, {x0, y0 + r}); arc({x0 + r, y0 + r}, r, 2 * H, 3 * H);
+    } else if (shape == "slot") {
+        const Vec2d a = pt("p0"), b = pt("p1");
+        const double w = params.value("width", 0.0);
+        if (w <= 0 || (b - a).norm() < 1e-9) throw std::runtime_error("slot needs two different centres and a positive 'width'");
+        const Vec2d d = (b - a).normalized(), n(-d.y(), d.x());
+        const double th = std::atan2(d.y(), d.x()), r = 0.5 * w;
+        line(a + n * r, b + n * r); arc(b, r, th - H, th + H);
+        line(b - n * r, a - n * r); arc(a, r, th + H, th + 3 * H);
+    } else if (shape == "trapezoid") {
+        if (!params.contains("base") || !params["base"].is_array() || params["base"].size() < 2) throw std::runtime_error("trapezoid needs 'base' [x0, x1], 'y', 'top_width' and 'height'");
+        const double bx0 = jn(params["base"], 0), bx1 = jn(params["base"], 1), y = params.value("y", 0.0);
+        const double tw = params.value("top_width", 0.0), h = params.value("height", 0.0);
+        if (bx1 <= bx0 || tw <= 0 || h <= 0) throw std::runtime_error("trapezoid needs base x1 > x0, top_width > 0 and height > 0");
+        const double tx0 = params.contains("top_x0") ? params["top_x0"].get<double>() : 0.5 * (bx0 + bx1) - 0.5 * tw;
+        line({bx0, y}, {bx1, y}); line({bx1, y}, {tx0 + tw, y + h});
+        line({tx0 + tw, y + h}, {tx0, y + h}); line({tx0, y + h}, {bx0, y});
+    } else
+        throw std::runtime_error("unknown shape '" + shape + "' (rounded_rect, slot, trapezoid)");
+    return out;
+}
+
+json action_sketch_constrain(DesignPanel* panel, const json& params);   // defined below
+
 json action_sketch_add(DesignPanel* panel, const json& params)
 {
     DesignSketchTool& t = mcp_sketch(panel);
     std::vector<SketchEntity> ents;
     if (params.contains("entities")) {
         for (const auto& j : params.at("entities")) ents.push_back(sketch_entity_from(j));
+    } else if (params.contains("shape")) {
+        ents = sketch_shape_from(params);
     } else if (params.contains("type")) {
         ents.push_back(sketch_entity_from(params));      // single-entity shorthand
     } else if (params.contains("rect")) {
@@ -2006,11 +2214,19 @@ json action_sketch_add(DesignPanel* panel, const json& params)
         ents.push_back(seg({x1, y1}, {x0, y1}));
         ents.push_back(seg({x0, y1}, {x0, y0}));
     } else {
-        throw std::runtime_error("sketch_add needs 'entities', a single 'type', or 'rect'");
+        throw std::runtime_error("sketch_add needs 'entities', a single 'type', 'rect', or a 'shape' (rounded_rect, slot, trapezoid)");
     }
     int base;
     { PhaseLog p("sketch_add.add_entities"); base = t.add_entities_scripted(ents, params.value("infer", true)); }
     panel->mcp_viewport()->request_repaint();
+    // A rounded outline: each line meets its arc tangentially (the inference welds the joints; tangency it does not set).
+    json tangents = json::array();
+    if (params.contains("shape") && base >= 0 && params.value("tangent", true)) {
+        const std::string sh = params["shape"].get<std::string>();
+        const int n = sh == "rounded_rect" ? 8 : sh == "slot" ? 4 : 0;
+        for (int k = 0; k < n; ++k) tangents.push_back(json{{"type", "tangent"}, {"a", base + k}, {"b", base + (k + 1) % n}});
+        if (!tangents.empty()) { try { action_sketch_constrain(panel, json{{"atomic", false}, {"constraints", tangents}}); } catch (const std::exception&) { /* geometry stays; dof reports what is free */ } }
+    }
     int dof;
     { PhaseLog p("sketch_add.dof"); dof = t.dof(); }
     return json{{"ok", base >= 0}, {"first_index", base}, {"added", int(ents.size())},
@@ -2921,6 +3137,18 @@ json action_set_feature_expr(DesignPanel* panel, const json& params)
         return json{{"ok", false}, {"error", "feature index out of range"}};
     std::string field = params["field"].get<std::string>();
     std::string expr  = params["expr"].get<std::string>();
+    if (field.rfind("dim:", 0) == 0 && field.size() > 4 && field.find_first_not_of("0123456789", 4) != std::string::npos) {
+        // "dim:<name>": a dimension named with name_dimension
+        const std::string nm = field.substr(4);
+        int hit = -1;
+        for (const auto& kv : doc.features[fi].dim_names) if (kv.second == nm) hit = kv.first;
+        if (hit < 0) {
+            std::string have;
+            for (const auto& kv : doc.features[fi].dim_names) have += (have.empty() ? "" : ", ") + kv.second;
+            return json{{"ok", false}, {"feature", fi}, {"field", field}, {"error", "no dimension named '" + nm + "' on feature " + std::to_string(fi) + (have.empty() ? " (name one with name_dimension)" : "; named: " + have)}};
+        }
+        field = "dim:" + std::to_string(hit);
+    }
     // A name the evaluator does not know would break every later recompute, so it is refused before anything is touched.
     if (!CadDocument::is_bindable_field(field)) {
         std::string names;
@@ -3869,9 +4097,31 @@ json action_sketch_dimensions(DesignPanel* panel, const json& params)
         if (c.type != T::Distance && c.type != T::DistanceX && c.type != T::DistanceY && c.type != T::Angle && c.type != T::Radius && c.type != T::Diameter) continue;
         const std::string field = "dim:" + std::to_string(i);
         const char* kind = c.type == T::Angle ? "angle" : c.type == T::Radius ? "radius" : c.type == T::Diameter ? "diameter" : c.type == T::DistanceX ? "distance_x" : c.type == T::DistanceY ? "distance_y" : "distance";
-        dims.push_back(json{{"index", int(i)}, {"field", field}, {"kind", kind}, {"value", c.value}, {"expr", f.expr.count(field) ? f.expr.at(field) : std::string()}});
+        dims.push_back(json{{"index", int(i)}, {"field", field}, {"name", f.dim_names.count(int(i)) ? f.dim_names.at(int(i)) : std::string()}, {"kind", kind}, {"value", c.value}, {"expr", f.expr.count(field) ? f.expr.at(field) : std::string()}});
     }
     return json{{"ok", true}, {"sketch", sk}, {"dimensions", dims}};
+}
+
+// {sketch, index, name}: give a dimension a name; set_feature_expr then takes field "dim:<name>". name "" removes it.
+json action_name_dimension(DesignPanel* panel, const json& params)
+{
+    CadDocument& doc = panel->mcp_doc();
+    const int sk = sketch_ref_arg(params, doc);
+    if (sk < 0) throw std::runtime_error("name_dimension needs 'sketch' (a Sketch feature index)");
+    if (!params.contains("index") || !params["index"].is_number_integer()) throw std::runtime_error("name_dimension needs 'index' (from sketch_dimensions)");
+    const int idx = params["index"].get<int>();
+    CadFeature& f = doc.features[sk];
+    if (idx < 0 || idx >= int(f.entity_constraints.size())) throw std::runtime_error("no dimension " + std::to_string(idx) + " on that sketch");
+    const std::string nm = params.value("name", std::string());
+    if (!nm.empty()) {
+        if (nm.find_first_not_of("0123456789") == std::string::npos) throw std::runtime_error("a name cannot be only digits (that is an index)");
+        for (char ch : nm) if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '_')) throw std::runtime_error("a name is letters, digits and _");
+        for (const auto& kv : f.dim_names) if (kv.second == nm && kv.first != idx) throw std::runtime_error("the name '" + nm + "' is already on dimension " + std::to_string(kv.first));
+    }
+    doc.checkpoint();
+    if (nm.empty()) f.dim_names.erase(idx); else f.dim_names[idx] = nm;
+    panel->mcp_after_change();
+    return json{{"ok", true}, {"sketch", sk}, {"index", idx}, {"name", nm}};
 }
 
 // Suppress (disable) or restore a feature; downstream features rebuild without it.
@@ -4187,6 +4437,9 @@ json call_method_core(DesignPanel* panel, const std::string& method, const json&
     if (method == "mate")          return action_mate(panel, params);
     if (method == "check_interference") return action_check_interference(panel, params);
     if (method == "min_distance")       return action_min_distance(panel, params);
+    if (method == "name_dimension")     return action_name_dimension(panel, params);
+    if (method == "support_fin")        return action_support_fin(panel, params);
+    if (method == "select_topology")    return action_select_topology(panel, params);
     if (method == "sweep_variable")     return action_sweep_variable(panel, params);
     if (method == "analyze_printability") return action_analyze_printability(panel, params);
     throw MethodNotFound{};
@@ -4442,6 +4695,12 @@ std::string handle_on_main(const std::string& method, const json& params, const 
 
 std::string dispatch_once(const std::string& method, const json& params, const json& id);
 
+// Background jobs (async:true), the newest 50 kept.
+struct McpJob { std::string method, reply; unsigned seq{0}; bool done{false}; std::chrono::steady_clock::time_point t0, t_end; };
+std::mutex g_jobs_mtx;
+std::map<std::string, McpJob> g_jobs;
+unsigned g_job_seq = 0;
+
 // Marshal a request to the main thread and block (with a timeout) for the reply.
 std::string dispatch_request(const std::string& line)
 {
@@ -4481,6 +4740,39 @@ std::string dispatch_request(const std::string& line)
         catch (const std::exception& ex) { return rpc_error(id, -32000, ex.what()); }
     }
     if (method == "ui.screenshot") method = "screenshot";
+    // Long operations: {"async": true} in the params answers at once with a job id and runs the call in the background;
+    // job_status {job} says running or done and carries the reply when it is. These two are answered here, on the client's own
+    // thread, so they respond even while the UI thread is busy with the job. (Progress is elapsed time only: the kernel
+    // reports none from inside a rebuild.)
+    if (method == "job_status") {
+        const std::string jid = params.value("job", std::string());
+        std::lock_guard<std::mutex> lk(g_jobs_mtx);
+        auto it = g_jobs.find(jid);
+        if (it == g_jobs.end()) return rpc_error(id, -32000, "no such job '" + jid + "' (the last 50 are kept)");
+        const double el = std::chrono::duration<double>((it->second.done ? it->second.t_end : std::chrono::steady_clock::now()) - it->second.t0).count();
+        json res{{"job", jid}, {"method", it->second.method}, {"state", it->second.done ? "done" : "running"}, {"elapsed_s", el}};
+        if (it->second.done) { try { res["reply"] = json::parse(it->second.reply); } catch (const std::exception&) { res["reply"] = it->second.reply; } }
+        return json{{"jsonrpc", "2.0"}, {"id", id}, {"result", res}}.dump();
+    }
+    if (params.is_object() && params.value("async", false)) {
+        json inner = params; inner.erase("async");
+        std::string jid;
+        {
+            std::lock_guard<std::mutex> lk(g_jobs_mtx);
+            jid = "j" + std::to_string(++g_job_seq);
+            McpJob j; j.method = method; j.seq = g_job_seq; j.t0 = std::chrono::steady_clock::now();
+            g_jobs[jid] = j;
+            while (g_jobs.size() > 50) { auto old = g_jobs.begin(); for (auto q = g_jobs.begin(); q != g_jobs.end(); ++q) if (q->second.seq < old->second.seq) old = q; g_jobs.erase(old); }
+        }
+        std::thread([jid, method, inner, id]() {
+            std::string r;
+            try { r = dispatch_once(method, inner, id); } catch (...) { r = rpc_error(id, -32000, "internal error"); }
+            std::lock_guard<std::mutex> lk(g_jobs_mtx);
+            auto it = g_jobs.find(jid);
+            if (it != g_jobs.end()) { it->second.reply = std::move(r); it->second.t_end = std::chrono::steady_clock::now(); it->second.done = true; }
+        }).detach();
+        return json{{"jsonrpc", "2.0"}, {"id", id}, {"result", json{{"job", jid}, {"state", "running"}, {"poll", "job_status {job}"}}}}.dump();
+    }
     const auto t0 = std::chrono::steady_clock::now();
     for (;;) {
         std::string r = dispatch_once(method, params, id);
