@@ -387,6 +387,7 @@ public:
 private:
     // The plane the Hole tool drills on: a picked face (inward, centred) or the dropdown.
     SketchPlane hole_plane() const;
+    void        attach_to_face(CadFeature& f, int body, int face, bool cylinder) const;
     // The plane the Thread tool builds on: a picked cylindrical face (axis) or the dropdown.
     SketchPlane thread_plane() const;
     // Name the geometry the card has LATCHED, so it never has to be inferred from the viewport.
@@ -1028,6 +1029,7 @@ private:
     bool              m_hole_on_face{false};
     SketchPlane       m_hole_face_plane;
     int               m_hole_face_body{-1};
+    int               m_hole_face{-1};   // the picked face's id on that body, so the hole can follow it; -1 = none
     // #2 Part B: the picked face's (u,v) bounds in m_hole_face_plane, so the hole's construction
     // dims read as distance from the face sides (umin/vmin edges) rather than from the centre.
     bool              m_hole_has_bounds{false};
@@ -1051,6 +1053,7 @@ private:
     bool              m_thread_on_face{false};
     SketchPlane       m_thread_face_plane;
     int               m_thread_face_body{-1};
+    int               m_thread_face{-1};   // the cylindrical face the thread is cut on (-1 = an edge, or none)
     CardText*     m_thread_target_label{nullptr};   // the latched face/edge — see m_hole_target_label
 
     NumField* m_shell_thickness{nullptr};
