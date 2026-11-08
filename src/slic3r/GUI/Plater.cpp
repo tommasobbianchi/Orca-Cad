@@ -14182,6 +14182,9 @@ void Plater::priv::update_title_dirty_status()
     wxGetApp().mainframe->SetTitle(title);
     wxGetApp().mainframe->update_title_colour_after_set_title();
 #else
+    // ORCA_CAD_TITLE: tag set by whoever launches this instance (e.g. a session name) so several windows can be told apart.
+    if (const char* tag = std::getenv("ORCA_CAD_TITLE"); tag && *tag)
+        title = wxString::FromUTF8(tag) + " | " + title;
     wxGetApp().mainframe->SetTitle(title + " - OrcaSlicer");
     wxGetApp().mainframe->topbar()->SetTitle(title);
 #endif    

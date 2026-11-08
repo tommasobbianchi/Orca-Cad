@@ -79,7 +79,10 @@ def list_tools():
     for t in _describe()["tools"]:
         params = t.get("params", [])
         props = {p["name"]: _param_schema(p) for p in params}
-        required = [p["name"] for p in params if "default" not in p]
+        # ORCA_BRIDGE_LOOSE=1: advertise no required params. describe_tools has no "required" flag, so "no default" also hits
+        # optional ones (sketch_begin face/body, list_fields feature); strict-validating clients (opencode) then reject valid calls.
+        # The app validates every call itself and answers with an error, so nothing is lost.
+        required = [] if os.environ.get("ORCA_BRIDGE_LOOSE") else [p["name"] for p in params if "default" not in p]
         out.append({
             "name": t["name"],
             "description": t.get("summary", ""),
