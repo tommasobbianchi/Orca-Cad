@@ -231,13 +231,14 @@ void LlmPanel::refresh_header()
     const std::string agent = c ? c->get("llm_agent") : std::string();
     const bool oc = agent == "opencode";
     const bool ag = agent == "agy";
+    const bool cx = agent == "codex";
     const std::string model = c ? c->get("llm_model") : std::string();
-    m_agent_lbl->SetLabel(wxString::FromUTF8(agent == "anthropic" ? "Anthropic API" : agent == "openai" ? "OpenAI-compatible API" : agent == "ollama" ? "Ollama" : oc ? "opencode" : ag ? "Antigravity" : "Claude Code") + (model.empty() ? wxString() : wxString::FromUTF8(" \xC2\xB7 ") + wxString::FromUTF8(model)));
+    m_agent_lbl->SetLabel(wxString::FromUTF8(agent == "anthropic" ? "Anthropic API" : agent == "openai" ? "OpenAI-compatible API" : agent == "ollama" ? "Ollama" : oc ? "opencode" : ag ? "Antigravity" : cx ? "Codex" : "Claude Code") + (model.empty() ? wxString() : wxString::FromUTF8(" \xC2\xB7 ") + wxString::FromUTF8(model)));
     wxString why;
     if (llm_agent_is_api(agent)) {
         if (agent != "ollama" && !llm_api_key_present(agent)) why = _L("No API key. Open the settings to set it.");
         else if (model.empty()) why = _L("Choose a model. Open the settings.");
-    } else if (llm_agent_executable().empty()) why = oc ? _L("opencode was not found. Open the settings to point to it.") : ag ? _L("agy was not found. Open the settings to point to it.") : _L("Claude Code was not found. Open the settings to point to it.");
+    } else if (llm_agent_executable().empty()) why = oc ? _L("opencode was not found. Open the settings to point to it.") : ag ? _L("agy was not found. Open the settings to point to it.") : cx ? _L("codex was not found. Open the settings to point to it.") : _L("Claude Code was not found. Open the settings to point to it.");
     else if (oc && model.empty()) why = _L("opencode needs a model (provider/model). Open the settings.");
     m_setup_lbl->SetLabel(why);
     m_setup_lbl->Show(!why.empty());

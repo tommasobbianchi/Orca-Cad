@@ -84,10 +84,11 @@ std::atomic<bool> g_busy{false};
 
 static bool llm_agent_is_opencode() { return pref("llm_agent") == "opencode"; }
 static bool llm_agent_is_agy() { return pref("llm_agent") == "agy"; }
+static bool llm_agent_is_codex() { return pref("llm_agent") == "codex"; }
 
 std::string llm_agent_executable()
 {
-    const std::string name = llm_agent_is_opencode() ? "opencode" : llm_agent_is_agy() ? "agy" : "claude";
+    const std::string name = llm_agent_is_opencode() ? "opencode" : llm_agent_is_agy() ? "agy" : llm_agent_is_codex() ? "codex" : "claude";
     fs::path exe = pref("llm_cli_path");
     if (exe.empty()) exe = bp::search_path(name);
     // A desktop launcher does not run the shell profile, so PATH often lacks where the installer put the CLI.
@@ -107,6 +108,7 @@ std::shared_ptr<LlmAgentRun> llm_agent_start(const std::string& prompt, const st
     // Everything read from Preferences is copied here: the worker must not touch app_config.
     const bool        oc     = llm_agent_is_opencode();
     const bool        ag     = llm_agent_is_agy();
+    const bool        cx     = llm_agent_is_codex();
     const std::string agent  = pref("llm_agent");
     const bool        api    = llm_agent_is_api(agent);
     const std::string api_url = pref("llm_api_url");
@@ -117,7 +119,7 @@ std::shared_ptr<LlmAgentRun> llm_agent_start(const std::string& prompt, const st
     const std::string sock   = mcp_socket_path();
     const std::string bridge = bridge_script();
     std::string problem;
-    if (!api && exe.empty())             problem = std::string(oc ? "opencode" : ag ? "Antigravity (agy)" : "Claude Code") + " was not found: install it so that `" + (oc ? "opencode" : ag ? "agy" : "claude") + "` is on PATH, or set its path in Preferences > LLM / MCP";
+    if (!api && exe.empty())             problem = std::string(oc ? "opencode" : ag ? "Antigravity (agy)" : cx ? "Codex" : "Claude Code") + " was not found: install it so that `" + (oc ? "opencode" : ag ? "agy" : cx ? "codex" : "claude") + "` is on PATH, or set its path in Preferences > LLM / MCP";
     else if (oc && model.empty())        problem = "opencode needs a model in Preferences > LLM / MCP, written provider/model (see `opencode models`)";
     else if (sock.empty())               problem = "the MCP socket is off (ORCA_CAD_MCP=0)";
     else if (!api && !fs::exists(bridge)) problem = "the MCP bridge script is missing: " + bridge;
@@ -148,6 +150,7 @@ std::shared_ptr<LlmAgentRun> llm_agent_start(const std::string& prompt, const st
             std::vector<std::string> env_kv;   // opencode only
             fs::path start_dir;
             fs::path agy_home;   // agy only: the private HOME that also carries the conversation between turns
+            fs::path cx_home;    // codex only: the private CODEX_HOME that also carries the conversation between turns
             if (ag) {
                 // agy has no per-run config switch, so it gets a private HOME holding only: a symlink to the user's login token (never
                 // copied), our MCP server, and an allow-list. In headless mode anything not allowed is auto-denied: no shell, no
@@ -176,6 +179,28 @@ std::shared_ptr<LlmAgentRun> llm_agent_start(const std::string& prompt, const st
                 if (!session_id.empty()) args.push_back("--continue");
                 // --print takes the prompt as its value, so it goes last.
                 args.push_back("--print");
+                args.push_back(std::string(kSystemPrompt) + "\n\n" + prompt);
+            } else if (cx) {
+                // codex reads ONLY this CODEX_HOME: the user's global MCP servers and rules are not in play. The shell and file-edit
+                // tools are switched off (not just refused), MCP calls are pre-approved because a headless turn has nobody to ask, and
+                // the sandbox is read-only. The login is a symlink, never a copy. Verified with codex-cli 0.167.0.
+                const char* home = std::getenv("HOME");
+                cx_home = session_id.empty() ? fs::path(tmp.string() + ".cx") : fs::path(session_id);
+                const fs::path ws = cx_home / "ws";
+                fs::create_directories(ws);
+                boost::system::error_code lec;
+                const fs::path auth = fs::path(home ? home : "") / ".codex/auth.json";
+                if (fs::exists(auth)) fs::create_symlink(auth, cx_home / "auth.json", lec);
+                std::ofstream cf((cx_home / "config.toml").c_str());
+                cf << "web_search = \"disabled\"\n[features]\nshell_tool = false\nunified_exec = false\napply_patch_freeform = false\nview_image = false\n"
+                   << "[mcp_servers.orca-cad]\ncommand = \"python3\"\nargs = [" << nlohmann::json(bridge).dump() << ", " << nlohmann::json(sock).dump()
+                   << "]\ndefault_tools_approval_mode = \"approve\"\n";
+                cf.close();
+                start_dir = ws;
+                args = {"exec"};
+                if (!session_id.empty()) { args.push_back("resume"); args.push_back("--last"); }
+                for (const char* a : {"--skip-git-repo-check", "--json", "-c", "sandbox_mode=\"read-only\""}) args.push_back(a);
+                if (!model.empty()) { args.push_back("-m"); args.push_back(model); }
                 args.push_back(std::string(kSystemPrompt) + "\n\n" + prompt);
             } else if (oc) {
                 // The isolation below (--standalone + private config) exists from opencode 2; v1 would run with the user's global config.
@@ -216,12 +241,20 @@ std::shared_ptr<LlmAgentRun> llm_agent_start(const std::string& prompt, const st
             if (!session_id.empty()) { args.push_back("--resume"); args.push_back(session_id); }
             if (!model.empty()) { args.push_back("--model"); args.push_back(model); }
             }
-            for (const std::string& a : split_args(extra)) args.push_back(a);
+            // Extra arguments go before the prompt, which every CLI takes last (codex too).
+            if (cx) {
+                const std::string last = args.back();
+                args.pop_back();
+                for (const std::string& a : split_args(extra)) args.push_back(a);
+                args.push_back(last);
+            } else
+                for (const std::string& a : split_args(extra)) args.push_back(a);
 
             bp::ipstream out;
             bp::environment env = boost::this_process::environment();
             if (oc) env["XDG_CONFIG_HOME"] = tmp.string() + ".oc";
             if (ag) env["HOME"] = agy_home.string();
+            if (cx) env["CODEX_HOME"] = cx_home.string();
             bp::child c(fs::path(exe), bp::args(args), bp::env = env, bp::start_dir = start_dir.empty() ? fs::temp_directory_path() : start_dir,
                         bp::std_out > out, bp::std_err > errf.string(), bp::std_in.close());
             run->set_child(&c);
@@ -232,6 +265,19 @@ std::shared_ptr<LlmAgentRun> llm_agent_start(const std::string& prompt, const st
                 nlohmann::json ev = nlohmann::json::parse(line, nullptr, false);
                 if (ev.is_discarded()) continue;
                 const std::string type = ev.value("type", "");
+                if (cx) {
+                    // codex exec --json: thread.started / item.started|completed {mcp_tool_call, agent_message, error} / turn.completed.
+                    const nlohmann::json item = ev.contains("item") && ev["item"].is_object() ? ev["item"] : nlohmann::json::object();
+                    const std::string it = item.value("type", "");
+                    LlmEvent e;
+                    if (type == "item.completed" && it == "agent_message") { e.kind = LlmEvent::Text; e.text = item.value("text", ""); oc_text = e.text; }
+                    else if (type == "item.started" && it == "mcp_tool_call") {
+                        e.kind = LlmEvent::Tool;
+                        e.text = item.value("tool", "") + "  " + clip(item.contains("arguments") ? item["arguments"].dump() : std::string(), 200);
+                    } else continue;
+                    if (!e.text.empty()) post([on_event, e]() { on_event(e); });
+                    continue;
+                }
                 if (oc) {
                     // opencode --format json: step_start / text / tool_use / step_finish, each with sessionID and a "part".
                     oc_session = ev.value("sessionID", oc_session);
@@ -271,9 +317,9 @@ std::shared_ptr<LlmAgentRun> llm_agent_start(const std::string& prompt, const st
             }
             c.wait();
             run->set_child(nullptr);
-            if (oc && !oc_text.empty() && !run->cancelled()) {
-                // opencode has no final "result" event: its last text is the reply.
-                LlmEvent e; e.kind = LlmEvent::Result; e.text = oc_text; e.session_id = oc_session; got_result = true;
+            if ((oc || cx) && !oc_text.empty() && !run->cancelled()) {
+                // opencode and codex have no final "result" event: the last text is the reply (codex: the conversation lives in its private home).
+                LlmEvent e; e.kind = LlmEvent::Result; e.text = oc_text; e.session_id = cx ? cx_home.string() : oc_session; got_result = true;
                 post([on_event, e]() { on_event(e); });
             }
             if (ag && !ag_text.empty() && !run->cancelled()) {
