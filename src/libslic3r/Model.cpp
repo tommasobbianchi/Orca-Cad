@@ -152,6 +152,7 @@ Model& Model::assign_copy(const Model &rhs)
     this->texture_mesh = rhs.texture_mesh;
 
     this->cad_recipe = rhs.cad_recipe;
+    this->cad_chat   = rhs.cad_chat;
 
     return *this;
 }
@@ -198,6 +199,7 @@ Model& Model::assign_copy(Model &&rhs)
     this->profile_info = rhs.profile_info;
     rhs.profile_info.reset();
     this->cad_recipe = std::move(rhs.cad_recipe);
+    this->cad_chat   = std::move(rhs.cad_chat);
     return *this;
 }
 
