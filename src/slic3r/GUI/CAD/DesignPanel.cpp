@@ -10992,7 +10992,7 @@ void DesignPanel::set_commit_mode(CommitMode mode)
         m_commit_drop->SetSelection(int(mode));   // the check on the current row
 }
 
-void DesignPanel::on_commit(bool to_prepare)
+void DesignPanel::on_commit(bool to_prepare, bool ask)
 {
     // A feature tool open with a live preview ghost (e.g. a fillet being previewed) is
     // NOT yet part of the body. Apply it first so "Commit to Plate" ships exactly what
@@ -11017,24 +11017,74 @@ void DesignPanel::on_commit(bool to_prepare)
     // Hidden bodies are skipped — what you see on the Design plate is what gets committed.
     sync_body_visible();
     rebuild_disp_meshes();   // ship moved bodies at their Move-gizmo positions
+    using Parts = std::vector<std::pair<const TriangleMesh*, wxString>>;
+    struct Group { int key; wxString name; Parts parts; };   // one Prepare object; key as in m_committed
+    std::vector<Group> groups;
     if (m_disp_body_meshes.size() > 1) {
-        std::vector<std::pair<const TriangleMesh*, wxString>> parts;
+        Parts parts;
+        std::vector<int> bodies;
         for (size_t b = 0; b < m_disp_body_meshes.size(); ++b) {
             if (b < m_body_visible.size() && !m_body_visible[b]) continue;   // skip hidden
             if (m_disp_body_meshes[b].its.indices.empty()) continue;
             parts.emplace_back(&m_disp_body_meshes[b], wxString::FromUTF8("Design Body " + std::to_string(b + 1)));
+            bodies.push_back(int(b));
         }
         if (parts.empty()) {   // every body hidden — nothing to ship
             set_status(_L("All bodies hidden — show one before committing"));
             return;
         }
         if (m_commit_mode == CommitMode::Assembly && parts.size() > 1)
-            obj_list->load_mesh_object(parts, "Design Assembly");
+            groups.push_back({-1, "Design Assembly", std::move(parts)});
         else
-            for (const auto& [mesh, name] : parts)
-                obj_list->load_mesh_object(*mesh, name);
+            for (size_t k = 0; k < parts.size(); ++k)
+                groups.push_back({bodies[k], parts[k].second, Parts{parts[k]}});
     } else {
-        obj_list->load_mesh_object(m_disp_pick_mesh, "Design Body");
+        groups.push_back({-1, "Design Body", Parts{{&m_disp_pick_mesh, "Design Body"}}});
+    }
+
+    // A re-commit: the objects the last commit made may still be on the plate. Updating them in place keeps
+    // their placement, settings and modifiers (painting goes with the old shape); the alternative is a copy.
+    Model& model = wxGetApp().plater()->model();
+    auto live_idx = [&](int key) {
+        for (const auto& [k, id] : m_committed)
+            if (k == key)
+                for (size_t i = 0; i < model.objects.size(); ++i)
+                    if (model.objects[i]->id() == id) return int(i);
+        return -1;
+    };
+    bool update = false;
+    if (ask) {
+        int live = 0;
+        for (const Group& g : groups) live += live_idx(g.key) >= 0;
+        if (live > 0) {
+            RichMessageDialog dlg(this,
+                              _L("This design is already on the plate.\n\nUpdate the existing object(s) with the new shape?\nYes: update (placement and settings are kept; painted supports and seams are cleared).\nNo: add another copy."),
+                              _L("Commit to Plate"), wxYES_NO | wxCANCEL | wxYES_DEFAULT | wxICON_QUESTION);
+            const int r = dlg.ShowModal();
+            if (r == wxID_CANCEL) return;
+            update = r == wxID_YES;
+        }
+    }
+    if (update)
+        wxGetApp().plater()->take_snapshot("Update from Design");
+
+    std::vector<std::pair<int, ObjectID>> committed;
+    std::vector<size_t> replaced;
+    for (const Group& g : groups) {
+        const int idx = update ? live_idx(g.key) : -1;
+        if (idx >= 0 && obj_list->replace_mesh_object(size_t(idx), g.parts)) {
+            replaced.push_back(size_t(idx));
+            committed.emplace_back(g.key, model.objects[idx]->id());
+        } else {
+            obj_list->load_mesh_object(g.parts, g.name);
+            committed.emplace_back(g.key, model.objects.back()->id());
+        }
+    }
+    m_committed = std::move(committed);
+    if (!replaced.empty()) {
+        wxGetApp().plater()->changed_objects(replaced);
+        obj_list->update_after_undo_redo();   // rebuilds the list from the model, as an undo does
+        wxGetApp().plater()->update();
     }
 
     // Persist the editable parametric recipe alongside the committed meshes so the

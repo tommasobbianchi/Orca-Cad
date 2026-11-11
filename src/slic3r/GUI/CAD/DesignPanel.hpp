@@ -7,6 +7,7 @@
 #include "libslic3r/Point.hpp"
 #include "libslic3r/CAD/SketchEngine.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/ObjectID.hpp"
 #include <wx/accel.h>
 #include <wx/event.h>
 #include <wx/gdicmn.h>
@@ -110,7 +111,7 @@ public:
     CadDocument& mcp_doc()        { return m_doc; }            // live document (read + mutate)
     void         mcp_end_sketch_edit();
     void         mcp_edit_feature(int i) { edit_feature_at(i); }   // reopen feature i as the tree row's Edit does
-    void         mcp_commit_meshes() { on_commit(false); }
+    void         mcp_commit_meshes() { on_commit(false, false); }
     // What the GUI keeps per body for the viewport, reachable from the MCP: show/hide, colour (alpha = opacity), the section
     // plane and an exploded layout. All of it is display only; the solids and what Export writes are untouched.
     bool         mcp_body_visible(int b, bool visible);
@@ -319,7 +320,12 @@ private:
     // Move / enlarge / stretch (independent X/Y) an imported Text/SVG sketch:
     // a modal dialog editing the feature's placement transform in place.
     void on_transform_imported(int feat_idx);
-    void on_commit(bool to_prepare = true);
+    // `ask` = false is the scripted path: it never opens the Update / Add a copy question and always adds.
+    void on_commit(bool to_prepare = true, bool ask = true);
+    // The Prepare objects the last commit made, by the Design key they came from (-1 = the one assembly /
+    // single-body object, else the body index). A re-commit offers to update these in place instead of
+    // adding a second copy. Held for the session only; an object deleted since is simply not found.
+    std::vector<std::pair<int, ObjectID>> m_committed;
     // What Commit to Plate sends: one object with a part per body (an assembly, which keeps the
     // bodies' relative placement), or, "as bodies", one Prepare object per body. The split
     // button's dropdown switches it, like Prepare's Slice button, without committing.
