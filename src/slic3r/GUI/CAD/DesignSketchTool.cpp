@@ -5422,7 +5422,7 @@ void DesignSketchTool::render_view_helpers()
             fill.add_vertex((Vec3f)c[3].cast<float>()); fill.add_triangle(fb, fb+1, fb+2); fb += 3;
         }
         if (fb > 0) { GLModel fm; fm.init_from(std::move(fill));
-            fm.set_color(ColorRGBA(0.61f, 0.74f, 0.82f, 0.30f)); fm.render(); }   // xShape plane: light blue, alpha 0.3
+            fm.set_color(ColorRGBA(0.61f, 0.74f, 0.82f, 0.12f)); fm.render(); }   // xShape plane: light blue, faint so the body shows through
     }
 
     if (m_show_axes) {
@@ -5536,7 +5536,7 @@ void DesignSketchTool::render_sketch_plane_frame()
     glsafe(::glEnable(GL_BLEND));
     glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
     GLModel fm; fm.init_from(std::move(fill));
-    fm.set_color(ColorRGBA(0.61f, 0.74f, 0.82f, 0.30f));   // xShape plane
+    fm.set_color(ColorRGBA(0.61f, 0.74f, 0.82f, 0.12f));   // xShape plane, faint
     fm.render();
     if (bb > 0) {
         GLModel bm; bm.init_from(std::move(border));
@@ -5593,7 +5593,7 @@ void DesignSketchTool::render_datum_planes()
     glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
     if (fb > 0) {
         GLModel fm; fm.init_from(std::move(fill));
-        fm.set_color(ColorRGBA(0.61f, 0.74f, 0.82f, 0.30f));   // xShape plane fill
+        fm.set_color(ColorRGBA(0.61f, 0.74f, 0.82f, 0.12f));   // xShape plane fill
         fm.render();
     }
     if (bb > 0) {
@@ -6879,7 +6879,7 @@ void DesignSketchTool::render_base_pick()
     // selection colour would match one of the three.
     auto fill = [&](size_t i) {
         ColorRGBA c = look(i) == Look::Hover ? ColorRGBA(0.80f, 0.80f, 0.80f, 1.0f) : hue(i);
-        c.a(look(i) == Look::Selected ? 0.85f : look(i) == Look::Hover ? 0.45f : 0.30f);   // xDesign plane alpha 0.3
+        c.a(look(i) == Look::Selected ? 0.45f : look(i) == Look::Hover ? 0.25f : 0.12f);   // faint: stacked planes must not hide the body
         return c;
     };
     auto ink = [&](size_t i) {
