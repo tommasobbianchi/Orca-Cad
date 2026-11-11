@@ -113,6 +113,19 @@ static double ray_axis_proj(const Linef3& ray, const Vec3d& anchor, const Vec3d&
 // ribbons, labels, pick tolerances) is "N px" times this. It used to be 1 / camera.get_zoom(), which is only right for an orthographic camera
 // or a perspective one that zooms by its frustum: where zooming moves the camera, get_zoom() stays put, so those sizes stayed fixed in world
 // units and grew with every zoom-in. Measured over a 100-unit baseline so the pixel rounding does not matter.
+// World units per pixel across the view at depth `at`: right for body edges, whose depth is the body's, not the sketch plane's.
+double DesignSketchTool::px_unit_at(const Camera& cam, const Vec3d& at) const
+{
+    const Eigen::Matrix4d m = cam.get_projection_matrix().matrix() * cam.get_view_matrix().matrix();
+    const std::array<int, 4>& vp = cam.get_viewport();
+    constexpr double base = 100.0;
+    const Vec3d r = cam.get_dir_right();
+    const Eigen::Vector4d ca = m * at.homogeneous(), cb = m * (at + r * base).homogeneous();
+    if (ca.w() < 1e-9 || cb.w() < 1e-9) return px_unit(cam);
+    const double px = std::abs(cb.x() / cb.w() - ca.x() / ca.w()) * 0.5 * vp[2];
+    return px > 1e-6 ? base / px : px_unit(cam);
+}
+
 double DesignSketchTool::px_unit(const Camera& cam) const
 {
     const Eigen::Matrix4d m = cam.get_projection_matrix().matrix() * cam.get_view_matrix().matrix();
@@ -4514,9 +4527,9 @@ void DesignSketchTool::render_body_edges()
 {
     if (m_body_edges_hidden || m_solid_bodies == nullptr)
         return;
-    const Camera& cam = wxGetApp().plater()->get_camera();
+    Camera& cam = wxGetApp().plater()->get_camera();
     const Vec3d vd = cam.get_dir_forward();
-    const double px = px_unit(cam);
+    const double px = px_unit_at(cam, cam.get_target());   // the body's depth, not the sketch plane's
     const double hw = 1.0 * px;      // ~2 px wide: at 1.5 the lines read as hairlines
     const Vec3d pull = -vd * (3.0 * px);
     // Two passes: the edges of a body faded by body focus are fainter, like the body itself.
