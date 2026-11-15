@@ -321,6 +321,8 @@ json describe_tools_core()
                      json{{"name", "depth"},    {"type", "number"}, {"unit", "mm"}, {"default", 10}, {"min", 0.01}},
                      json{{"name", "through"},  {"type", "boolean"}, {"default", false}},
                      json{{"name", "teardrop"}, {"type", "boolean"}, {"default", false}, {"description", "pointed 45 deg top for a bore lying horizontal on the bed (prints without support); ignored when the axis is near-vertical"}},
+                     json{{"name", "layer_h"}, {"type", "number"}, {"unit", "mm"}, {"default", 0.2}, {"description", "print layer height the teardrop flat top is snapped UP to (its Z sits on a layer boundary, at least one layer above the circle); the flat may come out narrower than asked"}},
+                     json{{"name", "teardrop_flat"}, {"type", "number"}, {"unit", "mm"}, {"default", 0}, {"description", "teardrop with a flat top of this width instead of a sharp point (0 = pointed). The 45 deg sides stay tangent to the circle; the width is capped at 0.8 x the radius"}},
                      json{{"name", "x"},        {"type", "number"}, {"unit", "mm"}, {"default", 0}, {"description", "in the sketch plane's frame (origin = describe_scene.modeling_origin), NOT world"}},
                      json{{"name", "y"},        {"type", "number"}, {"unit", "mm"}, {"default", 0}, {"description", "in the sketch plane's frame (origin = describe_scene.modeling_origin), NOT world"}},
                      json{{"name", "plane"},    {"type", "string"}, {"enum", json::array({"XY", "XZ", "YZ"})}, {"default", "XY"}},
@@ -1587,7 +1589,7 @@ json action_hole(DesignPanel* panel, const json& params)
     int h = -1;
     const double tip = params.value("tip_angle", 0.0);
     if (tip < 0 || tip >= 180) throw std::runtime_error("tip_angle must be in [0, 180)");
-    for (const auto& p : pts) { h = doc.add_hole(dia, depth, thru, p.first, p.second, pl, "Hole"); doc.features[size_t(h)].hole_tip_angle = tip; doc.features[size_t(h)].hole_teardrop = params.value("teardrop", false); attach_to_face(doc.features[size_t(h)], params, doc); if (target >= 0) doc.features[size_t(h)].target_body = target; }
+    for (const auto& p : pts) { h = doc.add_hole(dia, depth, thru, p.first, p.second, pl, "Hole"); doc.features[size_t(h)].hole_tip_angle = tip; doc.features[size_t(h)].hole_teardrop = params.value("teardrop", false); doc.features[size_t(h)].hole_teardrop_flat = params.value("teardrop_flat", 0.0); doc.features[size_t(h)].hole_layer_h = params.value("layer_h", 0.2); attach_to_face(doc.features[size_t(h)], params, doc); if (target >= 0) doc.features[size_t(h)].target_body = target; }
     bool ok = doc.recompute();
     if (!ok) { const std::string why = doc.error; doc.undo(); doc.error = why; }
     panel->mcp_after_change();

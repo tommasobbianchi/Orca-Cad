@@ -1098,6 +1098,8 @@ private:
     NumField* m_hole_depth{nullptr};
     ToggleField*         m_hole_through{nullptr};
     ToggleField*         m_hole_teardrop{nullptr};
+    NumField*            m_hole_layer_h{nullptr};      // print layer height the teardrop flat top snaps up to
+    NumField*            m_hole_td_flat{nullptr};      // teardrop flat-top width (0 = pointed)
     NumField*            m_hole_cbore_d{nullptr};      // counterbore diameter (0 = none)
     NumField*           m_hole_cbore_depth{nullptr};
     NumField*           m_hole_bridge_h{nullptr};     // sacrificial layer thickness under the counterbore ledge (0 = none)

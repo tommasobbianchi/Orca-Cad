@@ -2035,6 +2035,10 @@ DesignPanel::DesignPanel(wxWindow* parent)
     c_m_box_hole->row(_L("Through"), m_hole_through);
     m_hole_teardrop = c_m_box_hole->make_check();
     c_m_box_hole->row(_L("Teardrop (horizontal hole)"), m_hole_teardrop);
+    m_hole_td_flat = c_m_box_hole->make_spin(0.0, 0.0, 1000.0);
+    c_m_box_hole->row(_L("Teardrop flat top (0 = point)"), m_hole_td_flat);
+    m_hole_layer_h = c_m_box_hole->make_spin(0.2, 0.0, 2.0);
+    c_m_box_hole->row(_L("Layer height (flat top snaps to it)"), m_hole_layer_h);
     m_hole_cbore_d = c_m_box_hole->make_spin(0.0, 0.0, 1000.0);
     c_m_box_hole->row(_L("Counterbore Ø (0 = none)"), m_hole_cbore_d);
     m_hole_cbore_depth = c_m_box_hole->make_spin(0.0, 0.0, 1000.0);
@@ -5510,6 +5514,8 @@ void DesignPanel::on_add_hole()
     if (hidx >= 0 && hidx < int(m_doc.features.size())) {
         CadFeature& hf = m_doc.features[hidx];
         hf.hole_teardrop = m_hole_teardrop->GetValue();
+        hf.hole_teardrop_flat = m_hole_td_flat->GetValue();
+        hf.hole_layer_h = m_hole_layer_h->GetValue();
         if (m_hole_cbore_d->GetValue() > dia && m_hole_cbore_depth->GetValue() > 0) {   // a counterbore, with the sacrificial strips under its ledge when asked
             hf.hole_style = 1; hf.hole_cbore_diameter = m_hole_cbore_d->GetValue(); hf.hole_cbore_depth = m_hole_cbore_depth->GetValue();
             hf.hole_bridge_layer_h = m_hole_bridge_h->GetValue();
@@ -10411,6 +10417,8 @@ void DesignPanel::load_feature_into_dialog(const CadFeature& f)
         m_hole_depth->SetValue(f.hole_depth);
         m_hole_through->SetValue(f.hole_through);
         m_hole_teardrop->SetValue(f.hole_teardrop);
+        m_hole_td_flat->SetValue(f.hole_teardrop_flat);
+        m_hole_layer_h->SetValue(f.hole_layer_h);
         m_hole_cbore_d->SetValue(f.hole_style == 1 ? f.hole_cbore_diameter : 0.0);
         m_hole_cbore_depth->SetValue(f.hole_style == 1 ? f.hole_cbore_depth : 0.0);
         m_hole_bridge_h->SetValue(f.hole_bridge_layer_h);
@@ -11218,6 +11226,8 @@ CadFeature DesignPanel::build_candidate(Tool t) const
         f.hole_depth    = m_hole_depth->GetValue();
         f.hole_through  = m_hole_through->GetValue();
         f.hole_teardrop = m_hole_teardrop->GetValue();
+        f.hole_teardrop_flat = m_hole_td_flat->GetValue();
+        f.hole_layer_h = m_hole_layer_h->GetValue();
         if (m_hole_cbore_d->GetValue() > m_hole_diameter->GetValue() && m_hole_cbore_depth->GetValue() > 0) {
             f.hole_style = 1; f.hole_cbore_diameter = m_hole_cbore_d->GetValue(); f.hole_cbore_depth = m_hole_cbore_depth->GetValue();
             f.hole_bridge_layer_h = m_hole_bridge_h->GetValue();

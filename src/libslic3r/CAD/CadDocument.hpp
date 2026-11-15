@@ -163,6 +163,8 @@ struct CadFeature {
     double      hole_csink_angle{90};      // countersink included angle (degrees), style==2
     double      hole_tip_angle{0};         // blind hole: included angle of the drill point (deg, 0 = flat bottom)
     double      hole_bridge_layer_h{0};    // counterbore ceiling: >0 adds two crossed sacrificial strips of this thickness under the ledge (sheet tip: stepped hole layers); marked in, drill out after printing
+    double      hole_layer_h{0.2};         // teardrop flat top: the print layer height its absolute Z is snapped up to (first layer = one layer; 0 = no snapping)
+    double      hole_teardrop_flat{0};     // teardrop: width of a flat top (mm) instead of a sharp point; 0 = pointed. Clamped so the flat stays clear of the circle
     bool        hole_teardrop{false};      // horizontal bore: pointed (45 deg) top so it prints without support; ignored when the axis is near-vertical
     std::string hole_standard;             // provenance only, e.g. "M6" / "1/4-20"; not used by geometry
 

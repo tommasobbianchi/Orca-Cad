@@ -3580,7 +3580,21 @@ void CadDocument::apply_feature(TopoDS_Shape& result, bool& have_body,
             const double r = f.hole_diameter * 0.5, k = r / std::sqrt(2.0);
             auto P = [&](const Vec3d& d) { return gp_Pnt(c.x() + d.x(), c.y() + d.y(), c.z() + d.z()); };
             BRepBuilderAPI_MakePolygon kite;
-            kite.Add(P(Vec3d::Zero())); kite.Add(P(side * k + up * k)); kite.Add(P(up * (r * std::sqrt(2.0)))); kite.Add(P(-side * k + up * k)); kite.Close();
+            // The two 45 deg sides are tangent to the circle, so they never cut into it. A flat top of width w sits at 2k - w/2 above the centre;
+            // that stays above the circle's own top (r) while w <= 0.828 r, hence the clamp.
+            // The flat is a roof the slicer cuts at layer heights: its Z must sit on a layer boundary and at least one layer above the circle's
+            // top, or the slicer can round it DOWN into the circle. So: ask for the width, raise the flat to the next boundary (that only
+            // narrows it, the 45 deg sides stay tangent) and fall back to a sharp point when the boundary is above the apex.
+            const double lh = std::max(0.0, f.hole_layer_h);
+            double yt = 2.0 * k - 0.5 * std::min(f.hole_teardrop_flat, 0.8 * r);
+            yt = std::max(yt, r + lh);
+            if (lh > 1e-6 && up.z() > 0.5) yt = (std::ceil((c.z() + yt * up.z()) / lh - 1e-6) * lh - c.z()) / up.z();
+            const double wf = 2.0 * (2.0 * k - yt);
+            if (f.hole_teardrop_flat > 1e-6 && wf > 0.05) {
+                kite.Add(P(Vec3d::Zero())); kite.Add(P(side * k + up * k)); kite.Add(P(side * (0.5 * wf) + up * yt)); kite.Add(P(-side * (0.5 * wf) + up * yt)); kite.Add(P(-side * k + up * k)); kite.Close();
+            } else {
+                kite.Add(P(Vec3d::Zero())); kite.Add(P(side * k + up * k)); kite.Add(P(up * (r * std::sqrt(2.0)))); kite.Add(P(-side * k + up * k)); kite.Close();
+            }
             if (!kite.IsDone()) throw std::runtime_error(_u8L("teardrop wire failed"));
             TopoDS_Shape pt = f.hole_through
                 ? SketchEngine::make_extrude(kite.Wire(), f.plane, 1.0e5, true, 0.0)
