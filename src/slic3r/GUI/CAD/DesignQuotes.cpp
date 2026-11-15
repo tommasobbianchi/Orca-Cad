@@ -371,7 +371,7 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
     for (const PrintNote& n : ns) if (n.open) ++open_n;
     if (open_n > 0) {
         const auto& vp = proj.vp;
-        const float pw = std::min(340.f * em, float(vp[2]) * 0.45f);
+        const float pw = std::min(560.f * em, float(vp[2]) * 0.7f);
         ImGui::SetNextWindowPos(ImVec2(float(vp[0] + vp[2]) - 8.f * em, float(vp[1] + vp[3]) - 8.f * em), ImGuiCond_Always, ImVec2(1.f, 1.f));   // bottom-right: the top is the ribbon, the right edge the view cube and Select popup
         ImGui::SetNextWindowSizeConstraints(ImVec2(pw, 0.f), ImVec2(pw, std::numeric_limits<float>::max()));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.f * em, 6.f * em));
@@ -399,17 +399,12 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
                     ImGui::SameLine();
                     if (ImGui::SmallButton("X")) { if (dismiss) dismiss(i); }
                     ImGui::SameLine();
-                    // one line, truncated to the panel width, with the full text as a tooltip
+                    // wrapped to the panel width: the whole note is readable without a tooltip; click focuses the pin
                     const float text_w = std::max(40.f * em, pw - badge_w - 2.f * btn_w - 24.f * em);
-                    std::string full = n.text;
-                    std::string shown = full;
-                    if (ImGui::CalcTextSize(shown.c_str()).x > text_w) {
-                        while (!shown.empty() && ImGui::CalcTextSize(shown.c_str()).x > text_w) shown.pop_back();
-                        shown += "...";
-                    }
-                    if (ImGui::Selectable(shown.c_str(), false)) { if (focus) focus(i); }
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", full.c_str());
-                    ImGui::NewLine();   // end the row: the next row starts a line down
+                    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + text_w);
+                    ImGui::TextUnformatted(n.text.c_str());
+                    ImGui::PopTextWrapPos();
+                    if (ImGui::IsItemClicked()) { if (focus) focus(i); }
                     ImGui::PopID();
                 }
             }
