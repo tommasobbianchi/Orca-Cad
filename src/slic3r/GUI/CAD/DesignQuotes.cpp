@@ -403,17 +403,22 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
                     if (n.has_pin) { wdl->AddCircleFilled(cc, 9.f * em, bc); wdl->AddText(cc - nts * 0.5f, IM_COL32(20, 20, 20, 255), num.c_str()); }
                     else              { wdl->AddCircle(cc, 9.f * em, bc, 0, 1.5f * em); wdl->AddText(cc - nts * 0.5f, bc, num.c_str()); }
                     const bool has_fix = !n.fix_json.empty();
-                    const float text_w = std::max(40.f * em, pw - badge_w - (2 + (has_fix ? 1 : 0)) * btn_w - 44.f * em);
+                    // three equal-width button slots (Fix | OK | X) so the columns line up whether or not a row has a Fix
+                    const float bw = ImGui::CalcTextSize("Fix").x + 2.f * ImGui::GetStyle().FramePadding.x + 4.f * em;
+                    const float text_w = std::max(40.f * em, pw - badge_w - 3.f * (bw + ImGui::GetStyle().ItemSpacing.x) - 36.f * em);
                     ImGui::Dummy(ImVec2(badge_w, row_h));
                     ImGui::SameLine();
+                    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(ImGui::GetStyle().FramePadding.x, 0.f));
                     if (has_fix) {
-                        if (ImGui::SmallButton("Fix")) fix_click = i;
+                        if (ImGui::Button("Fix", ImVec2(bw, 0.f))) fix_click = i;
                         if (ImGui::IsItemHovered() && !n.fix_label.empty()) ImGui::SetTooltip("%s", n.fix_label.c_str());
-                        ImGui::SameLine();
-                    }
-                    if (ImGui::SmallButton("OK")) { if (resolve) resolve(i); }
+                    } else
+                        ImGui::Dummy(ImVec2(bw, ImGui::GetFrameHeight()));
                     ImGui::SameLine();
-                    if (ImGui::SmallButton("X")) { if (dismiss) dismiss(i); }
+                    if (ImGui::Button("OK", ImVec2(bw, 0.f))) { if (resolve) resolve(i); }
+                    ImGui::SameLine();
+                    if (ImGui::Button("X", ImVec2(bw, 0.f))) { if (dismiss) dismiss(i); }
+                    ImGui::PopStyleVar();
                     ImGui::SameLine();
                     // wrapped to the panel width: the whole note is readable without a tooltip; click focuses the pin
                     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + text_w);
