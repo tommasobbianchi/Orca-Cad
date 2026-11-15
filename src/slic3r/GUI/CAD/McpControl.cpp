@@ -3611,10 +3611,14 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
     const auto& V = m.its.vertices;
     const auto& F = m.its.indices;
     const double cos_lim = std::cos((90.0 - ang) * M_PI / 180.0);
-    auto add_note = [&](const char* kind, const char* severity, const std::string& text, const Vec3d& at_print) {
+    auto add_note = [&](const char* kind, const char* severity, const std::string& text, const Vec3d& at_print, const Vec3d& n_model, const std::vector<int>& tris) {
         const Vec3d at = rot_c + rot.transpose() * (at_print - rot_c);   // back to the model frame the viewport draws in
-        notes.push_back(json{{"kind", kind}, {"severity", severity}, {"text", text}, {"at", {at.x(), at.y(), at.z()}}});
+        json j = json{{"kind", kind}, {"severity", severity}, {"text", text}, {"at", {at.x(), at.y(), at.z()}}};
+        if (!n_model.isZero()) j["normal"] = json::array({n_model.x(), n_model.y(), n_model.z()});
+        if (!tris.empty()) j["tris"] = json(tris);
+        notes.push_back(std::move(j));
     };
+    auto to_model_dir = [&](const Vec3d& d) { return rot.transpose() * d; };   // a direction: rotate by, no translation
     auto num = [](double v) { std::ostringstream os; os.imbue(std::locale::classic()); os.precision(3); os << v; return os.str(); };
 
     // Tip 25: print orientation. The six axis-aligned ways up, ranked by overhang area (bed contact breaks ties).
@@ -3643,9 +3647,12 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
     json ors = json::array();
     for (const Ori& o : os) ors.push_back(json{{"up", {o.up.x(), o.up.y(), o.up.z()}}, {"overhang_mm2", o.over}, {"bed_contact_mm2", o.bed}, {"height_mm", o.h}});
     out["orientations"] = ors;
-    if (best != 0 && os[best].over < 0.7 * os[0].over - 1.0)
+    if (best != 0 && os[best].over < 0.7 * os[0].over - 1.0) {
+        const std::string why = "printing with this model direction up cuts the overhang from " + num(os[0].over) + " to " + num(os[best].over) + " mm2";
         suggestions.push_back(json{{"kind", "orientation"}, {"turn_up_to", {os[best].up.x(), os[best].up.y(), os[best].up.z()}}, {"overhang_mm2", os[best].over}, {"overhang_now_mm2", os[0].over},
-                                   {"why", "printing with this model direction up cuts the overhang from " + num(os[0].over) + " to " + num(os[best].over) + " mm2"}});
+                                   {"why", why}});
+        notes.push_back(json{{"kind", "orientation"}, {"severity", "suggestion"}, {"text", why}, {"at", nullptr}});   // global: no pin, no normal
+    }
 
     // Tip 8: a rounded surface facing the bed. Overhanging triangles joined by shared vertices; a component whose slope varies a lot is a curve.
     {
@@ -3659,7 +3666,7 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
         for (size_t i = 0; i < parent.size(); ++i) parent[i] = int(i);
         std::function<int(int)> root = [&](int x) { while (parent[size_t(x)] != x) { parent[size_t(x)] = parent[size_t(parent[size_t(x)])]; x = parent[size_t(x)]; } return x; };
         const double zmin = m.bounding_box().min.z();
-        struct Comp { double area{0}, a0{1e9}, a1{-1e9}, z0{1e30}, z1{-1e30}, pa{0}; Vec3d p{Vec3d::Zero()}; };
+        struct Comp { double area{0}, a0{1e9}, a1{-1e9}, z0{1e30}, z1{-1e30}, pa{0}; Vec3d p{Vec3d::Zero()}, pn{Vec3d::Zero()}; std::vector<int> tris; };
         std::map<int, Comp> comps;
         std::vector<std::array<int, 4>> tris;   // v0, v1, v2, kept
         for (const stl_triangle_vertex_indices& f : F) {
@@ -3680,7 +3687,8 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
             const double nn = n.norm(), a = 0.5 * nn, deg = std::acos(std::min(1.0, -n.z() / nn)) * 180.0 / M_PI;   // angle from straight down
             Comp& c = comps[root(t[0])];
             c.area += a; c.a0 = std::min(c.a0, deg); c.a1 = std::max(c.a1, deg);
-            if (a > c.pa) { c.pa = a; c.p = (p0 + p1 + p2) / 3.0; }
+            if (a > c.pa) { c.pa = a; c.p = (p0 + p1 + p2) / 3.0; c.pn = n / nn; }
+            if (c.tris.size() < 2000) c.tris.push_back(int(ti - 1));
             c.z0 = std::min(c.z0, std::min({p0.z(), p1.z(), p2.z()})); c.z1 = std::max(c.z1, std::max({p0.z(), p1.z(), p2.z()}));
         }
         json cur = json::array();
@@ -3688,7 +3696,7 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
             const Comp& c = kv.second;
             if (c.area < 4.0 || c.a1 - c.a0 < 12.0 || c.a1 < 90.0 - ang) continue;   // flat, tiny, or never steep enough to matter
             if (bore_r > 0 && c.z1 - c.z0 <= bore_r * 1.05) continue;                 // the roof arc of a horizontal bore: reported under horizontal_holes
-            add_note("fillet_from_below", "suggestion", "A rounded surface faces the bed: an equal 45 deg chamfer prints cleaner", c.p);
+            add_note("fillet_from_below", "suggestion", "A rounded surface faces the bed: an equal 45 deg chamfer prints cleaner", c.p, to_model_dir(c.pn), c.tris);
             cur.push_back(json{{"area_mm2", c.area}, {"z", {c.z0 - zmin, c.z1 - zmin}}, {"slope_from_bed_deg", {c.a0, c.a1}}});
             suggestions.push_back(json{{"kind", "fillet_from_below"}, {"area_mm2", c.area}, {"z", {c.z0 - zmin, c.z1 - zmin}},
                                        {"why", "a rounded surface faces the bed (slope " + num(c.a0) + "-" + num(c.a1) + " deg from straight down): an equal 45 deg chamfer prints cleaner (a horizontal bore's roof is under horizontal_holes)"}});
@@ -3721,10 +3729,12 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
             else if (is_roof(p0, p1, p2)) ++roof;
         }
         const size_t stride = std::max<size_t>(1, (side + roof) / 1200);
-        size_t seen = 0, used = 0, thin = 0, off = 0;
+        size_t seen = 0, used = 0, thin = 0, off = 0, fi = 0;
         double tmin = 1e30;
-        Vec3d  tat = Vec3d::Zero();   // where the thinnest wall was measured
+        Vec3d tat = Vec3d::Zero(), tat_n = Vec3d::Zero();   // where the thinnest wall was measured
+        std::vector<int> thin_tris;   // faces whose measured wall is under 2 line widths (first 2000)
         for (const stl_triangle_vertex_indices& f : F) {
+            const size_t fidx = fi++;
             const Vec3d p0 = V[f(0)].cast<double>(), p1 = V[f(1)].cast<double>(), p2 = V[f(2)].cast<double>();
             const Vec3d n = (p1 - p0).cross(p2 - p0);
             const double nn = n.norm();
@@ -3738,8 +3748,8 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
             if (!h.is_hit()) continue;
             const double t = h.distance() + 0.02;
             if (t > 10.0 * line_width) continue;   // a block, not a wall
-            ++used; if (t < tmin) { tmin = t; tat = c; }
-            if (t < 2.0 * line_width) ++thin;
+            ++used; if (t < tmin) { tmin = t; tat = c; tat_n = nu; }
+            if (t < 2.0 * line_width) { ++thin; if (thin_tris.size() < 2000) thin_tris.push_back(int(fidx)); }
             const double k = t / line_width, r = std::round(k);
             if (r >= 1 && std::abs(k - r) > 0.25) ++off;
         }
@@ -3748,7 +3758,7 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
             w["min_mm"] = tmin; w["thin_pct"] = 100.0 * thin / used; w["off_multiple_pct"] = 100.0 * off / used;
             if (thin > 0) {
                 warnings.push_back("walls thinner than 2 line widths (" + num(2 * line_width) + " mm); the thinnest is " + num(tmin) + " mm");
-                add_note("thin_wall", "warning", "Wall " + num(tmin) + " mm thick: under 2 line widths (" + num(2 * line_width) + " mm), it will not print solid", tat);
+                add_note("thin_wall", "warning", "Wall " + num(tmin) + " mm thick: under 2 line widths (" + num(2 * line_width) + " mm), it will not print solid", tat, to_model_dir(tat_n), thin_tris);
             }
             if (100.0 * off / used > 20.0)
                 suggestions.push_back(json{{"kind", "wall_thickness"}, {"line_width_mm", line_width}, {"off_multiple_pct", 100.0 * off / used},
@@ -3769,7 +3779,9 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
                 const double d = r["distance"].get<double>();
                 if (d > 1e-6 && d < clearance - 1e-9) {
                     pairs.push_back(json{{"a", int(i)}, {"b", int(j)}, {"gap_mm", d}});
-                    warnings.push_back("bodies " + std::to_string(i) + " and " + std::to_string(j) + " are " + num(d) + " mm apart: fitted parts need about " + num(clearance) + " mm of clearance");
+                    const std::string w = "bodies " + std::to_string(i) + " and " + std::to_string(j) + " are " + num(d) + " mm apart: fitted parts need about " + num(clearance) + " mm of clearance";
+                    warnings.push_back(w);
+                    notes.push_back(json{{"kind", "tight_pair"}, {"severity", "warning"}, {"text", w}, {"at", nullptr}});   // global: no pin, no normal
                 }
             }
         out["tight_pairs"] = pairs;
@@ -3804,28 +3816,34 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
     const double zmin = bb.min.z();
     const double cos_lim = std::cos((90.0 - ang) * M_PI / 180.0);   // a down-facing normal with -nz > cos_lim overhangs by more than `ang`
     double area = 0, bed = 0, over = 0;
-    std::map<long, std::array<double, 10>> levels;   // z (0.1 mm) -> area, x0, y0, x1, y1, z, biggest triangle area, its centroid x, y, z
+    struct Level { std::array<double, 13> d; std::vector<int> tris; };   // d: area, x0, y0, x1, y1, z, biggest tri area, its centroid x y z, its normal x y z
+    std::map<long, Level> levels;
+    size_t fi = 0;
     for (const stl_triangle_vertex_indices& f : m.its.indices) {
+        const size_t fidx = fi++;
         const Vec3f& p0 = m.its.vertices[f(0)]; const Vec3f& p1 = m.its.vertices[f(1)]; const Vec3f& p2 = m.its.vertices[f(2)];
         const Vec3d n = (p1 - p0).cast<double>().cross((p2 - p0).cast<double>());
-        const double a = 0.5 * n.norm();
+        const double nn = n.norm();
+        const double a = 0.5 * nn;
         if (a < 1e-12) continue;
         area += a;
-        const double nz = n.z() / n.norm();
+        const double nz = n.z() / nn;
         if (nz >= -1e-9) continue;
         const double zc = (p0.z() + p1.z() + p2.z()) / 3.0;
         if (zc - zmin < 0.05 && -nz > 0.99) { bed += a; continue; }   // flat on the bed: contact, not an overhang
         if (-nz <= cos_lim) continue;
         over += a;
-        auto& L = levels[std::lround(zc * 10.0)];
-        if (L[0] == 0) L = {0, 1e30, 1e30, -1e30, -1e30, zc, 0, 0, 0, 0};
+        auto& lev = levels[std::lround(zc * 10.0)];
+        auto& L = lev.d; auto& btris = lev.tris;
+        if (L[0] == 0) L = {0, 1e30, 1e30, -1e30, -1e30, zc, 0, 0, 0, 0, 0, 0, 0};
         L[0] += a;
-        if (a > L[6]) { L[6] = a; L[7] = (p0.x() + p1.x() + p2.x()) / 3.0; L[8] = (p0.y() + p1.y() + p2.y()) / 3.0; L[9] = zc; }
+        if (a > L[6]) { L[6] = a; L[7] = (p0.x() + p1.x() + p2.x()) / 3.0; L[8] = (p0.y() + p1.y() + p2.y()) / 3.0; L[9] = zc; L[10] = n.x() / nn; L[11] = n.y() / nn; L[12] = n.z() / nn; }
+        if (btris.size() < 2000) btris.push_back(int(fidx));
         for (const Vec3f* q : {&p0, &p1, &p2}) { L[1] = std::min<double>(L[1], q->x()); L[2] = std::min<double>(L[2], q->y()); L[3] = std::max<double>(L[3], q->x()); L[4] = std::max<double>(L[4], q->y()); }
     }
-    std::vector<std::array<double, 10>> top;
-    for (auto& kv : levels) top.push_back(kv.second);
-    std::sort(top.begin(), top.end(), [](const auto& x, const auto& y) { return x[0] > y[0]; });
+    std::vector<Level> top;
+    for (auto& kv : levels) top.push_back(std::move(kv.second));
+    std::sort(top.begin(), top.end(), [](const Level& x, const Level& y) { return x.d[0] > y.d[0]; });
     json lv = json::array();
     const double bridge_max = params.value("bridge_max", 20.0);   // sheet tip 12: printers bridge ~2 cm
     json warnings = json::array();
@@ -3835,25 +3853,32 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
     auto num = [](double v) { std::ostringstream os; os.imbue(std::locale::classic()); os.precision(3); os << v; return os.str(); };
     json notes = json::array();   // the issues that have a place on the part: the viewport pins each one there (model frame)
     auto to_model = [&](const Vec3d& p) { return Vec3d(rot_c + rot.transpose() * (p - rot_c)); };
-    auto note = [&](const char* kind, const char* severity, const std::string& text, const Vec3d& at) {
-        notes.push_back(json{{"kind", kind}, {"severity", severity}, {"text", text}, {"at", {at.x(), at.y(), at.z()}}});
+    auto to_model_dir = [&](const Vec3d& d) { return rot.transpose() * d; };   // a direction: rotate only, no translation
+    auto note = [&](const char* kind, const char* severity, const std::string& text, const Vec3d& at, const Vec3d& n_model, const std::vector<int>& tris) {
+        json j = json{{"kind", kind}, {"severity", severity}, {"text", text}, {"at", {at.x(), at.y(), at.z()}}};
+        if (!n_model.isZero()) j["normal"] = json::array({n_model.x(), n_model.y(), n_model.z()});
+        if (!tris.empty()) j["tris"] = json(tris);
+        notes.push_back(std::move(j));
     };
     for (size_t i = 0; i < top.size() && i < 6; ++i) {
         // ponytail: span = the shorter side of the level's bounding box (a strip bridges across its short side); a ring or an L
         // over-reports. Exact spans need the face outline.
-        const double span = std::min(top[i][3] - top[i][1], top[i][4] - top[i][2]);
-        lv.push_back(json{{"z", top[i][5] - zmin}, {"area_mm2", top[i][0]}, {"min", {top[i][1], top[i][2]}}, {"max", {top[i][3], top[i][4]}},
+        const double span = std::min(top[i].d[3] - top[i].d[1], top[i].d[4] - top[i].d[2]);
+        lv.push_back(json{{"z", top[i].d[5] - zmin}, {"area_mm2", top[i].d[0]}, {"min", {top[i].d[1], top[i].d[2]}}, {"max", {top[i].d[3], top[i].d[4]}},
                           {"span_mm", span}, {"too_long_to_bridge", span > bridge_max}});
+        const Vec3d lvl_n = to_model_dir(Vec3d(top[i].d[10], top[i].d[11], top[i].d[12]));   // the level's biggest triangle normal, model frame
         if (span > bridge_max) {
-            warnings.push_back("flat roof at z=" + num(top[i][5] - zmin) + " spans " + num(span) + " mm, over " + num(bridge_max) + ": stagger triangles under it or add sacrificial ribs");
-            note("long_bridge", "warning", "Flat roof spans " + num(span) + " mm (over " + num(bridge_max) + "): add ribs or staggered triangles under it", to_model(Vec3d(top[i][7], top[i][8], top[i][9])));
+            warnings.push_back("flat roof at z=" + num(top[i].d[5] - zmin) + " spans " + num(span) + " mm, over " + num(bridge_max) + ": stagger triangles under it or add sacrificial ribs");
+            note("long_bridge", "warning", "Flat roof spans " + num(span) + " mm (over " + num(bridge_max) + "): add ribs or staggered triangles under it",
+                 to_model(Vec3d(top[i].d[7], top[i].d[8], top[i].d[9])), lvl_n, top[i].tris);
         }
         // ponytail: thresholds are the sheet's rule of thumb (a printer bridges ~2 cm easily); 5 mm below which nothing is worth adding.
-        const json at = json{{"level", int(i)}, {"z", top[i][5] - zmin}, {"min", {top[i][1], top[i][2]}}, {"max", {top[i][3], top[i][4]}}, {"span_mm", span}};
+        const json at = json{{"level", int(i)}, {"z", top[i].d[5] - zmin}, {"min", {top[i].d[1], top[i].d[2]}}, {"max", {top[i].d[3], top[i].d[4]}}, {"span_mm", span}};
         auto add = [&](const char* kind, json extra) { json j = at; j["kind"] = kind; for (auto it = extra.begin(); it != extra.end(); ++it) j[it.key()] = it.value(); suggestions.push_back(j); };
         if (span > 5.0 && span <= bridge_max && !layer_done) {
             layer_done = true;   // levels are sorted by area: the biggest roof gets the suggestion, a curve's slices do not each get one
-            note("sacrificial_layer", "suggestion", "A " + num(span) + " mm roof: a one-layer sacrificial membrane under it bridges cleanly", to_model(Vec3d(top[i][7], top[i][8], top[i][9])));
+            note("sacrificial_layer", "suggestion", "A " + num(span) + " mm roof: a one-layer sacrificial membrane under it bridges cleanly",
+                 to_model(Vec3d(top[i].d[7], top[i].d[8], top[i].d[9])), lvl_n, top[i].tris);
             add("sacrificial_layer", json{{"layer_h", layer_h}, {"why", "thin one-layer membrane under the roof, cut away after printing"}});
         }
         if (span > bridge_max) {
@@ -3894,7 +3919,8 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
             warnings.push_back("horizontal hole d=" + num(2 * o.r) + " mm: use a teardrop profile");
             // the pin sits on the roof of the bore, halfway along it (model frame: the axis turned back, "up" is the print's +Z turned back)
             note("horizontal_hole", "warning", "Horizontal hole d=" + num(2 * o.r) + " mm: use a teardrop profile",
-                 Vec3d(o.base + (rot.transpose() * o.ax) * (0.5 * (o.lo + o.hi)) + (rot.transpose() * Vec3d::UnitZ()) * o.r));
+                 Vec3d(o.base + (rot.transpose() * o.ax) * (0.5 * (o.lo + o.hi)) + (rot.transpose() * Vec3d::UnitZ()) * o.r),
+                 -(rot.transpose() * Vec3d::UnitZ()), {});   // the roof faces down into the bore; no tris on a bore
         }
     }
 
@@ -6295,6 +6321,7 @@ std::string print_check_summary(DesignPanel* panel, int body, bool& clean, bool 
     if (pins) {
         pins->clear();
         for (const json& n : r.at("notes")) {
+            if (!n.contains("at") || n["at"].is_null()) continue;   // global pin-less (orientation / tight_pair): listed in the sidebar, no pin
             const bool warn = n.value("severity", std::string()) == "warning";
             if (warnings_only && !warn) continue;
             PrintNote p;

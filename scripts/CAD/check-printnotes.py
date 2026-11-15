@@ -105,7 +105,7 @@ check(isinstance(pn, list) and all(isinstance(p.get("n"), int) and isinstance(p.
       "each print_notes entry carries n, open and tinted_tris")
 
 # --- Postcondition 3 (qnir): hidden-pin normals -------------------------------------------
-check(all(isinstance(n.get("normal"), list) and len(n.get("normal")) == 3 for n in notes_of(res)),
+check(all(isinstance(n.get("normal"), list) and len(n.get("normal")) == 3 for n in notes_of(res) if n.get("at") is not None),   # pin-less global notes have no normal
       "every note carries a normal [x, y, z] for hidden-pin culling")
 
 # --- Postcondition 2 (b11y): side list ----------------------------------------------------
@@ -158,9 +158,9 @@ call("transform", body=1, dx=20.1)                              # 0.1 mm gap -> 
 time.sleep(0.4)
 resT = safe_call("analyze_printability", body=0)
 sugs = resT.get("suggestions", []) if isinstance(resT, dict) else []
-tight = [s for s in sugs if isinstance(s, dict) and s.get("kind") == "tight_pair"]
+tight = [n for n in notes_of(resT) if n.get("kind") == "tight_pair"]   # a tight pair is a warning and a pin-less note, not a suggestion
 check(len(tight) >= 1, "two boxes 0.1 mm apart produce a tight_pair suggestion")
-glob_notes = [n for n in notes_of(resT) if n.get("at") is None and n.get("kind") in ("orientation", "tight_pair")]
+glob_notes = [n for n in notes_of(resT) if n.get("at") is None and n.get("kind") == "tight_pair"]
 check(len(glob_notes) >= 1,
       "the tight_pair (and orientation) suggestions are emitted as pin-less notes with at==null")
 
