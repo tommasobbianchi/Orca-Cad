@@ -4455,7 +4455,8 @@ static void attach_print_fixes(json& notes, const json& suggestions, const CadDo
             label = "Add a 0.3 mm sacrificial brim pad (cut it away after printing)";
             steps.push_back(json{{"method", "plane"}, {"params", {{"type", "offset"}, {"base", 0}, {"offset", zb}}}});
             steps.push_back(json{{"method", "sketch_begin"}, {"params", {{"plane", "datum:{prev.newest_datum}"}}}});
-            steps.push_back(json{{"method", "sketch_add"}, {"params", {{"rect", json::array({minx - mo.x(), miny - mo.y(), maxx - mo.x(), maxy - mo.y()})}}}});
+            steps.push_back(json{{"method", "sketch_add"}, {"params", {{"shape", "rounded_rect"}, {"rect", json::array({minx - mo.x(), miny - mo.y(), maxx - mo.x(), maxy - mo.y()})},
+                                 {"radius", std::min(m3, 0.5 * std::min(maxx - minx, maxy - miny) - 0.01)}}}});   // rounded corners: a square pad corner lifts first
             steps.push_back(json{{"method", "sketch_commit"}, {"params", json::object()}});
             steps.push_back(json{{"method", "extrude"}, {"params", {{"sketch", "{prev.sketch_index}"}, {"distance", th}, {"boolean", "union"}, {"body", body}}}});
         } else if (kind == "fillet_from_below" && rot_id) {
