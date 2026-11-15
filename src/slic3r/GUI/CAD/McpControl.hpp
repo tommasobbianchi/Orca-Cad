@@ -18,6 +18,7 @@
 // pipe transport when a Windows agent actually needs it.
 
 #include <string>
+#include <nlohmann/json.hpp>
 
 namespace Slic3r { namespace GUI {
 
@@ -30,6 +31,10 @@ std::string mcp_socket_path();
 
 class DesignPanel;
 struct PrintNote;
+// Run one automatic fix: `fix` is {"steps":[{"method":...,"params":{...}},...]}. Each step goes through the
+// same dispatcher the socket uses; the first failing step stops it, undoes the steps already applied and
+// throws with the verb's message. Returns {ok, applied_label, steps}.
+nlohmann::json run_print_fix(DesignPanel* panel, const nlohmann::json& fix);
 // The design-for-print check (analyze_printability) of body `body`, as one English line for the status line: the warnings and the
 // suggestions, three at most. `clean` is true when there is nothing to report. Throws std::runtime_error when the body cannot be read.
 // warnings_only: leave the suggestions out (the automatic check after a feature commit only speaks when something is actually wrong).

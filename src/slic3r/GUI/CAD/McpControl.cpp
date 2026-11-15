@@ -726,6 +726,7 @@ json describe_tools()
         compact_tool("name_dimension", "Name a sketch dimension (index from sketch_dimensions); set_feature_expr then takes field \"dim:<name>\". name \"\" removes it. Names are positions: deleting a constraint from the sketch shifts the ones after it.", {{"sketch", "integer", "Sketch feature index"}, {"index", "integer", "dimension index"}, {"name", "string", "letters, digits, _"}}),
         compact_tool("min_distance", "Shortest distance between two bodies and the closest points; b can be tried at a hypothetical offset (move_b) without changing anything.", {{"a", "integer", "body index or name"}, {"b", "integer", "body index or name"}, {"move_b", "array", "[dx,dy,dz] mm"}}),
         compact_tool("analyze_printability", "Overhang area and levels (a flat pocket ceiling shows as one level), bed contact, height and disconnected solids of a body in a print orientation. rotate [rx,ry,rz] deg; the body rests on its lowest point.", {{"body", "integer", "body index or name"}, {"rotate", "array", "[rx,ry,rz] deg"}, {"overhang_angle", "number", "deg from vertical, default 45"}, {"bridge_max", "number", "mm a flat roof may span before a warning, default 20"}, {"layer_h", "number", "mm, layer height used in the suggestions, default 0.4"}, {"line_width", "number", "mm, extrusion line width for the wall check, default 0.4"}, {"clearance", "number", "mm, minimum gap between fitted bodies, default 0.3"}}),
+        compact_tool("apply_print_fix", "Apply the automatic fix of a Print check note: analyse `body` (rotate identity), pick the first note of `kind` (or `index`) that has a fix, run it through the verb dispatcher and return {ok, applied_label, steps, remaining}. Refuses when the note has no fix.", {{"body", "integer", "body index or name"}, {"kind", "string", "note kind (vertical_edge, base_corner, warp_risk, tight_pair, ...)"}, {"index", "integer", "note index in the analysis' notes instead of kind"}}),
         compact_tool("rename_body", "Give a body a name. Verbs that take `body` then accept the name as well as the index (extrude, hole, pattern, fillet, boolean...).", {{"body", "integer", "body index"}, {"name", "string", "unique name"}}),
         compact_tool("set_body_visible", "Show or hide a body in the viewport (the eye in the Bodies list). Display only.", {{"body", "integer", "body id"}, {"visible", "boolean", "default true"}}),
         compact_tool("isolate_body", "Hide every body but this one; with no body (or show_all:true) show them all again.", {{"body", "integer", "body id"}, {"show_all", "boolean", ""}}),
@@ -3393,7 +3394,8 @@ json action_ui_option(DesignPanel* panel, const json& params)
     if (name == "imgui_ribbon") { panel->mcp_set_imgui_ribbon(on); return json{{"ok", true}, {"imgui_ribbon", on}}; }
     if (name == "imgui_menu")   { panel->mcp_set_imgui_menu(on);   return json{{"ok", true}, {"imgui_menu", on}}; }
     if (name == "imgui_topbar") { panel->mcp_set_imgui_topbar(on); return json{{"ok", true}, {"imgui_topbar", on}}; }
-    throw std::runtime_error("unknown ui option: " + name + " (imgui_tree, imgui_ribbon, imgui_menu, imgui_topbar)");
+    if (name == "print_check")  { if (DesignCanvas* vp = panel->mcp_viewport()) vp->set_print_check_on(on); return json{{"ok", true}, {"print_check", on}}; }
+    throw std::runtime_error("unknown ui option: " + name + " (imgui_tree, imgui_ribbon, imgui_menu, imgui_topbar, print_check)");
 }
 
 json action_plane(DesignPanel* panel, const json& params)
@@ -3436,7 +3438,9 @@ json action_plane(DesignPanel* panel, const json& params)
     }
     doc.recompute();   // datum-only docs yield no body; that is expected
     panel->mcp_after_change();
-    return json{{"ok", idx >= 0}, {"plane_index", idx}, {"datum_planes", int(doc.resolve_datum_planes().size())}};
+    const int datums = int(doc.resolve_datum_planes().size());
+    return json{{"ok", idx >= 0}, {"plane_index", idx}, {"datum_planes", datums},
+                {"newest_datum", datums - 1}};   // the ordinal sketch_begin's datum:N wants
 }
 
 json action_axis(DesignPanel* panel, const json& params)
@@ -3957,7 +3961,10 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
             const Vec3d pin = (V[bf(0)].cast<double>() + V[bf(1)].cast<double>() + V[bf(2)].cast<double>()) / 3.0;
             const std::string text = "Curved surface with its axis " + num(ang_from_z) + " deg from Z: layer stair-steps show on it; orient the part so the axis is vertical if the finish matters";
             add_note("curve_axis", "suggestion", text, pin, to_model_dir(t_n), cc.tris);
-            suggestions.push_back(json{{"kind", "curve_axis"}, {"angle_from_z_deg", ang_from_z}, {"area_mm2", cc.area}, {"why", text}});
+            const Vec3d ax_model = to_model_dir(Vec3d(axis.x(), axis.y(), axis.z()));   // the unit axis, model frame
+            notes.back()["axis"] = json::array({ax_model.x(), ax_model.y(), ax_model.z()});
+            suggestions.push_back(json{{"kind", "curve_axis"}, {"angle_from_z_deg", ang_from_z}, {"area_mm2", cc.area}, {"why", text},
+                                       {"axis", json::array({ax_model.x(), ax_model.y(), ax_model.z()})}});
             ++curve_count;
             if (curve_count >= 6) break;
         }
@@ -4109,7 +4116,7 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
                     pairs.push_back(json{{"a", int(i)}, {"b", int(j)}, {"gap_mm", d}});
                     const std::string w = "bodies " + std::to_string(i) + " and " + std::to_string(j) + " are " + num(d) + " mm apart: fitted parts need about " + num(clearance) + " mm of clearance";
                     warnings.push_back(w);
-                    notes.push_back(json{{"kind", "tight_pair"}, {"severity", "warning"}, {"text", w}, {"at", nullptr}});   // global: no pin, no normal
+                    notes.push_back(json{{"kind", "tight_pair"}, {"severity", "warning"}, {"text", w}, {"at", nullptr}, {"a", int(i)}, {"b", int(j)}, {"gap_mm", d}});   // global: no pin, no normal
                 }
             }
         out["tight_pairs"] = pairs;
@@ -4162,6 +4169,10 @@ static void build_print_pins(const json& notes, bool warnings_only, std::vector<
         p.kind = j.value("kind", std::string());
         p.text = j.value("text", std::string());
         p.warning = warn;
+        if (j.contains("fix") && j["fix"].is_object()) {
+            p.fix_label = j["fix"].value("label", std::string());
+            if (j["fix"].contains("steps")) p.fix_json = j["fix"]["steps"].dump();   // {"method","params"} steps for run_print_fix
+        }
         if (j.contains("normal")) { p.normal = Vec3d(j["normal"][0].get<double>(), j["normal"][1].get<double>(), j["normal"][2].get<double>()); p.has_normal = true; }
         if (j.contains("tris")) for (const json& t : j["tris"]) p.tris.push_back(t.get<int>());
         p.n = ++n;
@@ -4232,6 +4243,161 @@ static double inscribed_span(const std::vector<std::array<float, 6>>& xy, double
     double maxd = 0.0;
     for (double v : dist) maxd = std::max(maxd, v);
     return std::max(2.0 * maxd * cell, cell);
+}
+
+// The centre of body `i` in the model frame (from the tessellated display mesh, else the solid's bbox).
+static Vec3d body_bbox_center(const CadDocument& doc, int i)
+{
+    if (i >= 0 && i < int(doc.display_body_meshes.size()) && !doc.display_body_meshes[i].empty())
+        return doc.display_body_meshes[i].bounding_box().center();
+    if (i >= 0 && i < int(doc.bodies.size()) && !doc.bodies[i].shape.IsNull()) {
+        Bnd_Box bb; BRepBndLib::Add(doc.bodies[i].shape, bb);
+        return Vec3d(0.5 * (bb.CornerMin().X() + bb.CornerMax().X()),
+                     0.5 * (bb.CornerMin().Y() + bb.CornerMax().Y()),
+                     0.5 * (bb.CornerMin().Z() + bb.CornerMax().Z()));
+    }
+    return Vec3d::Zero();
+}
+
+// Attach an automatic "fix" (label + steps of existing MCP verbs) to every note that can be
+// auto-corrected. The note producers stay untouched; this walks the final notes/suggestions.
+// Geometry fixes are only valid in the unrotated model frame (`rot_id`), because the analysis
+// detects them in the print frame; with a rotation the model-frame edge/position selectors would
+// address the wrong geometry.
+static void attach_print_fixes(json& notes, const json& suggestions, const CadDocument& doc, int body, bool rot_id, double clearance, double bed_z)
+{
+    const Vec3d mo = doc.modeling_origin;   // extrude_circle's x/y are relative to it, per the sketch-plane convention
+    std::vector<Vec3d> ear_corners;         // model-frame corners from the mouse_ears suggestion
+    if (rot_id)
+        for (const json& s : suggestions)
+            if (s.value("kind", std::string()) == "mouse_ears" && s.contains("corners") && s["corners"].is_array())
+                for (const json& c : s["corners"])
+                    if (c.is_array() && c.size() >= 3)
+                        ear_corners.emplace_back(jn(c, 0), jn(c, 1), jn(c, 2));
+    for (json& n : notes) {
+        const std::string kind = n.value("kind", std::string());
+        std::string label;
+        json steps = json::array();
+        if (kind == "vertical_edge" && rot_id) {
+            label = "Fillet the vertical edges (R 2 mm)";
+            steps.push_back(json{{"method", "fillet"}, {"params", {{"where", json{{"kind", "line"}, {"parallel", "z"}}}, {"radius", 2.0}, {"body", body}}}});
+        } else if (kind == "base_corner" && rot_id) {
+            double z = 0.0;
+            if (n.contains("at") && !n["at"].is_null()) z = jn(n["at"], 2);
+            label = "Chamfer the inside corners (2 mm)";
+            steps.push_back(json{{"method", "chamfer"}, {"params", {{"where", json{{"kind", "line"}, {"z", z}}}, {"distance", 2.0}, {"body", body}}}});
+        } else if (kind == "warp_risk" && rot_id) {
+            label = "Add mouse ears (disc 10 mm, 0.3 mm)";
+            for (const Vec3d& c : ear_corners) {
+                if (std::abs(c.z() - bed_z) >= 0.1) continue;   // only ears on the bed help
+                steps.push_back(json{{"method", "extrude_circle"}, {"params", {{"plane", "XY"}, {"diameter", 10.0},
+                                     {"x", c.x() - mo.x()}, {"y", c.y() - mo.y()}, {"distance", 0.3}, {"boolean", "union"}, {"body", body}}}});
+            }
+            if (steps.empty()) continue;   // no corner on the bed: nothing to add
+        } else if (kind == "tight_pair") {
+            if (!n.contains("a") || !n.contains("b") || !n.contains("gap_mm")) continue;
+            const int a = n["a"].get<int>(), b = n["b"].get<int>();
+            const double dist = clearance - n["gap_mm"].get<double>();
+            if (dist <= 0) continue;
+            Vec3d dir = body_bbox_center(doc, b) - body_bbox_center(doc, a);
+            const double L = dir.norm();
+            if (L < 1e-9) continue;
+            dir /= L;
+            label = "Move the parts apart to the clearance";
+            steps.push_back(json{{"method", "transform"}, {"params", {{"body", b}, {"dx", dir.x() * dist}, {"dy", dir.y() * dist}, {"dz", dir.z() * dist}}}});
+        } else if (kind == "long_bridge" && rot_id) {
+            // One rib per gap: a thin wall across the roof's X span, spaced along Y at the suggestion's pitch.
+            if (!n.contains("roof") || !n.contains("ribs")) continue;
+            const json& rf = n["roof"]; const json& rb = n["ribs"];
+            if (!rf.contains("z") || !rf.contains("min") || !rf.contains("max") || !rb.contains("count") || !rb.contains("pitch_mm")) continue;
+            const int cnt = rb["count"].get<int>();
+            const double pitch = rb["pitch_mm"].get<double>();
+            if (cnt <= 0 || pitch <= 0) continue;
+            const double rz = rf["z"].get<double>();
+            const double minx = jn(rf["min"], 0), maxx = jn(rf["max"], 0), miny = jn(rf["min"], 1);
+            label = "Add sacrificial ribs under the roof";
+            for (int i = 0; i < cnt; ++i) {
+                const double y = miny + (i + 1) * pitch;   // model frame; profile coords are relative to modeling_origin
+                steps.push_back(json{{"method", "extrude"}, {"params", {{"plane", "XY"},
+                    {"profile", json::array({json::array({minx - mo.x(), y - 0.4 - mo.y()}),
+                                             json::array({maxx - mo.x(), y - 0.4 - mo.y()}),
+                                             json::array({maxx - mo.x(), y + 0.4 - mo.y()}),
+                                             json::array({minx - mo.x(), y + 0.4 - mo.y()})})},
+                    {"distance", rz}, {"boolean", "union"}, {"body", body}}}});
+            }
+        } else if (kind == "sacrificial_layer" && rot_id) {
+            // A thin plate directly under the roof: a datum plane at (roof z - layer height), a rect sketch on it, extruded up.
+            if (!n.contains("roof")) continue;
+            const json& rf = n["roof"];
+            if (!rf.contains("z") || !rf.contains("min") || !rf.contains("max")) continue;
+            const double layer_h = n.value("layer_h", 0.4);
+            const double zoff = rf["z"].get<double>() - layer_h;
+            if (zoff < 0) continue;
+            const double minx = jn(rf["min"], 0), maxx = jn(rf["max"], 0), miny = jn(rf["min"], 1), maxy = jn(rf["max"], 1);
+            label = "Add a one-layer sacrificial membrane under the roof";
+            steps.push_back(json{{"method", "plane"}, {"params", {{"type", "offset"}, {"base", 0}, {"offset", zoff}}}});
+            steps.push_back(json{{"method", "sketch_begin"}, {"params", {{"plane", "datum:{prev.newest_datum}"}}}});
+            steps.push_back(json{{"method", "sketch_add"}, {"params", {{"rect", json::array({minx - mo.x(), miny - mo.y(), maxx - mo.x(), maxy - mo.y()})}}}});
+            steps.push_back(json{{"method", "sketch_commit"}, {"params", json::object()}});
+            steps.push_back(json{{"method", "extrude"}, {"params", {{"sketch", "{prev.sketch_index}"}, {"distance", layer_h}, {"boolean", "union"}, {"body", body}}}});
+        } else if (kind == "fillet_from_below" && rot_id) {
+            // The last disabled Fillet feature is the bed fillet: suppress it, then chamfer the bed edges at its radius.
+            int fidx = -1;
+            for (int i = int(doc.features.size()) - 1; i >= 0; --i)
+                if (doc.features[size_t(i)].type == CadFeatureType::Fillet && doc.features[size_t(i)].enabled) { fidx = i; break; }
+            if (fidx < 0) continue;
+            const double frad = doc.features[size_t(fidx)].dressup_size;
+            if (!(frad > 0)) continue;
+            label = "Replace the bed fillet with a 45 deg chamfer";
+            steps.push_back(json{{"method", "suppress"}, {"params", {{"feature", fidx}, {"suppressed", true}}}});
+            steps.push_back(json{{"method", "chamfer"}, {"params", {{"where", json{{"kind", "line"}, {"z", bed_z}}}, {"distance", frad}, {"body", body}}}});
+        } else if (kind == "steep_chamfer" && rot_id) {
+            // A sloped face from a tapered extrude: set that feature's taper to 45 deg. With more than one
+            // tapered extrude the note's face cannot be tied to a source, so skip.
+            std::vector<int> tap;
+            for (size_t i = 0; i < doc.features.size(); ++i)
+                if (doc.features[i].type == CadFeatureType::Extrude && doc.features[i].enabled && std::abs(doc.features[i].taper_deg) > 1e-9)
+                    tap.push_back(int(i));
+            if (tap.size() != 1) continue;
+            label = "Make the slope 45 deg";
+            steps.push_back(json{{"method", "set_feature_expr"}, {"params", {{"feature", tap[0]}, {"field", "taper_deg"}, {"expr", "45"}}}});
+        } else if (kind == "curve_axis" && rot_id) {
+            // Rotate every body about the origin so the curve's (sign-flipped, up-pointing) axis maps to +Z.
+            // A verb to drop the result back onto the bed does not exist; the transform is reported as-is.
+            if (!n.contains("axis") || !n["axis"].is_array() || n["axis"].size() < 3) continue;
+            Vec3d ax(jn(n["axis"], 0), jn(n["axis"], 1), jn(n["axis"], 2));
+            const double L = ax.norm();
+            if (L < 1e-9) continue;
+            ax /= L;
+            if (ax.z() < 0) ax = -ax;   // eigenvector sign is arbitrary; aim for +Z
+            if (std::abs(ax.z()) > 0.9999) continue;   // already near-vertical
+            const Vec3d u = ax.cross(Vec3d::UnitZ()).normalized();
+            const double ang = std::acos(std::max(-1.0, std::min(1.0, ax.dot(Vec3d::UnitZ())))) * 180.0 / M_PI;
+            label = "Stand the curve upright (rotate the part)";
+            for (size_t i = 0; i < doc.bodies.size(); ++i)
+                steps.push_back(json{{"method", "transform"}, {"params", {{"body", int(i)},
+                    {"axis_x", u.x()}, {"axis_y", u.y()}, {"axis_z", u.z()}, {"angle", ang},
+                    {"pivot_x", 0.0}, {"pivot_y", 0.0}, {"pivot_z", 0.0}}}});
+        } else if (kind == "use_parameters") {
+            // Advice: create depth_<n> variables for the (up to 6) extrudes with a literal distance and bind them.
+            label = "Create variables for the extrude depths";
+            int made = 0;
+            for (size_t i = 0; i < doc.features.size() && made < 6; ++i) {
+                const CadFeature& f = doc.features[i];
+                if (f.type != CadFeatureType::Extrude || !f.enabled || !(f.distance > 0)) continue;
+                if (f.expr.count("distance")) continue;   // already bound
+                const std::string vname = "depth_" + std::to_string(made + 1);
+                std::ostringstream os; os.imbue(std::locale::classic()); os.precision(9); os << f.distance;
+                steps.push_back(json{{"method", "set_variable"}, {"params", {{"name", vname}, {"expr", os.str()}}}});
+                steps.push_back(json{{"method", "set_feature_expr"}, {"params", {{"feature", int(i)}, {"field", "distance"}, {"expr", vname}}}});
+                ++made;
+            }
+            if (made == 0) continue;
+        } else {
+            continue;   // no automatic fix for this kind
+        }
+        n["fix"] = json{{"label", label}, {"steps", std::move(steps)}};
+    }
 }
 
 json action_analyze_printability(DesignPanel* panel, const json& params)
@@ -4319,6 +4485,11 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
             warnings.push_back("flat roof at z=" + num(top[i].d[5] - zmin) + " spans " + num(span) + " mm, over " + num(bridge_max) + ": stagger triangles under it or add sacrificial ribs");
             note("long_bridge", "warning", "Flat roof spans " + num(span) + " mm (over " + num(bridge_max) + "): add ribs or staggered triangles under it",
                  to_model(Vec3d(top[i].d[7], top[i].d[8], top[i].d[9])), lvl_n, top[i].tris);
+            // Carry the roof geometry to the post-pass fix (model frame; valid because fixes are unrotated-only).
+            const int nbr = int(std::ceil(span / bridge_max)) - 1;
+            const double pitchr = span / (nbr + 1);
+            notes.back()["roof"] = json{{"z", top[i].d[5] - zmin}, {"min", {top[i].d[1], top[i].d[2]}}, {"max", {top[i].d[3], top[i].d[4]}}};
+            notes.back()["ribs"] = json{{"count", nbr}, {"pitch_mm", pitchr}};
         }
         // ponytail: thresholds are the sheet's rule of thumb (a printer bridges ~2 cm easily); 5 mm below which nothing is worth adding.
         const json at = json{{"level", int(i)}, {"z", top[i].d[5] - zmin}, {"min", {top[i].d[1], top[i].d[2]}}, {"max", {top[i].d[3], top[i].d[4]}}, {"span_mm", span}};
@@ -4328,6 +4499,8 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
             note("sacrificial_layer", "suggestion", "A " + num(span) + " mm roof: a one-layer sacrificial membrane under it bridges cleanly",
                  to_model(Vec3d(top[i].d[7], top[i].d[8], top[i].d[9])), lvl_n, top[i].tris);
             add("sacrificial_layer", json{{"layer_h", layer_h}, {"why", "thin one-layer membrane under the roof, cut away after printing"}});
+            notes.back()["roof"] = json{{"z", top[i].d[5] - zmin}, {"min", {top[i].d[1], top[i].d[2]}}, {"max", {top[i].d[3], top[i].d[4]}}};
+            notes.back()["layer_h"] = layer_h;
         }
         // Small flat roofs (span <= 5 mm) bridge with no help; mark them so the user sees where overhangs are, capped at 3 pins.
         else if (span > 0.5 && span <= 5.0 && small_marked < 3) {
@@ -4384,6 +4557,9 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
         if (doc.features[i].type == CadFeatureType::Hole && doc.features[i].hole_bridge_layer_h > 1e-6)
             sacrificial.push_back(json{{"feature", int(i)}, {"kind", "hole bridge layers"}, {"layer_h", doc.features[i].hole_bridge_layer_h}, {"layers", 2}});
     const json extras = dfam_extras(m, doc, ang, params.value("line_width", 0.4), params.value("clearance", 0.3), bore_r_max, suggestions, warnings, notes, rot, rot_c);
+    const bool rot_id = !params.contains("rotate")
+        || (jn(params["rotate"], 0) == 0.0 && jn(params["rotate"], 1) == 0.0 && jn(params["rotate"], 2) == 0.0);
+    attach_print_fixes(notes, suggestions, doc, b, rot_id, params.value("clearance", 0.3), m.bounding_box().min.z());
     int solids = 0;
     for (TopExp_Explorer ex(doc.bodies[b].shape, TopAbs_SOLID); ex.More(); ex.Next()) ++solids;
     if (solids > 1) warnings.push_back("the body is " + std::to_string(solids) + " disconnected solids");
@@ -5435,6 +5611,7 @@ json ui_inspect(DesignPanel* panel)
             pnl.push_back({{"n", pnpt.n}, {"open", pnpt.open}, {"resolved", pnpt.resolved}, {"tinted_tris", pnpt.tinted_tris},
                            {"visible", pnpt.visible}, {"has_pin", pnpt.has_pin}, {"kind", pnpt.kind}});
         out["print_notes"] = pnl;
+        out["print_check_on"] = v->print_check_on();
     }
     if (v && v->tree_overlay_on()) {   // the on-canvas tree: where each row is, so a rig test can drag one
         const DesignTreeOverlay& to = const_cast<DesignCanvas*>(v)->tree_overlay();
@@ -5834,6 +6011,7 @@ json action_batch(DesignPanel* panel, const json& params)
 }
 
 json call_method_core(DesignPanel* panel, const std::string& method, const json& params);
+json action_apply_print_fix(DesignPanel* panel, const json& params);   // defined after the dispatcher
 
 // The one dispatch point: the socket handler and `batch` both come through here. A call that changes the design
 // reports WHAT it changed - created/changed/removed bodies, features added, warnings - so a caller need not diff
@@ -6348,7 +6526,103 @@ json call_method_core(DesignPanel* panel, const std::string& method, const json&
     if (method == "select_topology")    return action_select_topology(panel, params);
     if (method == "sweep_variable")     return action_sweep_variable(panel, params);
     if (method == "analyze_printability") return action_analyze_printability(panel, params);
+    if (method == "apply_print_fix") return action_apply_print_fix(panel, params);
     throw MethodNotFound{};
+}
+
+// Run one automatic fix: each step goes through the same dispatcher the socket uses (call_method_core),
+// so behaviour is identical to a user calling the verb. The first failing step stops the fix, rolls the
+// already-applied steps back (features/variables restored, exactly as the atomic verbs and call_method's
+// transaction do) and rethrows the verb's message. Returns {ok, applied_label, steps}.
+json run_print_fix_impl(DesignPanel* panel, const json& fix)
+{
+    CadDocument& doc = panel->mcp_doc();
+    if (!fix.is_object() || !fix.contains("steps") || !fix["steps"].is_array())
+        throw std::runtime_error("the fix has no steps");
+    const std::string label = fix.value("label", std::string());
+    const auto saved_features = doc.features;
+    const auto saved_vars = doc.variables;
+    int applied = 0;
+    json prev_result = json::object();   // the previous step's result, for {prev.<key>} step chaining
+    try {
+        for (size_t si = 0; si < fix["steps"].size(); ++si) {
+            const json& st = fix["steps"][si];
+            if (!st.is_object() || !st.contains("method") || !st["method"].is_string())
+                throw std::runtime_error("a fix step has no 'method'");
+            const std::string method = st["method"].get<std::string>();
+            json params = st.value("params", json::object());
+            // Step chaining: replace {prev.<key>} (bare, or embedded in a string) with the previous step's
+            // result value for that key. A bare placeholder keeps the number a JSON number; a missing key fails the step.
+            if (si > 0) {
+                std::function<json(const json&)> subst = [&](const json& v) -> json {
+                    if (v.is_string()) {
+                        const std::string s = v.get<std::string>();
+                        std::string out = s; size_t pos = 0; bool changed = false;
+                        while (pos < out.size()) {
+                            const size_t p = out.find("{prev.", pos);
+                            if (p == std::string::npos) break;
+                            const size_t q = out.find('}', p);
+                            if (q == std::string::npos) break;
+                            const std::string key = out.substr(p + 6, q - (p + 6));
+                            if (!prev_result.contains(key))
+                                throw std::runtime_error(method + " step references missing previous-result key '" + key + "'");
+                            const json& rv = prev_result[key];
+                            if (p == 0 && q == out.size() - 1) return rv;   // whole string: number stays a number
+                            const std::string rep = rv.is_string() ? rv.get<std::string>()
+                                : rv.is_number() ? (std::ostringstream() << rv.get<double>()).str() : rv.dump();
+                            out.replace(p, q - p + 1, rep);
+                            pos = p + rep.size(); changed = true;
+                        }
+                        return changed ? json(out) : v;
+                    }
+                    if (v.is_array()) { json a = v; for (auto& e : a) e = subst(e); return a; }
+                    if (v.is_object()) { json o = v; for (auto it = o.begin(); it != o.end(); ++it) it.value() = subst(it.value()); return o; }
+                    return v;
+                };
+                params = subst(params);
+            }
+            json r;
+            try { r = call_method_core(panel, method, params); }
+            catch (const MethodNotFound&) { throw std::runtime_error("unknown fix verb: " + method); }
+            if (!r.is_object() || !r.value("ok", false))
+                throw std::runtime_error(method + ": " + r.value("error", std::string("failed")));
+            prev_result = r;
+            ++applied;
+        }
+    } catch (...) {
+        doc.features = saved_features; doc.variables = saved_vars;
+        try { doc.recompute(); } catch (const std::exception&) {}
+        throw;
+    }
+    return json{{"ok", true}, {"applied_label", label}, {"steps", applied}};
+}
+
+// apply_print_fix: analyse `body` (rotate identity), pick the first note of `kind` (or `index`) that has
+// a fix, run it, and report the note kinds left after a fresh analysis. Refuses when the note has no fix.
+json action_apply_print_fix(DesignPanel* panel, const json& params)
+{
+    CadDocument& doc = panel->mcp_doc();
+    const int b = params.contains("body") && params["body"].is_string() ? body_by_name(doc, params["body"].get<std::string>()) : params.value("body", 0);
+    const std::string kind = params.value("kind", std::string());
+    const int index = params.value("index", -1);
+    if (kind.empty() && index < 0) throw std::runtime_error("apply_print_fix needs 'kind' (note kind) or 'index' (note index)");
+    const json an = action_analyze_printability(panel, json{{"body", b}});
+    const json& notes = an["notes"];
+    int target = -1;
+    if (index >= 0) { if (index < int(notes.size())) target = index; }
+    else { for (size_t i = 0; i < notes.size(); ++i) if (notes[i].value("kind", std::string()) == kind) { target = int(i); break; } }
+    if (target < 0) throw std::runtime_error(index >= 0 ? "no note at that index" : "no note of kind '" + kind + "'");
+    const json& n = notes[size_t(target)];
+    if (!n.contains("fix") || !n["fix"].is_object())
+        throw std::runtime_error("note '" + n.value("kind", std::string()) + "' has no automatic fix");
+    const json r = run_print_fix_impl(panel, n["fix"]);
+    const json an2 = action_analyze_printability(panel, json{{"body", b}});
+    json remaining = json::array();
+    std::set<std::string> seen;
+    for (const json& nn : an2["notes"]) { const std::string k = nn.value("kind", std::string()); if (seen.insert(k).second) remaining.push_back(k); }
+    json out = r;
+    out["remaining"] = std::move(remaining);
+    return out;
 }
 
 // Why `method` may not run now ("" = it may). Methods that only LOOK always may. Everything else changes the document
@@ -6877,6 +7151,9 @@ void tcp_server_thread(int port)
 }
 
 } // namespace
+
+// Public entry for the panel's Fix button; the implementation lives with the other verbs in the anonymous namespace.
+json run_print_fix(DesignPanel* panel, const json& fix) { return run_print_fix_impl(panel, fix); }
 
 std::string print_check_summary(DesignPanel* panel, int body, bool& clean, bool warnings_only, std::vector<PrintNote>* pins)
 {

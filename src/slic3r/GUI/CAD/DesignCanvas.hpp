@@ -103,6 +103,11 @@ public:
     // ray cast and the red-tint triangle fill. It is copied; the doc may rebuild its meshes later.
     void set_print_notes(std::vector<PrintNote> n, const TriangleMesh* body_mesh = nullptr);
     const std::vector<PrintNote>& print_notes() const { return m_print_note_list; }
+    // The "Print check" toggle: when off, no pins, tint or side list are drawn and no analysis runs.
+    bool print_check_on() const { return m_print_check_on; }
+    void set_print_check_on(bool on);
+    std::function<void()>  on_print_check_toggle;   // the toggle turned the check ON: a fresh analysis is wanted
+    std::function<void(int)> on_print_fix_requested; // a Fix row was clicked in the Print check panel
     void set_print_note_state(int i, bool open, bool resolved);   // a side-list row's resolve/dismiss
     void set_print_focus(int i);                                  // ring the pin ~2 s (camera does not move)
     std::function<void()> on_print_notes_changed;
@@ -529,6 +534,7 @@ private:
     std::unique_ptr<AABBMesh> m_print_aabb;               // for the occlusion ray cast
     int                     m_print_focus{-1};
     std::chrono::steady_clock::time_point m_print_focus_at;
+    bool                    m_print_check_on{true};        // the "Print check" toggle (persisted in AppConfig)
     bool                m_quotes_on{false};
     DesignSidebarOverlay m_sidebar;
     bool                m_sidebar_on{false};

@@ -3493,6 +3493,10 @@ DesignPanel::DesignPanel(wxWindow* parent)
         update_undo_redo_buttons();   // every edit of the live sketch re-solves, so this tracks it
     });
 
+    // The Print check toggle and its Fix buttons drive through the panel: the canvas only draws.
+    m_viewport->on_print_check_toggle = [this]() { auto_print_check(); };
+    m_viewport->on_print_fix_requested = [this](int i) { on_apply_print_fix(i); };
+
     // Selection no longer writes the status line: on_sketch_step owns it, says the same thing
     // for Select mode and — unlike this callback, which also fired while an edit-op mirrored its
     // picks into the selection — never claims "N selected, Delete removes them" in the middle of
@@ -6379,6 +6383,7 @@ void DesignPanel::on_toggle_quotes()
 
 void DesignPanel::on_print_check()
 {
+    if (!m_viewport || !m_viewport->print_check_on()) { if (m_viewport) m_viewport->set_print_notes({}); return; }   // the Print check toggle is off: nothing runs
     const int b = m_sel_solid_body >= 0 ? m_sel_solid_body : int(m_doc.bodies.size()) - 1;
     if (b < 0 || b >= int(m_doc.bodies.size())) {
         set_status(StatusKind::Info, _L("Select a body to check it for printing"));
@@ -6398,6 +6403,7 @@ void DesignPanel::on_print_check()
 
 void DesignPanel::auto_print_check()
 {
+    if (!m_viewport || !m_viewport->print_check_on()) { if (m_viewport) m_viewport->set_print_notes({}); return; }   // the Print check toggle is off: no analysis
     if (m_auto_check_ms > 150 || m_doc.bodies.empty()) { if (m_viewport) m_viewport->set_print_notes({}); return; }   // ponytail: no background thread; a slow part opts out, the Print check button stays
     const int b = m_sel_solid_body >= 0 && m_sel_solid_body < int(m_doc.bodies.size()) ? m_sel_solid_body : int(m_doc.bodies.size()) - 1;
     const wxLongLong t0 = wxGetLocalTimeMillis();
@@ -6411,6 +6417,28 @@ void DesignPanel::auto_print_check()
             b >= 0 && b < int(m_doc.display_body_meshes.size()) ? &m_doc.display_body_meshes[b] : nullptr);
     m_auto_check_ms = (wxGetLocalTimeMillis() - t0).GetValue();
     if (!clean) set_status(StatusKind::Warning, wxString::Format(_L("Print check: %s"), wxString::FromUTF8(text)));
+}
+
+void DesignPanel::on_apply_print_fix(int note_index)
+{
+    using json = nlohmann::json;
+    if (!m_viewport) return;
+    const std::vector<PrintNote>& notes = m_viewport->print_notes();
+    if (note_index < 0 || note_index >= int(notes.size())) return;
+    const PrintNote& n = notes[size_t(note_index)];
+    if (n.fix_json.empty()) return;
+    json fix;
+    try { fix = json::parse(n.fix_json); }
+    catch (...) { set_status(StatusKind::Error, _L("The fix data is invalid")); return; }
+    if (fix.is_array()) fix = json{{"steps", fix}, {"label", n.fix_label}};   // PrintNote keeps only the steps array
+    try {
+        const json r = run_print_fix(this, fix);
+        refresh_tree();
+        auto_print_check();
+        set_status(StatusKind::Info, wxString::Format(_L("Fixed: %s"), wxString::FromUTF8(r.value("applied_label", n.fix_label))));
+    } catch (const std::exception& e) {
+        set_status(StatusKind::Error, wxString::FromUTF8(e.what()));
+    }
 }
 
 void DesignPanel::on_mass_properties()

@@ -23,6 +23,8 @@ struct PrintNote
     Vec3d       at{Vec3d::Zero()};   // model frame
     std::string kind;
     std::string text;
+    std::string fix_label;   // label of the auto-fix button ("" = no automatic fix)
+    std::string fix_json;    // JSON {"steps":[...]} for the fix; empty = none
     int         n{0};
     bool        warning{false};      // a warning (amber) or a suggestion (blue)
     bool        open{true};          // false once the user dismissed it
@@ -60,6 +62,7 @@ public:
     std::function<void(int)>                 dismiss;
     std::function<void(int)>                 resolve;   // toggle the grey resolved state
     std::function<void(int)>                 focus;     // focus a pin (a ring around it); the camera does not move
+    std::function<void(int)>                 apply_fix; // run the note's automatic fix (Fix button)
 
     // Set by the canvas each frame: the body's display mesh for the red tint and the occlusion ray cast, and the focus ring.
     const indexed_triangle_set* its{nullptr};

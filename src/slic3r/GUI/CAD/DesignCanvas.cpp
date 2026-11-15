@@ -115,6 +115,7 @@ DesignCanvas::DesignCanvas(wxWindow* parent)
         m_sketch_tool.set_pick_filter({ get("design_pick_face", true), get("design_pick_edge", true), get("design_pick_vertex", true) });
         m_sketch_tool.set_click_cycle(get("design_click_cycle", false));
         g_design_bed_see_through = get("design_bed_see_through", false);
+        m_print_check_on = get("design_print_check", true);
     }
     m_sketch_tool.on_commit = [this](const SketchProfile& prof, const SketchPlane& pl) {
         if (m_on_sketch_commit) m_on_sketch_commit(prof, pl);
@@ -235,7 +236,7 @@ DesignCanvas::DesignCanvas(wxWindow* parent)
         m_print_notes.focus_index = m_print_focus;
         const auto now = std::chrono::steady_clock::now();
         m_print_notes.focus_active = m_print_focus >= 0 && std::chrono::duration_cast<std::chrono::milliseconds>(now - m_print_focus_at).count() < 2000;
-        m_print_notes.render(imgui, wxGetApp().plater()->get_camera());
+        if (m_print_check_on) m_print_notes.render(imgui, wxGetApp().plater()->get_camera());
         if (s_print_note_frames > 0) { --s_print_note_frames; m_canvas->set_as_dirty(); }   // the side panel sizes itself on its second frame
         {   // The small confirm beside the value label of a 3D gizmo (fillet, chamfer, hole, shell...): the same Confirm / Cancel the bar has.
             float lr[4];
@@ -736,9 +737,20 @@ void DesignCanvas::set_print_notes(std::vector<PrintNote> n, const TriangleMesh*
     m_print_notes.dismiss = [this](int i) { if (i >= 0 && i < int(m_print_note_list.size())) m_print_note_list[size_t(i)].open = false; request_repaint(); };
     m_print_notes.resolve  = [this](int i) { if (i >= 0 && i < int(m_print_note_list.size())) { m_print_note_list[size_t(i)].resolved = !m_print_note_list[size_t(i)].resolved; request_repaint(); } };
     m_print_notes.focus    = [this](int i) { set_print_focus(i); };
+    m_print_notes.apply_fix = [this](int i) { if (on_print_fix_requested) on_print_fix_requested(i); };
     m_print_focus = -1;
     request_repaint();
     if (on_print_notes_changed) on_print_notes_changed();
+}
+
+void DesignCanvas::set_print_check_on(bool on)
+{
+    if (on == m_print_check_on) return;
+    m_print_check_on = on;
+    wxGetApp().app_config->set("design_print_check", on ? "1" : "0");
+    if (!on) set_print_notes({});                      // hide + clear; the panel no-ops too
+    else if (on_print_check_toggle) on_print_check_toggle();   // turning it on re-runs the check
+    request_repaint();
 }
 
 void DesignCanvas::set_print_note_state(int i, bool open, bool resolved)
@@ -1483,6 +1495,9 @@ void DesignCanvas::render_select_panel(float top)
     bool see_through = g_design_bed_see_through;
     box(_u8L("Bed shows through"), see_through);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", _u8L("Off: the bed lies behind every body. On: it is a translucent surface, and the part of a body below it is seen through it.").c_str());
+    bool print_check = m_print_check_on;
+    box(_u8L("Print check"), print_check);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", _u8L("On: pins, red tint and the Print check list show the printability notes. Off: hidden, and the check does not run.").c_str());
     imgui.end();
     ImGuiWrapper::pop_common_window_style();
     if (f.face != f0.face || f.edge != f0.edge || f.vertex != f0.vertex) {
@@ -1495,6 +1510,7 @@ void DesignCanvas::render_select_panel(float top)
         wxGetApp().app_config->set("design_bed_see_through", see_through ? "1" : "0");
         m_canvas->set_as_dirty();
     }
+    if (print_check != m_print_check_on) set_print_check_on(print_check);
     if (cycle != cycle0) {
         m_sketch_tool.set_click_cycle(cycle);
         wxGetApp().app_config->set("design_click_cycle", cycle ? "1" : "0");

@@ -402,14 +402,20 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
                     const ImVec2 cc(r0.x + badge_w * 0.5f, r0.y + row_h * 0.5f);
                     if (n.has_pin) { wdl->AddCircleFilled(cc, 9.f * em, bc); wdl->AddText(cc - nts * 0.5f, IM_COL32(20, 20, 20, 255), num.c_str()); }
                     else              { wdl->AddCircle(cc, 9.f * em, bc, 0, 1.5f * em); wdl->AddText(cc - nts * 0.5f, bc, num.c_str()); }
+                    const bool has_fix = !n.fix_json.empty();
+                    const float text_w = std::max(40.f * em, pw - badge_w - (2 + (has_fix ? 1 : 0)) * btn_w - 44.f * em);
                     ImGui::Dummy(ImVec2(badge_w, row_h));
                     ImGui::SameLine();
+                    if (has_fix) {
+                        if (ImGui::SmallButton("Fix")) { if (apply_fix) apply_fix(i); }
+                        if (ImGui::IsItemHovered() && !n.fix_label.empty()) ImGui::SetTooltip("%s", n.fix_label.c_str());
+                        ImGui::SameLine();
+                    }
                     if (ImGui::SmallButton("OK")) { if (resolve) resolve(i); }
                     ImGui::SameLine();
                     if (ImGui::SmallButton("X")) { if (dismiss) dismiss(i); }
                     ImGui::SameLine();
                     // wrapped to the panel width: the whole note is readable without a tooltip; click focuses the pin
-                    const float text_w = std::max(40.f * em, pw - badge_w - 2.f * btn_w - 44.f * em);
                     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + text_w);
                     ImGui::TextUnformatted(n.text.c_str());
                     ImGui::PopTextWrapPos();
