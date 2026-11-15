@@ -707,6 +707,11 @@ void DesignCanvas::set_sketch_polygon_circumscribed(bool c)
     m_sketch_tool.set_polygon_circumscribed(c);
 }
 
+void DesignCanvas::set_sketch_polygon_edge(bool e)
+{
+    m_sketch_tool.set_polygon_edge(e);
+}
+
 void DesignCanvas::finish_sketch()
 {
     m_sketch_tool.finish();

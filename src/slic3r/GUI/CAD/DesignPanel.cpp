@@ -1491,16 +1491,18 @@ DesignPanel::DesignPanel(wxWindow* parent)
         auto arm_polygon = [this, select_tool] {
             push_polygon_params();
             select_tool(DesignSketchTool::Mode::Polygon,
-                        wxString::Format(_L("Click center then a vertex — %d sides, %s"),
-                                         m_poly_sides,
-                                         m_poly_circumscribed ? _L("circumscribed") : _L("inscribed")));
+                        m_poly_edge ? wxString::Format(_L("Click the two ends of one side — %d sides, built on the left of the side"), m_poly_sides)
+                                    : wxString::Format(_L("Click center then a vertex — %d sides, %s"),
+                                                       m_poly_sides,
+                                                       m_poly_circumscribed ? _L("circumscribed") : _L("inscribed")));
         };
         for (int n : {3, 4, 5, 6, 8, 12})
             m_verb_actions["btn:poly#" + std::to_string(n)] =
                 [this, arm_polygon, n] { m_poly_sides = n; arm_polygon(); };
         for (int c : {0, 1})
             m_verb_actions["btn:polyfit#" + std::to_string(c)] =
-                [this, arm_polygon, c] { m_poly_circumscribed = (c == 1); arm_polygon(); };
+                [this, arm_polygon, c] { m_poly_circumscribed = (c == 1); m_poly_edge = false; arm_polygon(); };
+        m_verb_actions["btn:polyfit#2"] = [this, arm_polygon] { m_poly_edge = true; arm_polygon(); };
 
         // Same defect, one level up: a combo whose entries are different VERBS wearing a single
         // name. "Dress-up" is Fillet or Chamfer; "Combine" is union, subtract or intersect;
@@ -6388,6 +6390,19 @@ void DesignPanel::on_print_check()
     catch (const std::exception& e) { set_status(StatusKind::Error, wxString::FromUTF8(e.what())); return; }
     if (clean) set_status(StatusKind::Ok, _L("Print check: nothing to fix for FDM printing as the part now lies on the bed"));
     else       set_status(StatusKind::Warning, wxString::Format(_L("Print check: %s"), wxString::FromUTF8(text)));
+}
+
+void DesignPanel::auto_print_check()
+{
+    if (m_auto_check_ms > 150 || m_doc.bodies.empty()) return;   // ponytail: no background thread; a slow part opts out, the Print check button stays
+    const int b = m_sel_solid_body >= 0 && m_sel_solid_body < int(m_doc.bodies.size()) ? m_sel_solid_body : int(m_doc.bodies.size()) - 1;
+    const wxLongLong t0 = wxGetLocalTimeMillis();
+    bool clean = true;
+    std::string text;
+    try { text = print_check_summary(this, b, clean, true); }
+    catch (...) { return; }   // a body that cannot be analysed (surface, sheet) is not a problem to report here
+    m_auto_check_ms = (wxGetLocalTimeMillis() - t0).GetValue();
+    if (!clean) set_status(StatusKind::Warning, wxString::Format(_L("Print check: %s"), wxString::FromUTF8(text)));
 }
 
 void DesignPanel::on_mass_properties()
@@ -13413,6 +13428,7 @@ void DesignPanel::push_polygon_params()
     if (m_viewport == nullptr) return;
     m_viewport->set_sketch_polygon_sides(m_poly_sides);
     m_viewport->set_sketch_polygon_circumscribed(m_poly_circumscribed);
+    m_viewport->set_sketch_polygon_edge(m_poly_edge);
 }
 
 void DesignPanel::open_tool(Tool t)
@@ -13749,6 +13765,8 @@ void DesignPanel::confirm_tool()
     // legacy Sketch card via on_add_sketch, and edit-mode replace all funnel here).
     m_doc.checkpoint();
     const bool editing_single = (m_edit_index >= 0);
+    // Tools that make no solid have nothing to print-check.
+    const bool makes_solid = m_active != Tool::Sketch && m_active != Tool::Plane && m_active != Tool::Axis && m_active != Tool::CoordSys && m_active != Tool::Mate && m_active != Tool::Project;
 
     if (editing_single) {
         // Edit mode: overwrite the existing feature instead of appending.
@@ -13757,6 +13775,7 @@ void DesignPanel::confirm_tool()
         reset_edit_state();
         close_tool();          // clears the preview ghost
         after_tree_edit(ok);   // refresh tree/viewport/status (or "Edit rejected")
+        if (ok && makes_solid) auto_print_check();
         return;
     }
 
@@ -13796,6 +13815,7 @@ void DesignPanel::confirm_tool()
     case Tool::None:    return;
     }
     close_tool(); // also clears the preview ghost; the committed body is now shown
+    if (makes_solid) auto_print_check();
 }
 
 void DesignPanel::cancel_tool()

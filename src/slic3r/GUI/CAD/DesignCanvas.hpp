@@ -134,6 +134,7 @@ public:
     bool add_sketch_regions(const std::vector<std::vector<std::vector<Vec2d>>>& regions);
     void set_sketch_polygon_sides(int n);
     void set_sketch_polygon_circumscribed(bool c);
+    void set_sketch_polygon_edge(bool e);
     void finish_sketch();
     bool is_sketching() const;
     void refresh_bed();   // re-sync the bed to the current printer (call on tab activation)

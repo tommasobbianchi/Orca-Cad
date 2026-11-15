@@ -277,6 +277,8 @@ private:
     void on_add_helix();
     void on_add_mate();
     void on_check_interference();
+    void auto_print_check();            // after a committed feature: warnings-only print check, silent when clean or when the last run was slow
+    long long m_auto_check_ms{0};       // duration of the last automatic print check; above 150 ms it stops running by itself (the button still works)
     void on_print_check();              // design-for-print report on the selected body, to the status line; edits nothing
     void on_mass_properties();          // read-only report on the selected solid; edits nothing
     // Fill m_bool_target / m_bool_tool / m_cut_target. as_of_feature < 0 = current bodies (add);
@@ -732,6 +734,7 @@ private:
     // which is exactly where the offer already is. e1p.
     int               m_poly_sides{6};           // 3..64; the submenu names the common ones
     bool              m_poly_circumscribed{false};
+    bool              m_poly_edge{false};        // Edge mode: click the two ends of one side
 
     // Which reference plane a sketch falls back to when no face is picked: 0/1/2 = XY/XZ/YZ,
     // >=3 indexes resolve_datum_planes(). Set by CLICKING a ghost plane in the viewport — there is

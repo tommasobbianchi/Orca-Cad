@@ -31,7 +31,8 @@ std::string mcp_socket_path();
 class DesignPanel;
 // The design-for-print check (analyze_printability) of body `body`, as one English line for the status line: the warnings and the
 // suggestions, three at most. `clean` is true when there is nothing to report. Throws std::runtime_error when the body cannot be read.
-std::string print_check_summary(DesignPanel* panel, int body, bool& clean);
+// warnings_only: leave the suggestions out (the automatic check after a feature commit only speaks when something is actually wrong).
+std::string print_check_summary(DesignPanel* panel, int body, bool& clean, bool warnings_only = false);
 
 }} // namespace Slic3r::GUI
 

@@ -244,6 +244,7 @@ public:
     void set_grid_magnet(bool on) { m_grid_magnet = on; }                              // points snap to the grid, shown or not
     void set_polygon_sides(int n) { m_polygon_sides = (n < 3 ? 3 : n); }
     void set_polygon_circumscribed(bool c) { m_polygon_circumscribed = c; }
+    void set_polygon_edge(bool e) { m_polygon_edge = e; }   // Edge mode: the two clicks are the ends of one side, not centre + radius
     void finish();                            // emit accumulated entities, end session
     void cancel();
     bool is_active() const { return m_active; }
@@ -1122,6 +1123,8 @@ private:
     void drag_rect_corner(int fi, const Vec2d& cursor);
     void drag_slot_handle(int fi, const Vec2d& cursor);
     std::vector<SketchEntity> make_polygon(const Vec2d& center, const Vec2d& vertex, int sides) const;
+    // Regular polygon with side a->b, built on the left of a->b (click the ends the other way round to flip it). `center` receives its centre.
+    std::vector<SketchEntity> make_polygon_edge(const Vec2d& a, const Vec2d& b, int sides, Vec2d& center) const;
     // Ellipse: click center, then major-axis endpoint (sets a + rotation phi),
     // then a point whose perpendicular distance to the major axis sets b.
     std::vector<SketchEntity> make_ellipse(const Vec2d& center, const Vec2d& major_end,
@@ -1205,6 +1208,7 @@ private:
     bool                m_construction{false};
     int                 m_polygon_sides{6};
     bool                m_polygon_circumscribed{false};
+    bool                m_polygon_edge{false};
     Vec2d               m_cursor{0,0};
     bool                m_has_cursor{false};
     mutable Vec2d       m_pre_grid{0, 0};       // the cursor as snap_vertex received it, before the grid moved it

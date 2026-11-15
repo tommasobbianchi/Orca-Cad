@@ -6245,13 +6245,13 @@ void tcp_server_thread(int port)
 
 } // namespace
 
-std::string print_check_summary(DesignPanel* panel, int body, bool& clean)
+std::string print_check_summary(DesignPanel* panel, int body, bool& clean, bool warnings_only)
 {
     const json r = action_analyze_printability(panel, json{{"body", body}});
     std::vector<std::string> msgs;
     std::set<std::string> kinds;
     for (const json& w : r.at("warnings")) msgs.push_back(w.get<std::string>());
-    for (const json& s : r.at("suggestions")) {
+    if (!warnings_only) for (const json& s : r.at("suggestions")) {
         const std::string k = s.value("kind", std::string());
         if (!kinds.insert(k).second) continue;   // one line per kind
         msgs.push_back(k + ": " + s.value("why", std::string()));

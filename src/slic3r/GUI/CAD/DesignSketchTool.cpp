@@ -3933,6 +3933,31 @@ std::vector<SketchEntity> DesignSketchTool::make_rounded_rect(const Vec2d& a, co
     return rounded_rect_entities(xmin, ymin, xmax, ymax, r);
 }
 
+std::vector<SketchEntity> DesignSketchTool::make_polygon_edge(const Vec2d& a, const Vec2d& b, int sides, Vec2d& center) const
+{
+    std::vector<SketchEntity> out;
+    if (sides < 3) sides = 3;
+    const Vec2d ab = b - a;
+    const double s = ab.norm();
+    if (s < 1e-6) return out;
+    // Side s, n sides: apothem = s / (2 tan(pi/n)). The centre sits that far from the side's midpoint, on its left.
+    const double apothem = s / (2.0 * std::tan(M_PI / double(sides)));
+    center = 0.5 * (a + b) + Vec2d(-ab.y(), ab.x()) / s * apothem;
+    const double a0 = std::atan2(a.y() - center.y(), a.x() - center.x()), R = (a - center).norm();
+    std::vector<Vec2d> verts;
+    for (int i = 0; i < sides; ++i) {
+        const double t = a0 + 2.0 * M_PI * double(i) / double(sides);   // counter-clockwise from a, so the next vertex is b
+        verts.push_back(Vec2d(center.x() + R * std::cos(t), center.y() + R * std::sin(t)));
+    }
+    for (int i = 0; i < sides; ++i) {
+        SketchEntity e; e.type = SketchEntity::Type::Line;
+        e.p0 = verts[i]; e.p1 = verts[(i + 1) % sides];
+        e.construction = m_construction;
+        out.push_back(e);
+    }
+    return out;
+}
+
 std::vector<SketchEntity> DesignSketchTool::make_polygon(const Vec2d& center, const Vec2d& vertex, int sides) const
 {
     std::vector<SketchEntity> out;
@@ -11571,8 +11596,11 @@ void DesignSketchTool::render(GLCanvas3D& canvas)
 
     case Mode::Polygon: {
         draw_vertices(m_vertex_model, m_points, yellow);
-        if (m_points.size() == 1 && m_has_cursor)
-            draw_entities_preview(make_polygon(m_points[0], m_cursor, m_polygon_sides), preview);
+        if (m_points.size() == 1 && m_has_cursor) {
+            Vec2d c;
+            draw_entities_preview(m_polygon_edge ? make_polygon_edge(m_points[0], m_cursor, m_polygon_sides, c)
+                                                 : make_polygon(m_points[0], m_cursor, m_polygon_sides), preview);
+        }
         break;
     }
 
@@ -13860,9 +13888,11 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
             } else {
                 const int base = int(m_entities.size());
                 begin_feature(FeatureKind::Polygon);
-                append_entities(make_polygon(m_points[0], p, m_polygon_sides));
+                Vec2d c0 = m_points[0], c1 = p;   // a feature is stored as centre + first vertex, which is what edit/reload read back
+                if (m_polygon_edge) { append_entities(make_polygon_edge(m_points[0], p, m_polygon_sides, c0)); c1 = m_points[0]; }
+                else                  append_entities(make_polygon(m_points[0], p, m_polygon_sides));
                 infer_auto_constraints(base);
-                end_feature(m_points[0], p, (p - m_points[0]).norm(), m_polygon_sides);
+                end_feature(c0, c1, (c1 - c0).norm(), m_polygon_sides);
                 m_points.clear();
             }
             return true;

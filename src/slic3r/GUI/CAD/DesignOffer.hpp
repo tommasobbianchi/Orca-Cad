@@ -175,6 +175,7 @@ static const OfferVerb kOfferVerbs[] = {
     {"sk_poly_8", L_CONTEXT("Octagon", "Design"), 0, nullptr, "btn:poly#8", nullptr, 0x000f8000u, 0, 0, false, true, L("Polygon"), "design_polygon", L("Octagon — click center, then a vertex")},
     {"sk_poly_12", L_CONTEXT("Dodecagon", "Design"), 0, nullptr, "btn:poly#12", nullptr, 0x000f8000u, 0, 0, false, true, L("Polygon"), "design_polygon", L("Dodecagon — click center, then a vertex")},
     {"sk_poly_inscribed", L_CONTEXT("Inscribed", "Design"), 0, nullptr, "btn:polyfit#0", nullptr, 0x000f8000u, 0, 0, false, true, L("Polygon"), "design_polygon", L("Measure the polygon to its corners (inscribed)")},
+    {"sk_poly_edge", L_CONTEXT("Edge", "Design"), 0, nullptr, "btn:polyfit#2", nullptr, 0x000f8000u, 0, 0, false, true, L("Polygon"), "design_polygon", L("Click the two ends of one side; the polygon is built on its left (click them the other way round to flip it)")},
     {"sk_poly_circumscribed", L_CONTEXT("Circumscribed", "Design"), 0, nullptr, "btn:polyfit#1", nullptr, 0x000f8000u, 0, 0, false, true, L("Polygon"), "design_polygon", L("Measure the polygon to its flats (circumscribed)")},
     {"sk_point_t", L_CONTEXT("Point", "Design"), 0, "P", "key:P", nullptr, 0x000f8000u, 0, 0, false, true, nullptr, "design_point", L("Point — click to place")},
     {"sk_text", L_CONTEXT("Text", "Design"), 0, nullptr, "btn:text", nullptr, 0x000f8000u, 0, 0, false, true, nullptr, "design_text", L("Type text; it becomes a Text feature on this sketch's plane, editable later")},
