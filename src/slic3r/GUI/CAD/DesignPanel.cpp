@@ -6425,7 +6425,7 @@ void DesignPanel::on_apply_print_fix(int note_index)
     if (!m_viewport) return;
     const std::vector<PrintNote>& notes = m_viewport->print_notes();
     if (note_index < 0 || note_index >= int(notes.size())) return;
-    const PrintNote& n = notes[size_t(note_index)];
+    const PrintNote n = notes[size_t(note_index)];   // copy: auto_print_check() below replaces the viewport's notes
     if (n.fix_json.empty()) return;
     json fix;
     try { fix = json::parse(n.fix_json); }

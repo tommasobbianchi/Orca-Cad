@@ -367,7 +367,7 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
 
     // The side list: a collapsible "Print check" panel, top-right of the viewport. The CardModel rows
     // cannot host a resolve + dismiss button pair, so this ImGui panel drives the same note vector.
-    int open_n = 0;
+    int open_n = 0, fix_click = -1;   // the fix replaces the note vector: run it after the loop, never inside
     for (const PrintNote& n : ns) if (n.open) ++open_n;
     if (open_n > 0) {
         const auto& vp = proj.vp;
@@ -407,7 +407,7 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
                     ImGui::Dummy(ImVec2(badge_w, row_h));
                     ImGui::SameLine();
                     if (has_fix) {
-                        if (ImGui::SmallButton("Fix")) { if (apply_fix) apply_fix(i); }
+                        if (ImGui::SmallButton("Fix")) fix_click = i;
                         if (ImGui::IsItemHovered() && !n.fix_label.empty()) ImGui::SetTooltip("%s", n.fix_label.c_str());
                         ImGui::SameLine();
                     }
@@ -428,6 +428,7 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
         ImGui::End();
         ImGui::PopStyleVar();
     }
+    if (fix_click >= 0 && apply_fix) apply_fix(fix_click);
 }
 
 } } // namespace Slic3r::GUI
