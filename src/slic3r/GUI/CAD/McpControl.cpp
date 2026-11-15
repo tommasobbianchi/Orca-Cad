@@ -75,6 +75,8 @@
 #include "libslic3r/CAD/GeometryEngine.hpp"
 #include "libslic3r/CAD/SketchSolver.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/AABBMesh.hpp"
+#include <functional>
 #include "libslic3r/Format/OBJ.hpp"
 #include <boost/algorithm/string/case_conv.hpp>
 #include <boost/filesystem/path.hpp>
@@ -719,7 +721,7 @@ json describe_tools()
         compact_tool("job_status", "Any tool call with async:true in its params answers at once with a job id and runs in the background; this returns {state: running|done, elapsed_s, reply}. Answered even while the app is busy with the job.", {{"job", "string", "job id from the async call"}}),
         compact_tool("name_dimension", "Name a sketch dimension (index from sketch_dimensions); set_feature_expr then takes field \"dim:<name>\". name \"\" removes it. Names are positions: deleting a constraint from the sketch shifts the ones after it.", {{"sketch", "integer", "Sketch feature index"}, {"index", "integer", "dimension index"}, {"name", "string", "letters, digits, _"}}),
         compact_tool("min_distance", "Shortest distance between two bodies and the closest points; b can be tried at a hypothetical offset (move_b) without changing anything.", {{"a", "integer", "body index or name"}, {"b", "integer", "body index or name"}, {"move_b", "array", "[dx,dy,dz] mm"}}),
-        compact_tool("analyze_printability", "Overhang area and levels (a flat pocket ceiling shows as one level), bed contact, height and disconnected solids of a body in a print orientation. rotate [rx,ry,rz] deg; the body rests on its lowest point.", {{"body", "integer", "body index or name"}, {"rotate", "array", "[rx,ry,rz] deg"}, {"overhang_angle", "number", "deg from vertical, default 45"}, {"bridge_max", "number", "mm a flat roof may span before a warning, default 20"}, {"layer_h", "number", "mm, layer height used in the suggestions, default 0.4"}}),
+        compact_tool("analyze_printability", "Overhang area and levels (a flat pocket ceiling shows as one level), bed contact, height and disconnected solids of a body in a print orientation. rotate [rx,ry,rz] deg; the body rests on its lowest point.", {{"body", "integer", "body index or name"}, {"rotate", "array", "[rx,ry,rz] deg"}, {"overhang_angle", "number", "deg from vertical, default 45"}, {"bridge_max", "number", "mm a flat roof may span before a warning, default 20"}, {"layer_h", "number", "mm, layer height used in the suggestions, default 0.4"}, {"line_width", "number", "mm, extrusion line width for the wall check, default 0.4"}, {"clearance", "number", "mm, minimum gap between fitted bodies, default 0.3"}}),
         compact_tool("rename_body", "Give a body a name. Verbs that take `body` then accept the name as well as the index (extrude, hole, pattern, fillet, boolean...).", {{"body", "integer", "body index"}, {"name", "string", "unique name"}}),
         compact_tool("set_body_visible", "Show or hide a body in the viewport (the eye in the Bodies list). Display only.", {{"body", "integer", "body id"}, {"visible", "boolean", "default true"}}),
         compact_tool("isolate_body", "Hide every body but this one; with no body (or show_all:true) show them all again.", {{"body", "integer", "body id"}, {"show_all", "boolean", ""}}),
@@ -3600,6 +3602,152 @@ json action_check_interference(DesignPanel* panel, const json& params)
 // {body, rotate?:[rx,ry,rz deg], overhang_angle?:45}: what a printer would meet with the body in that orientation, resting on
 // its lowest point. Down-facing triangles steeper than the angle from vertical are overhangs; they are grouped by height so a
 // flat pocket ceiling shows as one level with its area. Thin walls are not measured here.
+// The extra DfAM checks on the print-oriented mesh `m` (sheet tips 1, 6, 8, 25). They append to suggestions / warnings and return the numbers.
+json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double line_width, double clearance, double bore_r, json& suggestions, json& warnings)
+{
+    json out = json::object();
+    const auto& V = m.its.vertices;
+    const auto& F = m.its.indices;
+    const double cos_lim = std::cos((90.0 - ang) * M_PI / 180.0);
+    auto num = [](double v) { std::ostringstream os; os.imbue(std::locale::classic()); os.precision(3); os << v; return os.str(); };
+
+    // Tip 25: print orientation. The six axis-aligned ways up, ranked by overhang area (bed contact breaks ties).
+    struct Ori { Vec3d up; double over, bed, h; };
+    std::vector<Ori> os;
+    for (const Vec3d& u : {Vec3d(0, 0, 1), Vec3d(0, 0, -1), Vec3d(1, 0, 0), Vec3d(-1, 0, 0), Vec3d(0, 1, 0), Vec3d(0, -1, 0)}) {
+        double lo = 1e30, hi = -1e30;
+        for (const Vec3f& v : V) { const double h = v.cast<double>().dot(u); lo = std::min(lo, h); hi = std::max(hi, h); }
+        double over = 0, bed = 0;
+        for (const stl_triangle_vertex_indices& f : F) {
+            const Vec3d p0 = V[f(0)].cast<double>(), p1 = V[f(1)].cast<double>(), p2 = V[f(2)].cast<double>();
+            const Vec3d n = (p1 - p0).cross(p2 - p0);
+            const double nn = n.norm();
+            if (nn < 1e-12) continue;
+            const double nu = n.dot(u) / nn;
+            if (nu >= -1e-9) continue;
+            const double hc = ((p0 + p1 + p2) / 3.0).dot(u);
+            if (hc - lo < 0.05 && -nu > 0.99) { bed += 0.5 * nn; continue; }
+            if (-nu > cos_lim) over += 0.5 * nn;
+        }
+        os.push_back({u, over, bed, hi - lo});
+    }
+    size_t best = 0;
+    for (size_t i = 1; i < os.size(); ++i)
+        if (os[i].over < os[best].over - 1e-6 || (std::abs(os[i].over - os[best].over) < 1e-6 && os[i].bed > os[best].bed)) best = i;
+    json ors = json::array();
+    for (const Ori& o : os) ors.push_back(json{{"up", {o.up.x(), o.up.y(), o.up.z()}}, {"overhang_mm2", o.over}, {"bed_contact_mm2", o.bed}, {"height_mm", o.h}});
+    out["orientations"] = ors;
+    if (best != 0 && os[best].over < 0.7 * os[0].over - 1.0)
+        suggestions.push_back(json{{"kind", "orientation"}, {"turn_up_to", {os[best].up.x(), os[best].up.y(), os[best].up.z()}}, {"overhang_mm2", os[best].over}, {"overhang_now_mm2", os[0].over},
+                                   {"why", "printing with this model direction up cuts the overhang from " + num(os[0].over) + " to " + num(os[best].over) + " mm2"}});
+
+    // Tip 8: a rounded surface facing the bed. Overhanging triangles joined by shared vertices; a component whose slope varies a lot is a curve.
+    {
+        std::map<std::array<long, 3>, int> vid;
+        std::vector<int> id(V.size());
+        for (size_t i = 0; i < V.size(); ++i) {
+            const std::array<long, 3> k{std::lround(V[i].x() * 1000.0), std::lround(V[i].y() * 1000.0), std::lround(V[i].z() * 1000.0)};
+            id[i] = vid.emplace(k, int(vid.size())).first->second;
+        }
+        std::vector<int> parent(vid.size());
+        for (size_t i = 0; i < parent.size(); ++i) parent[i] = int(i);
+        std::function<int(int)> root = [&](int x) { while (parent[size_t(x)] != x) { parent[size_t(x)] = parent[size_t(parent[size_t(x)])]; x = parent[size_t(x)]; } return x; };
+        const double zmin = m.bounding_box().min.z();
+        struct Comp { double area{0}, a0{1e9}, a1{-1e9}, z0{1e30}, z1{-1e30}; };
+        std::map<int, Comp> comps;
+        std::vector<std::array<int, 4>> tris;   // v0, v1, v2, kept
+        for (const stl_triangle_vertex_indices& f : F) {
+            const Vec3d p0 = V[f(0)].cast<double>(), p1 = V[f(1)].cast<double>(), p2 = V[f(2)].cast<double>();
+            const Vec3d n = (p1 - p0).cross(p2 - p0);
+            const double nn = n.norm();
+            const double nz = nn > 1e-12 ? n.z() / nn : 0.0;
+            const bool keep = nn > 1e-12 && nz < 0 && -nz > cos_lim * 0.5 && !((p0.z() + p1.z() + p2.z()) / 3.0 - zmin < 0.05 && -nz > 0.99);
+            tris.push_back({id[f(0)], id[f(1)], id[f(2)], keep ? 1 : 0});
+            if (keep) { parent[size_t(root(id[f(1)]))] = root(id[f(0)]); parent[size_t(root(id[f(2)]))] = root(id[f(0)]); }
+        }
+        size_t ti = 0;
+        for (const stl_triangle_vertex_indices& f : F) {
+            const auto& t = tris[ti++];
+            if (!t[3]) continue;
+            const Vec3d p0 = V[f(0)].cast<double>(), p1 = V[f(1)].cast<double>(), p2 = V[f(2)].cast<double>();
+            const Vec3d n = (p1 - p0).cross(p2 - p0);
+            const double nn = n.norm(), a = 0.5 * nn, deg = std::acos(std::min(1.0, -n.z() / nn)) * 180.0 / M_PI;   // angle from straight down
+            Comp& c = comps[root(t[0])];
+            c.area += a; c.a0 = std::min(c.a0, deg); c.a1 = std::max(c.a1, deg);
+            c.z0 = std::min(c.z0, std::min({p0.z(), p1.z(), p2.z()})); c.z1 = std::max(c.z1, std::max({p0.z(), p1.z(), p2.z()}));
+        }
+        json cur = json::array();
+        for (const auto& kv : comps) {
+            const Comp& c = kv.second;
+            if (c.area < 4.0 || c.a1 - c.a0 < 12.0 || c.a1 < 90.0 - ang) continue;   // flat, tiny, or never steep enough to matter
+            if (bore_r > 0 && c.z1 - c.z0 <= bore_r * 1.05) continue;                 // the roof arc of a horizontal bore: reported under horizontal_holes
+            cur.push_back(json{{"area_mm2", c.area}, {"z", {c.z0 - zmin, c.z1 - zmin}}, {"slope_from_bed_deg", {c.a0, c.a1}}});
+            suggestions.push_back(json{{"kind", "fillet_from_below"}, {"area_mm2", c.area}, {"z", {c.z0 - zmin, c.z1 - zmin}},
+                                       {"why", "a rounded surface faces the bed (slope " + num(c.a0) + "-" + num(c.a1) + " deg from straight down): an equal 45 deg chamfer prints cleaner (a horizontal bore's roof is under horizontal_holes)"}});
+        }
+        out["curved_overhangs"] = cur;
+    }
+
+    // Tip 1: wall thickness against the extrusion line width. Rays from sampled side faces inward to the opposite surface.
+    {
+        AABBMesh am(m);
+        size_t side = 0;
+        for (const stl_triangle_vertex_indices& f : F) {
+            const Vec3d p0 = V[f(0)].cast<double>(), p1 = V[f(1)].cast<double>(), p2 = V[f(2)].cast<double>();
+            const Vec3d n = (p1 - p0).cross(p2 - p0);
+            if (n.norm() > 1e-9 && std::abs(n.z()) / n.norm() < 0.3) ++side;
+        }
+        const size_t stride = std::max<size_t>(1, side / 1200);
+        size_t seen = 0, used = 0, thin = 0, off = 0;
+        double tmin = 1e30;
+        for (const stl_triangle_vertex_indices& f : F) {
+            const Vec3d p0 = V[f(0)].cast<double>(), p1 = V[f(1)].cast<double>(), p2 = V[f(2)].cast<double>();
+            const Vec3d n = (p1 - p0).cross(p2 - p0);
+            const double nn = n.norm();
+            if (nn < 1e-9 || 0.5 * nn < 0.2 || std::abs(n.z()) / nn >= 0.3) continue;
+            if (seen++ % stride) continue;
+            const Vec3d nu = n / nn, c = (p0 + p1 + p2) / 3.0;
+            const AABBMesh::hit_result h = am.query_ray_hit(c - nu * 0.02, -nu);
+            if (!h.is_hit()) continue;
+            const double t = h.distance() + 0.02;
+            if (t > 10.0 * line_width) continue;   // a block, not a wall
+            ++used; tmin = std::min(tmin, t);
+            if (t < 2.0 * line_width) ++thin;
+            const double k = t / line_width, r = std::round(k);
+            if (r >= 1 && std::abs(k - r) > 0.25) ++off;
+        }
+        json w = json{{"line_width_mm", line_width}, {"samples", int(used)}};
+        if (used > 0) {
+            w["min_mm"] = tmin; w["thin_pct"] = 100.0 * thin / used; w["off_multiple_pct"] = 100.0 * off / used;
+            if (thin > 0) warnings.push_back("walls thinner than 2 line widths (" + num(2 * line_width) + " mm); the thinnest is " + num(tmin) + " mm");
+            if (100.0 * off / used > 20.0)
+                suggestions.push_back(json{{"kind", "wall_thickness"}, {"line_width_mm", line_width}, {"off_multiple_pct", 100.0 * off / used},
+                                           {"why", "most walls are not a whole number of lines: make them " + num(2 * line_width) + ", " + num(3 * line_width) + ", " + num(4 * line_width) + " mm ... for a clean slice"}});
+        }
+        out["walls"] = w;
+    }
+
+    // Tip 6: parts that fit each other need about 0.3 mm of clearance. Pairs closer than that but not touching.
+    {
+        json pairs = json::array();
+        const size_t nb = std::min<size_t>(doc.bodies.size(), 12);
+        for (size_t i = 0; i < nb; ++i)
+            for (size_t j = i + 1; j < nb; ++j) {
+                if (doc.bodies[i].shape.IsNull() || doc.bodies[j].shape.IsNull()) continue;
+                const json r = distance_report(doc.bodies[i].shape, doc.bodies[j].shape);
+                if (!r["distance"].is_number()) continue;
+                const double d = r["distance"].get<double>();
+                if (d > 1e-6 && d < clearance - 1e-9) {
+                    pairs.push_back(json{{"a", int(i)}, {"b", int(j)}, {"gap_mm", d}});
+                    warnings.push_back("bodies " + std::to_string(i) + " and " + std::to_string(j) + " are " + num(d) + " mm apart: fitted parts need about " + num(clearance) + " mm of clearance");
+                }
+            }
+        out["tight_pairs"] = pairs;
+        out["clearance_mm"] = clearance;
+    }
+    return out;
+}
+
 json action_analyze_printability(DesignPanel* panel, const json& params)
 {
     CadDocument& doc = panel->mcp_doc();
@@ -3650,6 +3798,7 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
     json warnings = json::array();
     json suggestions = json::array();   // sheet tips 12-14 and the bridging ones: what to add under a roof, with numbers; analysis only, nothing is built
     const double layer_h = params.value("layer_h", 0.4);
+    bool layer_done = false;
     auto num = [](double v) { std::ostringstream os; os.imbue(std::locale::classic()); os.precision(3); os << v; return os.str(); };
     for (size_t i = 0; i < top.size() && i < 6; ++i) {
         // ponytail: span = the shorter side of the level's bounding box (a strip bridges across its short side); a ring or an L
@@ -3662,8 +3811,10 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
         // ponytail: thresholds are the sheet's rule of thumb (a printer bridges ~2 cm easily); 5 mm below which nothing is worth adding.
         const json at = json{{"level", int(i)}, {"z", top[i][5] - zmin}, {"min", {top[i][1], top[i][2]}}, {"max", {top[i][3], top[i][4]}}, {"span_mm", span}};
         auto add = [&](const char* kind, json extra) { json j = at; j["kind"] = kind; for (auto it = extra.begin(); it != extra.end(); ++it) j[it.key()] = it.value(); suggestions.push_back(j); };
-        if (span > 5.0 && span <= bridge_max)
+        if (span > 5.0 && span <= bridge_max && !layer_done) {
+            layer_done = true;   // levels are sorted by area: the biggest roof gets the suggestion, a curve's slices do not each get one
             add("sacrificial_layer", json{{"layer_h", layer_h}, {"why", "thin one-layer membrane under the roof, cut away after printing"}});
+        }
         if (span > bridge_max) {
             const int n = int(std::ceil(span / bridge_max)) - 1;   // ribs so that every gap is within bridge_max
             const double pitch = span / (n + 1);
@@ -3692,6 +3843,8 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
         if (!merged) bores.push_back({cyl.base, ax, cyl.radius, 0.0, cyl.height, sp.Mass()});
     }
     json holes = json::array();
+    double bore_r_max = 0;
+    for (const Bore& o : bores) bore_r_max = std::max(bore_r_max, o.r);
     for (const Bore& o : bores) {
         const double full = 2 * M_PI * o.r * (o.hi - o.lo);
         const bool teardrop_done = full > 0 && o.area < 0.9 * full;   // ponytail: assumes equal-length faces; a stepped bore may misread
@@ -3704,13 +3857,14 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
     for (size_t i = 0; i < doc.features.size(); ++i)
         if (doc.features[i].type == CadFeatureType::Hole && doc.features[i].hole_bridge_layer_h > 1e-6)
             sacrificial.push_back(json{{"feature", int(i)}, {"kind", "hole bridge layers"}, {"layer_h", doc.features[i].hole_bridge_layer_h}, {"layers", 2}});
+    const json extras = dfam_extras(m, doc, ang, params.value("line_width", 0.4), params.value("clearance", 0.3), bore_r_max, suggestions, warnings);
     int solids = 0;
     for (TopExp_Explorer ex(doc.bodies[b].shape, TopAbs_SOLID); ex.More(); ex.Next()) ++solids;
     if (solids > 1) warnings.push_back("the body is " + std::to_string(solids) + " disconnected solids");
     return json{{"ok", true}, {"body", b}, {"height_mm", bb.size().z()}, {"footprint_mm", {bb.size().x(), bb.size().y()}},
                 {"bed_contact_mm2", bed}, {"overhang_mm2", over}, {"overhang_pct", area > 0 ? 100.0 * over / area : 0.0},
                 {"overhang_angle", ang}, {"overhang_levels", lv}, {"horizontal_holes", holes}, {"solids", solids},
-                {"sacrificial", sacrificial}, {"suggestions", suggestions}, {"warnings", warnings}};
+                {"sacrificial", sacrificial}, {"suggestions", suggestions}, {"warnings", warnings}, {"extras", extras}};
 }
 
 // {name, values:[expr...], expect?:{bodies, volume_min, volume_max, size_max:[x,y,z], size_min:[x,y,z], no_interference}}
@@ -6088,6 +6242,24 @@ void tcp_server_thread(int port)
 }
 
 } // namespace
+
+std::string print_check_summary(DesignPanel* panel, int body, bool& clean)
+{
+    const json r = action_analyze_printability(panel, json{{"body", body}});
+    std::vector<std::string> msgs;
+    std::set<std::string> kinds;
+    for (const json& w : r.at("warnings")) msgs.push_back(w.get<std::string>());
+    for (const json& s : r.at("suggestions")) {
+        const std::string k = s.value("kind", std::string());
+        if (!kinds.insert(k).second) continue;   // one line per kind
+        msgs.push_back(k + ": " + s.value("why", std::string()));
+    }
+    clean = msgs.empty();
+    std::string out;
+    for (size_t i = 0; i < msgs.size() && i < 2; ++i) out += (i ? " | " : "") + (msgs[i].size() > 100 ? msgs[i].substr(0, 97) + "..." : msgs[i]);   // the status line is two or three lines tall
+    if (msgs.size() > 2) out += " (+" + std::to_string(msgs.size() - 2) + " more: analyze_printability lists all)";
+    return out;
+}
 
 std::string mcp_socket_path()
 {

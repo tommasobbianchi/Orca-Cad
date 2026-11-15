@@ -277,6 +277,7 @@ private:
     void on_add_helix();
     void on_add_mate();
     void on_check_interference();
+    void on_print_check();              // design-for-print report on the selected body, to the status line; edits nothing
     void on_mass_properties();          // read-only report on the selected solid; edits nothing
     // Fill m_bool_target / m_bool_tool / m_cut_target. as_of_feature < 0 = current bodies (add);
     // >= 0 = the bodies as they existed just before that feature index (Boolean re-edit, so a
@@ -1096,7 +1097,10 @@ private:
     NumField* m_hole_diameter{nullptr};
     NumField* m_hole_depth{nullptr};
     ToggleField*         m_hole_through{nullptr};
-    ToggleField*         m_hole_teardrop{nullptr};   // horizontal bore: pointed 45 deg top so it prints without support
+    ToggleField*         m_hole_teardrop{nullptr};
+    NumField*            m_hole_cbore_d{nullptr};      // counterbore diameter (0 = none)
+    NumField*           m_hole_cbore_depth{nullptr};
+    NumField*           m_hole_bridge_h{nullptr};     // sacrificial layer thickness under the counterbore ledge (0 = none)
     NumField* m_hole_x{nullptr};
     NumField* m_hole_y{nullptr};
     // #2: when the Hole tool is opened on a picked solid face, drill on that face centred

@@ -1,4 +1,5 @@
 #include "slic3r/GUI/CAD/DesignPanel.hpp"
+#include "slic3r/GUI/CAD/McpControl.hpp"
 #include <BRepAdaptor_Surface.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 #include <BRepAdaptor_Curve.hxx>
@@ -1121,6 +1122,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
         m_verb_actions["btn:delete_body"] = [this] { on_delete_body(); };
         m_verb_actions["btn:edit"]   = [this] { on_edit_feature(); };
         m_verb_actions["btn:mass"]   = [this] { on_mass_properties(); };
+        m_verb_actions["btn:printcheck"] = [this] { on_print_check(); };
         m_verb_actions["btn:quotes"] = [this] { on_toggle_quotes(); };
         m_verb_actions["btn:interference"] = [this] { on_check_interference(); };
         // Reachable from the offer menu on a SELECTED SKETCH, not only from the toolbar icon.
@@ -2033,6 +2035,12 @@ DesignPanel::DesignPanel(wxWindow* parent)
     c_m_box_hole->row(_L("Through"), m_hole_through);
     m_hole_teardrop = c_m_box_hole->make_check();
     c_m_box_hole->row(_L("Teardrop (horizontal hole)"), m_hole_teardrop);
+    m_hole_cbore_d = c_m_box_hole->make_spin(0.0, 0.0, 1000.0);
+    c_m_box_hole->row(_L("Counterbore Ø (0 = none)"), m_hole_cbore_d);
+    m_hole_cbore_depth = c_m_box_hole->make_spin(0.0, 0.0, 1000.0);
+    c_m_box_hole->row(_L("Counterbore depth"), m_hole_cbore_depth);
+    m_hole_bridge_h = c_m_box_hole->make_spin(0.0, 0.0, 5.0);
+    c_m_box_hole->row(_L("Sacrificial layers (0 = off)"), m_hole_bridge_h);
     m_hole_target_label = c_m_box_hole->make_text(_L("(none — uses Hole plane)"));
     m_hole_target_label->SetReference(false);
     c_m_box_hole->row(_L("On face"), m_hole_target_label);
@@ -5499,7 +5507,14 @@ void DesignPanel::on_add_hole()
     m_feature_counter++;
     const int hidx = m_doc.add_hole(dia, depth, through, px, py, plane,
                                     feature_name(_L("Hole")));
-    if (hidx >= 0 && hidx < int(m_doc.features.size())) m_doc.features[hidx].hole_teardrop = m_hole_teardrop->GetValue();
+    if (hidx >= 0 && hidx < int(m_doc.features.size())) {
+        CadFeature& hf = m_doc.features[hidx];
+        hf.hole_teardrop = m_hole_teardrop->GetValue();
+        if (m_hole_cbore_d->GetValue() > dia && m_hole_cbore_depth->GetValue() > 0) {   // a counterbore, with the sacrificial strips under its ledge when asked
+            hf.hole_style = 1; hf.hole_cbore_diameter = m_hole_cbore_d->GetValue(); hf.hole_cbore_depth = m_hole_cbore_depth->GetValue();
+            hf.hole_bridge_layer_h = m_hole_bridge_h->GetValue();
+        }
+    }
     // On-face holes drill the body the face belongs to (even after the pick was cleared).
     if (m_hole_on_face && hidx >= 0 && hidx < int(m_doc.features.size())) {
         m_doc.features[hidx].target_body = m_hole_face_body;
@@ -6352,6 +6367,21 @@ void DesignPanel::on_toggle_quotes()
     }
     m_viewport->set_quotes_on(on);
     set_status(StatusKind::Info, on ? _L("Dimensions on — click one with a feature behind it to edit it") : _L("Dimensions off"));
+}
+
+void DesignPanel::on_print_check()
+{
+    const int b = m_sel_solid_body >= 0 ? m_sel_solid_body : int(m_doc.bodies.size()) - 1;
+    if (b < 0 || b >= int(m_doc.bodies.size())) {
+        set_status(StatusKind::Info, _L("Select a body to check it for printing"));
+        return;
+    }
+    bool clean = false;
+    std::string text;
+    try { text = print_check_summary(this, b, clean); }
+    catch (const std::exception& e) { set_status(StatusKind::Error, wxString::FromUTF8(e.what())); return; }
+    if (clean) set_status(StatusKind::Ok, _L("Print check: nothing to fix for FDM printing as the part now lies on the bed"));
+    else       set_status(StatusKind::Warning, wxString::Format(_L("Print check: %s"), wxString::FromUTF8(text)));
 }
 
 void DesignPanel::on_mass_properties()
@@ -10381,6 +10411,9 @@ void DesignPanel::load_feature_into_dialog(const CadFeature& f)
         m_hole_depth->SetValue(f.hole_depth);
         m_hole_through->SetValue(f.hole_through);
         m_hole_teardrop->SetValue(f.hole_teardrop);
+        m_hole_cbore_d->SetValue(f.hole_style == 1 ? f.hole_cbore_diameter : 0.0);
+        m_hole_cbore_depth->SetValue(f.hole_style == 1 ? f.hole_cbore_depth : 0.0);
+        m_hole_bridge_h->SetValue(f.hole_bridge_layer_h);
         m_hole_x->SetValue(f.hole_x);
         m_hole_y->SetValue(f.hole_y);
         // Re-latch the on-face state FROM THE STORED FEATURE (uif9). m_hole_on_face is
@@ -11185,6 +11218,10 @@ CadFeature DesignPanel::build_candidate(Tool t) const
         f.hole_depth    = m_hole_depth->GetValue();
         f.hole_through  = m_hole_through->GetValue();
         f.hole_teardrop = m_hole_teardrop->GetValue();
+        if (m_hole_cbore_d->GetValue() > m_hole_diameter->GetValue() && m_hole_cbore_depth->GetValue() > 0) {
+            f.hole_style = 1; f.hole_cbore_diameter = m_hole_cbore_d->GetValue(); f.hole_cbore_depth = m_hole_cbore_depth->GetValue();
+            f.hole_bridge_layer_h = m_hole_bridge_h->GetValue();
+        } else { f.hole_style = 0; f.hole_bridge_layer_h = 0; }
         f.hole_x        = m_hole_x->GetValue();
         f.hole_y        = m_hole_y->GetValue();
         if (m_hole_on_face) { f.target_body = m_hole_face_body; attach_to_face(f, m_hole_face_body, m_hole_face, false); }   // preview the right body

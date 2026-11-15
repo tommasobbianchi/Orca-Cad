@@ -28,6 +28,11 @@ void start_mcp_control_if_enabled();
 // Path of the control socket the app listens on (same rule as above); empty when ORCA_CAD_MCP=0|off or on Windows.
 std::string mcp_socket_path();
 
+class DesignPanel;
+// The design-for-print check (analyze_printability) of body `body`, as one English line for the status line: the warnings and the
+// suggestions, three at most. `clean` is true when there is nothing to report. Throws std::runtime_error when the body cannot be read.
+std::string print_check_summary(DesignPanel* panel, int body, bool& clean);
+
 }} // namespace Slic3r::GUI
 
 #endif // slic3r_GUI_McpControl_hpp_
