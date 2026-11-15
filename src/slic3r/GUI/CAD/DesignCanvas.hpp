@@ -95,6 +95,8 @@ public:
     DesignRibbonOverlay& ribbon_overlay() { return m_ribbon; }
     // The body's dimensions drawn over the viewport (the Dimensions verb); the panel supplies the quotes and what a click on one does.
     DesignQuoteOverlay& quote_overlay() { return m_quotes; }
+    // The print check's issues, pinned on the part (replaces the previous set; empty clears them).
+    void set_print_notes(std::vector<PrintNote> n);
     bool quotes_on() const { return m_quotes_on; }
     void set_quotes_on(bool on) { m_quotes_on = on; request_repaint(); }
     DesignPalette&       palette() { return m_palette; }
@@ -512,6 +514,8 @@ private:
     DesignRibbonOverlay m_ribbon;
     DesignTopBar        m_topbar;
     DesignQuoteOverlay  m_quotes;
+    DesignPrintNotesOverlay m_print_notes;
+    std::vector<PrintNote>  m_print_note_list;
     bool                m_quotes_on{false};
     DesignSidebarOverlay m_sidebar;
     bool                m_sidebar_on{false};

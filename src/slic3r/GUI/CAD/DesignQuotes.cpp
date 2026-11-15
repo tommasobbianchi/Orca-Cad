@@ -258,4 +258,58 @@ void DesignQuoteOverlay::render(ImGuiWrapper& imgui, const Camera& camera, float
     }
 }
 
+void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
+{
+    m_hovered = false;
+    if (!notes) return;
+    std::vector<PrintNote>& ns = notes();
+    if (ns.empty()) return;
+    const Projector proj(camera);
+    ImDrawList*     dl = ImGui::GetBackgroundDrawList();
+    const float     em = imgui.get_style_scaling();
+    Style st;
+    st.em = em; st.thin = std::max(1.f, 1.1f * em);
+    st.line = IM_COL32(255, 255, 255, 255);
+    st.text = ImGui::GetColorU32(ImGuiCol_Text);
+    ImVec4 bg = ImGui::GetStyleColorVec4(ImGuiCol_WindowBg); bg.w = 0.92f;
+    st.chip = ImGui::ColorConvertFloat4ToU32(bg);
+    st.chip_hot = ImGui::ColorConvertFloat4ToU32(ImVec4(bg.x * 0.7f + 0.3f, bg.y * 0.7f + 0.3f, bg.z * 0.7f + 0.3f, 0.97f));
+    st.edge = IM_COL32(255, 255, 255, 120);
+
+    std::vector<Rect> taken;
+    for (size_t i = 0; i < ns.size(); ++i) {
+        const PrintNote& n = ns[i];
+        if (!n.open) continue;
+        ImVec2 p;
+        if (!proj(n.at, p)) continue;
+        std::string text = n.text.size() > 64 ? n.text.substr(0, 61) + "..." : n.text;
+        const ImVec2 ts = ImGui::CalcTextSize(text.c_str());
+        const ImU32  col = n.warning ? IM_COL32(245, 166, 35, 255) : IM_COL32(74, 144, 226, 255);
+        // the note to the upper right of its pin; place_text nudges it down off the ones already placed
+        const Rect r = place_text(dl, text, p + ImVec2(34.f * em + ts.x * 0.5f, -30.f * em), taken, st, false);
+        const ImVec2 badge((r.lo.x), (r.lo.y + r.hi.y) * 0.5f);
+        dl->AddLine(p, badge, col, st.thin * 1.5f);
+        dl->AddCircleFilled(p, 4.f * em, IM_COL32(255, 255, 255, 255));
+        dl->AddCircle(p, 4.f * em, col, 0, 1.6f * em);
+        dl->AddCircleFilled(badge, 10.f * em, col);
+        const std::string num = std::to_string(n.n);
+        const ImVec2 nts = ImGui::CalcTextSize(num.c_str());
+        dl->AddText(badge - nts * 0.5f, IM_COL32(20, 20, 20, 255), num.c_str());
+
+        ImGui::SetNextWindowPos(r.lo, ImGuiCond_Always);
+        ImGui::SetNextWindowSize(r.hi - r.lo, ImGuiCond_Always);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.f, 0.f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
+        if (ImGui::Begin(("##printnote" + std::to_string(i)).c_str(), nullptr,
+                         ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoSavedSettings |
+                         ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus)) {
+            ImGui::InvisibleButton("##hit", r.hi - r.lo);
+            if (ImGui::IsItemHovered()) { m_hovered = true; ImGui::SetTooltip("%s\n(click to dismiss)", n.text.c_str()); }
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && dismiss) dismiss(int(i));
+        }
+        ImGui::End();
+        ImGui::PopStyleVar(2);
+    }
+}
+
 } } // namespace Slic3r::GUI

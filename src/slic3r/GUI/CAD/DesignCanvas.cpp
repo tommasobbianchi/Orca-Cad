@@ -228,6 +228,7 @@ DesignCanvas::DesignCanvas(wxWindow* parent)
         }
         if (m_palette.is_open()) m_canvas->set_as_dirty();   // keep frames coming: the box takes focus on the frame AFTER it opens
         if (m_quotes_on) m_quotes.render(imgui, wxGetApp().plater()->get_camera(), m_canvas->get_scale());   // under the bars: they draw after
+        m_print_notes.render(imgui, wxGetApp().plater()->get_camera());
         {   // The small confirm beside the value label of a 3D gizmo (fillet, chamfer, hole, shell...): the same Confirm / Cancel the bar has.
             float lr[4];
             if (m_sketch_tool.take_label_rect(lr) && m_topbar.action_active && m_topbar.action_active()) {
@@ -710,6 +711,14 @@ void DesignCanvas::set_sketch_polygon_circumscribed(bool c)
 void DesignCanvas::set_sketch_polygon_edge(bool e)
 {
     m_sketch_tool.set_polygon_edge(e);
+}
+
+void DesignCanvas::set_print_notes(std::vector<PrintNote> n)
+{
+    m_print_note_list = std::move(n);
+    m_print_notes.notes   = [this]() -> std::vector<PrintNote>& { return m_print_note_list; };
+    m_print_notes.dismiss = [this](int i) { if (i >= 0 && i < int(m_print_note_list.size())) m_print_note_list[size_t(i)].open = false; request_repaint(); };
+    request_repaint();
 }
 
 void DesignCanvas::finish_sketch()

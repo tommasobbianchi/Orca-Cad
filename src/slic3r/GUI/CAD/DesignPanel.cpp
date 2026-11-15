@@ -6386,21 +6386,25 @@ void DesignPanel::on_print_check()
     }
     bool clean = false;
     std::string text;
-    try { text = print_check_summary(this, b, clean); }
+    std::vector<PrintNote> pins;
+    try { text = print_check_summary(this, b, clean, false, &pins); }
     catch (const std::exception& e) { set_status(StatusKind::Error, wxString::FromUTF8(e.what())); return; }
+    if (m_viewport) m_viewport->set_print_notes(std::move(pins));
     if (clean) set_status(StatusKind::Ok, _L("Print check: nothing to fix for FDM printing as the part now lies on the bed"));
     else       set_status(StatusKind::Warning, wxString::Format(_L("Print check: %s"), wxString::FromUTF8(text)));
 }
 
 void DesignPanel::auto_print_check()
 {
-    if (m_auto_check_ms > 150 || m_doc.bodies.empty()) return;   // ponytail: no background thread; a slow part opts out, the Print check button stays
+    if (m_auto_check_ms > 150 || m_doc.bodies.empty()) { if (m_viewport) m_viewport->set_print_notes({}); return; }   // ponytail: no background thread; a slow part opts out, the Print check button stays
     const int b = m_sel_solid_body >= 0 && m_sel_solid_body < int(m_doc.bodies.size()) ? m_sel_solid_body : int(m_doc.bodies.size()) - 1;
     const wxLongLong t0 = wxGetLocalTimeMillis();
     bool clean = true;
     std::string text;
-    try { text = print_check_summary(this, b, clean, true); }
-    catch (...) { return; }   // a body that cannot be analysed (surface, sheet) is not a problem to report here
+    std::vector<PrintNote> pins;
+    try { text = print_check_summary(this, b, clean, true, &pins); }
+    catch (...) { if (m_viewport) m_viewport->set_print_notes({}); return; }   // a body that cannot be analysed (surface, sheet) is not a problem to report here
+    if (m_viewport) m_viewport->set_print_notes(std::move(pins));
     m_auto_check_ms = (wxGetLocalTimeMillis() - t0).GetValue();
     if (!clean) set_status(StatusKind::Warning, wxString::Format(_L("Print check: %s"), wxString::FromUTF8(text)));
 }

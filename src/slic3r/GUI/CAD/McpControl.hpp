@@ -29,10 +29,12 @@ void start_mcp_control_if_enabled();
 std::string mcp_socket_path();
 
 class DesignPanel;
+struct PrintNote;
 // The design-for-print check (analyze_printability) of body `body`, as one English line for the status line: the warnings and the
 // suggestions, three at most. `clean` is true when there is nothing to report. Throws std::runtime_error when the body cannot be read.
 // warnings_only: leave the suggestions out (the automatic check after a feature commit only speaks when something is actually wrong).
-std::string print_check_summary(DesignPanel* panel, int body, bool& clean, bool warnings_only = false);
+// pins: the issues that have a place on the part, for the viewport to mark there.
+std::string print_check_summary(DesignPanel* panel, int body, bool& clean, bool warnings_only = false, std::vector<PrintNote>* pins = nullptr);
 
 }} // namespace Slic3r::GUI
 
