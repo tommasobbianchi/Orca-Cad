@@ -3741,6 +3741,61 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
         }
     }
 
+    // Tip 21: mesh integrity. Gaps (open edges), non-manifold edges, and reversed faces
+    // (inconsistent winding) make the slicer fail or print holes.
+    {
+        // Weld vertices by quantised position (same trick as Tip 8).
+        std::map<std::array<long, 3>, int> vid;
+        std::vector<int> id(V.size());
+        for (size_t i = 0; i < V.size(); ++i) {
+            const std::array<long, 3> k{std::lround(V[i].x() * 1000.0), std::lround(V[i].y() * 1000.0), std::lround(V[i].z() * 1000.0)};
+            id[i] = vid.emplace(k, int(vid.size())).first->second;
+        }
+        std::vector<Vec3d> pos(vid.size());
+        for (size_t i = 0; i < V.size(); ++i) pos[id[i]] = V[i].cast<double>();
+        // Per undirected edge (min,max): total traversals, forward count, one triangle index.
+        struct EdgeC { int n = 0, fwd = 0, tri = -1; };
+        std::map<std::pair<int, int>, EdgeC> edges;
+        for (size_t i = 0; i < F.size(); ++i) {
+            const stl_triangle_vertex_indices& f = F[i];
+            const int a[3] = {id[f(0)], id[f(1)], id[f(2)]};
+            for (int e = 0; e < 3; ++e) {
+                const int u = a[e], v = a[(e + 1) % 3];
+                if (u == v) continue;                 // degenerate edge
+                const std::pair<int, int> key{std::min(u, v), std::max(u, v)};
+                EdgeC& ec = edges[key];
+                ++ec.n;
+                if (u < v) ++ec.fwd;
+                if (ec.tri < 0) ec.tri = int(i);
+            }
+        }
+        int open = 0, nonmanifold = 0, flipped = 0;
+        Vec3d first_at; bool have_first = false;
+        std::vector<int> tris;
+        for (const auto& kv : edges) {
+            const EdgeC& ec = kv.second;
+            const bool is_open = ec.n == 1, bad_manifold = ec.n > 2, bad_winding = !is_open && !bad_manifold && ec.fwd != 1;
+            if (!is_open && !bad_manifold && !bad_winding) continue;
+            if (is_open) ++open;
+            if (bad_manifold) ++nonmanifold;
+            if (bad_winding) ++flipped;
+            if (!have_first) { first_at = (pos[kv.first.first] + pos[kv.first.second]) * 0.5; have_first = true; }
+            if (tris.size() < 2000 && ec.tri >= 0) tris.push_back(ec.tri);
+        }
+        if (open + nonmanifold + flipped > 0) {
+            std::string text = "Mesh problems: ";
+            bool first_part = true;
+            if (open) { if (!first_part) text += ", "; text += std::to_string(open) + " open edges (gaps)"; first_part = false; }
+            if (nonmanifold) { if (!first_part) text += ", "; text += std::to_string(nonmanifold) + " non-manifold edges"; first_part = false; }
+            if (flipped) { if (!first_part) text += ", "; text += std::to_string(flipped) + " reversed faces"; }
+            text += " - the slicer may fail or print holes; repair before slicing";
+            add_note("mesh_integrity", "warning", text, first_at, Vec3d::Zero(), tris);
+            warnings.push_back(text);
+            suggestions.push_back(json{{"kind", "mesh_repair"}, {"open_edges", open}, {"non_manifold_edges", nonmanifold}, {"reversed_faces", flipped}, {"why", text}});
+            out["mesh_integrity"] = json{{"open_edges", open}, {"non_manifold_edges", nonmanifold}, {"reversed_faces", flipped}};
+        }
+    }
+
     // Tip 8: a rounded surface facing the bed. Overhanging triangles joined by shared vertices; a component whose slope varies a lot is a curve.
     {
         std::map<std::array<long, 3>, int> vid;
