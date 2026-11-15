@@ -59,6 +59,8 @@ extern wxPopupWindow* wxCurrentPopupWindow;
 
 namespace Slic3r {
 namespace GUI {
+// ponytail: a file-level counter, not a member: there is one Design canvas, and it avoids touching the header (a full rebuild).
+static int s_print_note_frames = 0;
 extern bool g_design_bed_see_through;   // 3DBed.cpp
 
 // The Design tab's iso view is the CAD one: a true isometric from the front-right corner, which
@@ -228,7 +230,13 @@ DesignCanvas::DesignCanvas(wxWindow* parent)
         }
         if (m_palette.is_open()) m_canvas->set_as_dirty();   // keep frames coming: the box takes focus on the frame AFTER it opens
         if (m_quotes_on) m_quotes.render(imgui, wxGetApp().plater()->get_camera(), m_canvas->get_scale());   // under the bars: they draw after
+        m_print_notes.its = m_print_mesh.empty() ? nullptr : &m_print_mesh.its;
+        m_print_notes.aabb = m_print_aabb.get();
+        m_print_notes.focus_index = m_print_focus;
+        const auto now = std::chrono::steady_clock::now();
+        m_print_notes.focus_active = m_print_focus >= 0 && std::chrono::duration_cast<std::chrono::milliseconds>(now - m_print_focus_at).count() < 2000;
         m_print_notes.render(imgui, wxGetApp().plater()->get_camera());
+        if (s_print_note_frames > 0) { --s_print_note_frames; m_canvas->set_as_dirty(); }   // the side panel sizes itself on its second frame
         {   // The small confirm beside the value label of a 3D gizmo (fillet, chamfer, hole, shell...): the same Confirm / Cancel the bar has.
             float lr[4];
             if (m_sketch_tool.take_label_rect(lr) && m_topbar.action_active && m_topbar.action_active()) {
@@ -713,11 +721,39 @@ void DesignCanvas::set_sketch_polygon_edge(bool e)
     m_sketch_tool.set_polygon_edge(e);
 }
 
-void DesignCanvas::set_print_notes(std::vector<PrintNote> n)
+void DesignCanvas::set_print_notes(std::vector<PrintNote> n, const TriangleMesh* body_mesh)
 {
+    s_print_note_frames = 3;
     m_print_note_list = std::move(n);
+    if (body_mesh && !body_mesh->empty()) {
+        m_print_mesh = *body_mesh;
+        m_print_aabb = std::make_unique<AABBMesh>(m_print_mesh);
+    } else {
+        m_print_mesh = TriangleMesh();
+        m_print_aabb.reset();
+    }
     m_print_notes.notes   = [this]() -> std::vector<PrintNote>& { return m_print_note_list; };
     m_print_notes.dismiss = [this](int i) { if (i >= 0 && i < int(m_print_note_list.size())) m_print_note_list[size_t(i)].open = false; request_repaint(); };
+    m_print_notes.resolve  = [this](int i) { if (i >= 0 && i < int(m_print_note_list.size())) { m_print_note_list[size_t(i)].resolved = !m_print_note_list[size_t(i)].resolved; request_repaint(); } };
+    m_print_notes.focus    = [this](int i) { set_print_focus(i); };
+    m_print_focus = -1;
+    request_repaint();
+    if (on_print_notes_changed) on_print_notes_changed();
+}
+
+void DesignCanvas::set_print_note_state(int i, bool open, bool resolved)
+{
+    if (i < 0 || i >= int(m_print_note_list.size())) return;
+    m_print_note_list[size_t(i)].open      = open;
+    m_print_note_list[size_t(i)].resolved  = resolved;
+    request_repaint();
+    if (on_print_notes_changed) on_print_notes_changed();
+}
+
+void DesignCanvas::set_print_focus(int i)
+{
+    m_print_focus = i;
+    m_print_focus_at = std::chrono::steady_clock::now();
     request_repaint();
 }
 

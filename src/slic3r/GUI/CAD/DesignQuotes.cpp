@@ -2,6 +2,7 @@
 
 #include "slic3r/GUI/Camera.hpp"
 #include "slic3r/GUI/ImGuiWrapper.hpp"
+#include "libslic3r/AABBMesh.hpp"
 
 #include <imgui/imgui.h>
 
@@ -11,6 +12,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -278,37 +280,142 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
 
     std::vector<Rect> taken;
     for (size_t i = 0; i < ns.size(); ++i) {
-        const PrintNote& n = ns[i];
-        if (!n.open) continue;
+        PrintNote& n = ns[i];
+        if (!n.has_pin || !n.open) continue;
         ImVec2 p;
-        if (!proj(n.at, p)) continue;
-        std::string text = n.text.size() > 64 ? n.text.substr(0, 61) + "..." : n.text;
-        const ImVec2 ts = ImGui::CalcTextSize(text.c_str());
-        const ImU32  col = n.warning ? IM_COL32(245, 166, 35, 255) : IM_COL32(74, 144, 226, 255);
-        // the note to the upper right of its pin; place_text nudges it down off the ones already placed
-        const Rect r = place_text(dl, text, p + ImVec2(34.f * em + ts.x * 0.5f, -30.f * em), taken, st, false);
-        const ImVec2 badge((r.lo.x), (r.lo.y + r.hi.y) * 0.5f);
-        dl->AddLine(p, badge, col, st.thin * 1.5f);
-        dl->AddCircleFilled(p, 4.f * em, IM_COL32(255, 255, 255, 255));
-        dl->AddCircle(p, 4.f * em, col, 0, 1.6f * em);
-        dl->AddCircleFilled(badge, 10.f * em, col);
-        const std::string num = std::to_string(n.n);
-        const ImVec2 nts = ImGui::CalcTextSize(num.c_str());
-        dl->AddText(badge - nts * 0.5f, IM_COL32(20, 20, 20, 255), num.c_str());
+        if (!proj(n.at, p)) { n.visible = false; n.tinted_tris = 0; continue; }
+        // Hidden-pin culling: facing away from the eye, or occluded by the body (a short ray from just off the surface).
+        bool facing = true;
+        if (n.has_normal) facing = n.normal.dot(proj.eye - n.at) > 0.0;
+        bool occluded = false;
+        if (aabb && n.has_normal) {
+            const Vec3d src = n.at + n.normal * 0.05;
+            const Vec3d dir = (proj.eye - src).normalized();
+            const auto hit = aabb->query_ray_hit(src, dir);
+            const double eye_d = (proj.eye - src).norm();
+            if (hit.is_hit() && hit.distance() > 0.01 && hit.distance() < eye_d - 1e-4) occluded = true;
+        }
+        const bool hidden = !facing || occluded;
+        n.visible = !hidden;
 
-        ImGui::SetNextWindowPos(r.lo, ImGuiCond_Always);
-        ImGui::SetNextWindowSize(r.hi - r.lo, ImGuiCond_Always);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.f, 0.f));
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
-        if (ImGui::Begin(("##printnote" + std::to_string(i)).c_str(), nullptr,
-                         ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoSavedSettings |
-                         ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus)) {
-            ImGui::InvisibleButton("##hit", r.hi - r.lo);
-            if (ImGui::IsItemHovered()) { m_hovered = true; ImGui::SetTooltip("%s\n(click to dismiss)", n.text.c_str()); }
-            if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && dismiss) dismiss(int(i));
+        // The red tint: fill the note's triangles red on the background draw list. ponytail: depth-unaware,
+        // no GL pass, capped by the 2000-triangle limit per note.
+        int tinted = 0;
+        if (its && !n.resolved && !n.tris.empty()) {   // not culled with the pin: an overhang's underside faces away from a view from above, and that is exactly where the problem is
+            for (int ti : n.tris) {
+                if (ti < 0 || ti >= int(its->indices.size())) continue;
+                const auto& tri = its->indices[size_t(ti)];
+                const Vec3d a = its->vertices[size_t(tri[0])].cast<double>();
+                const Vec3d b = its->vertices[size_t(tri[1])].cast<double>();
+                const Vec3d c = its->vertices[size_t(tri[2])].cast<double>();
+                ImVec2 pa, pb, pc;
+                if (!proj(a, pa) || !proj(b, pb) || !proj(c, pc)) continue;   // any vertex behind the eye
+                const bool toward = (b - a).cross(c - a).dot(proj.eye - a) > 0.0;   // facing the eye: stronger; facing away: seen through the body, fainter
+                dl->AddTriangleFilled(pa, pb, pc, IM_COL32(235, 60, 60, toward ? 77 : 40));
+                ++tinted;
+            }
+        }
+        n.tinted_tris = tinted;
+
+        const ImU32 col = n.resolved ? IM_COL32(150, 150, 150, 255)
+                         : hidden ? (n.warning ? IM_COL32(245, 166, 35, 90) : IM_COL32(74, 144, 226, 90))
+                         : (n.warning ? IM_COL32(245, 166, 35, 255) : IM_COL32(74, 144, 226, 255));
+        const std::string num = std::to_string(n.n);
+
+        if (hidden) {
+            // dimmed: the dot and the badge only, no label
+            dl->AddCircleFilled(p, 4.f * em, IM_COL32(255, 255, 255, 120));
+            dl->AddCircle(p, 4.f * em, col, 0, 1.6f * em);
+            const ImVec2 badge = p + ImVec2(16.f * em, -16.f * em);
+            dl->AddCircleFilled(badge, 10.f * em, col);
+            const ImVec2 nts = ImGui::CalcTextSize(num.c_str());
+            dl->AddText(badge - nts * 0.5f, IM_COL32(20, 20, 20, 220), num.c_str());
+        } else {
+            // visible (or resolved: grey, still labelled) — the full note
+            std::string text = n.text.size() > 64 ? n.text.substr(0, 61) + "..." : n.text;
+            const ImVec2 ts = ImGui::CalcTextSize(text.c_str());
+            const Rect r = place_text(dl, text, p + ImVec2(34.f * em + ts.x * 0.5f, -30.f * em), taken, st, false);
+            const ImVec2 badge((r.lo.x), (r.lo.y + r.hi.y) * 0.5f);
+            dl->AddLine(p, badge, col, st.thin * 1.5f);
+            dl->AddCircleFilled(p, 4.f * em, IM_COL32(255, 255, 255, 255));
+            dl->AddCircle(p, 4.f * em, col, 0, 1.6f * em);
+            dl->AddCircleFilled(badge, 10.f * em, col);
+            const ImVec2 nts = ImGui::CalcTextSize(num.c_str());
+            dl->AddText(badge - nts * 0.5f, IM_COL32(20, 20, 20, 255), num.c_str());
+
+            ImGui::SetNextWindowPos(r.lo, ImGuiCond_Always);
+            ImGui::SetNextWindowSize(r.hi - r.lo, ImGuiCond_Always);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.f, 0.f));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
+            if (ImGui::Begin(("##printnote" + std::to_string(i)).c_str(), nullptr,
+                             ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoSavedSettings |
+                             ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus)) {
+                ImGui::InvisibleButton("##hit", r.hi - r.lo);
+                if (ImGui::IsItemHovered()) { m_hovered = true; ImGui::SetTooltip("%s\n(click to dismiss)", n.text.c_str()); }
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && dismiss) dismiss(int(i));
+            }
+            ImGui::End();
+            ImGui::PopStyleVar(2);
+        }
+
+        // The focus ring, for ~2 s after a side-list row is clicked (the camera does not move).
+        if (focus_active && int(i) == focus_index) {
+            dl->AddCircle(p, 12.f * em, IM_COL32(255, 255, 255, 210), 0, 2.f * em);
+            dl->AddCircle(p, 15.f * em, col, 0, 1.4f * em);
+        }
+    }
+
+    // The side list: a collapsible "Print check" panel, top-right of the viewport. The CardModel rows
+    // cannot host a resolve + dismiss button pair, so this ImGui panel drives the same note vector.
+    int open_n = 0;
+    for (const PrintNote& n : ns) if (n.open) ++open_n;
+    if (open_n > 0) {
+        const auto& vp = proj.vp;
+        const float pw = std::min(340.f * em, float(vp[2]) * 0.45f);
+        ImGui::SetNextWindowPos(ImVec2(float(vp[0] + vp[2]) - 8.f * em, float(vp[1] + vp[3]) - 8.f * em), ImGuiCond_Always, ImVec2(1.f, 1.f));   // bottom-right: the top is the ribbon, the right edge the view cube and Select popup
+        ImGui::SetNextWindowSizeConstraints(ImVec2(pw, 0.f), ImVec2(pw, std::numeric_limits<float>::max()));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.f * em, 6.f * em));
+        if (ImGui::Begin("##printcheck_panel", nullptr,
+                         ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_AlwaysAutoResize)) {   // auto-resize: the row count changes
+            if (ImGui::CollapsingHeader("Print check", ImGuiTreeNodeFlags_DefaultOpen)) {
+                const float row_h = ImGui::GetTextLineHeight() + 8.f * em;
+                const float badge_w = 24.f * em;
+                const float btn_w = 26.f * em;
+                ImDrawList* wdl = ImGui::GetWindowDrawList();
+                for (int i = 0; i < int(ns.size()); ++i) {
+                    PrintNote& n = ns[i];
+                    if (!n.open) continue;
+                    ImGui::PushID(i);
+                    const ImVec2 r0 = ImGui::GetCursorScreenPos();
+                    const ImU32 bc = n.warning ? IM_COL32(245, 166, 35, 255) : IM_COL32(74, 144, 226, 255);
+                    const std::string num = std::to_string(n.n);
+                    const ImVec2 nts = ImGui::CalcTextSize(num.c_str());
+                    const ImVec2 cc(r0.x + badge_w * 0.5f, r0.y + row_h * 0.5f);
+                    if (n.has_pin) { wdl->AddCircleFilled(cc, 9.f * em, bc); wdl->AddText(cc - nts * 0.5f, IM_COL32(20, 20, 20, 255), num.c_str()); }
+                    else              { wdl->AddCircle(cc, 9.f * em, bc, 0, 1.5f * em); wdl->AddText(cc - nts * 0.5f, bc, num.c_str()); }
+                    ImGui::Dummy(ImVec2(badge_w, row_h));
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("OK")) { if (resolve) resolve(i); }
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("X")) { if (dismiss) dismiss(i); }
+                    ImGui::SameLine();
+                    // one line, truncated to the panel width, with the full text as a tooltip
+                    const float text_w = std::max(40.f * em, pw - badge_w - 2.f * btn_w - 24.f * em);
+                    std::string full = n.text;
+                    std::string shown = full;
+                    if (ImGui::CalcTextSize(shown.c_str()).x > text_w) {
+                        while (!shown.empty() && ImGui::CalcTextSize(shown.c_str()).x > text_w) shown.pop_back();
+                        shown += "...";
+                    }
+                    if (ImGui::Selectable(shown.c_str(), false)) { if (focus) focus(i); }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", full.c_str());
+                    ImGui::NewLine();   // end the row: the next row starts a line down
+                    ImGui::PopID();
+                }
+            }
         }
         ImGui::End();
-        ImGui::PopStyleVar(2);
+        ImGui::PopStyleVar();
     }
 }
 

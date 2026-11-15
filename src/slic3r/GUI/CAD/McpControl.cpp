@@ -3790,6 +3790,32 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
     return out;
 }
 
+// Turn `analyze_printability`'s `notes` JSON into the viewport's PrintNote vector. `at:null` notes
+// (orientation / tight_pair) are kept as pin-less global notes; `n` runs across ALL kept notes.
+static void build_print_pins(const json& notes, bool warnings_only, std::vector<PrintNote>* pins)
+{
+    pins->clear();
+    int n = 0;
+    for (const json& j : notes) {
+        const bool warn = j.value("severity", std::string()) == "warning";
+        if (warnings_only && !warn) continue;
+        PrintNote p;
+        if (j.contains("at") && !j["at"].is_null()) {
+            p.has_pin = true;
+            p.at = Vec3d(j["at"][0].get<double>(), j["at"][1].get<double>(), j["at"][2].get<double>());
+        } else {
+            p.has_pin = false;   // a global note (orientation / tight_pair): listed in the sidebar, no pin
+        }
+        p.kind = j.value("kind", std::string());
+        p.text = j.value("text", std::string());
+        p.warning = warn;
+        if (j.contains("normal")) { p.normal = Vec3d(j["normal"][0].get<double>(), j["normal"][1].get<double>(), j["normal"][2].get<double>()); p.has_normal = true; }
+        if (j.contains("tris")) for (const json& t : j["tris"]) p.tris.push_back(t.get<int>());
+        p.n = ++n;
+        pins->push_back(std::move(p));
+    }
+}
+
 json action_analyze_printability(DesignPanel* panel, const json& params)
 {
     CadDocument& doc = panel->mcp_doc();
@@ -3933,6 +3959,13 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
     int solids = 0;
     for (TopExp_Explorer ex(doc.bodies[b].shape, TopAbs_SOLID); ex.More(); ex.Next()) ++solids;
     if (solids > 1) warnings.push_back("the body is " + std::to_string(solids) + " disconnected solids");
+    // The analyze verb is a print check too: feed the viewport so the pins, red tint and side list
+    // reflect this analysis (the harness inspects them right after analyze_printability).
+    if (DesignCanvas* v = panel->mcp_viewport()) {
+        std::vector<PrintNote> pnl;
+        build_print_pins(notes, false, &pnl);
+        v->set_print_notes(std::move(pnl), &doc.display_body_meshes[b]);
+    }
     return json{{"ok", true}, {"body", b}, {"height_mm", bb.size().z()}, {"footprint_mm", {bb.size().x(), bb.size().y()}},
                 {"bed_contact_mm2", bed}, {"overhang_mm2", over}, {"overhang_pct", area > 0 ? 100.0 * over / area : 0.0},
                 {"overhang_angle", ang}, {"overhang_levels", lv}, {"horizontal_holes", holes}, {"solids", solids},
@@ -4967,6 +5000,13 @@ json ui_inspect(DesignPanel* panel)
         json hits = json::array();
         for (const auto& hh : v->select_panel_hits()) hits.push_back(json::array({hh.first, hh.second}));
         out["select_panel"] = {{"checks", hits}};
+    }
+    if (v) {   // the last print check's notes (global ones included), one entry per note
+        json pnl = json::array();
+        for (const PrintNote& pnpt : v->print_notes())
+            pnl.push_back({{"n", pnpt.n}, {"open", pnpt.open}, {"resolved", pnpt.resolved}, {"tinted_tris", pnpt.tinted_tris},
+                           {"visible", pnpt.visible}, {"has_pin", pnpt.has_pin}, {"kind", pnpt.kind}});
+        out["print_notes"] = pnl;
     }
     if (v && v->tree_overlay_on()) {   // the on-canvas tree: where each row is, so a rig test can drag one
         const DesignTreeOverlay& to = const_cast<DesignCanvas*>(v)->tree_overlay();
@@ -6318,18 +6358,7 @@ void tcp_server_thread(int port)
 std::string print_check_summary(DesignPanel* panel, int body, bool& clean, bool warnings_only, std::vector<PrintNote>* pins)
 {
     const json r = action_analyze_printability(panel, json{{"body", body}});
-    if (pins) {
-        pins->clear();
-        for (const json& n : r.at("notes")) {
-            if (!n.contains("at") || n["at"].is_null()) continue;   // global pin-less (orientation / tight_pair): listed in the sidebar, no pin
-            const bool warn = n.value("severity", std::string()) == "warning";
-            if (warnings_only && !warn) continue;
-            PrintNote p;
-            p.at = Vec3d(n["at"][0].get<double>(), n["at"][1].get<double>(), n["at"][2].get<double>());
-            p.kind = n.value("kind", std::string()); p.text = n.value("text", std::string()); p.warning = warn; p.n = int(pins->size()) + 1;
-            pins->push_back(std::move(p));
-        }
-    }
+    if (pins) build_print_pins(r.at("notes"), warnings_only, pins);
     std::vector<std::string> msgs;
     std::set<std::string> kinds;
     for (const json& w : r.at("warnings")) msgs.push_back(w.get<std::string>());
