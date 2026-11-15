@@ -1,5 +1,6 @@
 #include "slic3r/GUI/CAD/McpControl.hpp"
 #include "libslic3r/Point.hpp"
+#include <Eigen/Eigenvalues>   // SelfAdjointEigenSolver for the curve_axis (tip 16) normal covariance
 #include <functional>
 #include <stdexcept>
 #include <math.h>
@@ -3796,6 +3797,165 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
         }
     }
 
+    // Tips 5 / 7 / 16: DfAM edge/curve geometry (print frame). One welded edge adjacency
+    // built once, reused by the three checks. Only edges with exactly two triangles count;
+    // convex vs concave is read from the dihedral sign s = (n1 x n2).(b-a), where n1/n2 are
+    // the two face normals and a->b the edge as traversed by the first triangle. Convex -> s > 0,
+    // concave -> s < 0 (a cube's outer corner gives +, an inside corner gives -).
+    {
+        // Weld vertices at 1e-3 mm (same trick as Tip 21).
+        std::map<std::array<long, 3>, int> vid;
+        std::vector<int> id(V.size());
+        for (size_t i = 0; i < V.size(); ++i) {
+            const std::array<long, 3> k{std::lround(V[i].x() * 1000.0), std::lround(V[i].y() * 1000.0), std::lround(V[i].z() * 1000.0)};
+            id[i] = vid.emplace(k, int(vid.size())).first->second;
+        }
+        std::vector<Vec3d> pos(vid.size());
+        for (size_t i = 0; i < V.size(); ++i) pos[size_t(id[i])] = V[i].cast<double>();
+        // Per undirected edge: the up-to-two triangles and the directed edge a->b as traversed by the first.
+        struct EdgeD { int n = 0, t1 = -1, t2 = -1; int a = -1, b = -1; };
+        std::map<std::pair<int, int>, EdgeD> edges;
+        for (size_t i = 0; i < F.size(); ++i) {
+            const stl_triangle_vertex_indices& f = F[i];
+            const int a[3] = {id[f(0)], id[f(1)], id[f(2)]};
+            for (int e = 0; e < 3; ++e) {
+                const int u = a[e], v = a[(e + 1) % 3];
+                if (u == v) continue;                 // degenerate edge
+                const std::pair<int, int> key{std::min(u, v), std::max(u, v)};
+                EdgeD& ed = edges[key];
+                ++ed.n;
+                if (ed.t1 < 0) { ed.t1 = int(i); ed.a = u; ed.b = v; }
+                else if (ed.t2 < 0 && ed.t1 != int(i)) ed.t2 = int(i);
+                // a third triangle -> non-manifold; the edge is rejected by the n != 2 check below
+            }
+        }
+        auto tri_normal = [&](int ti) -> Vec3d {
+            const auto& f = F[size_t(ti)];
+            const Vec3d p0 = V[f(0)].cast<double>(), p1 = V[f(1)].cast<double>(), p2 = V[f(2)].cast<double>();
+            const Vec3d n = (p1 - p0).cross(p2 - p0);
+            const double nn = n.norm();
+            return nn > 1e-12 ? Vec3d(n / nn) : Vec3d(Vec3d::Zero());
+        };
+        const double part_h = m.bounding_box().max.z() - m.bounding_box().min.z();
+
+        // Tip 5: vertical_edge (convex). Tip 7: base_corner (concave wall+floor junction).
+        int vert_n = 0, base_n = 0;
+        double vert_longest = -1.0, base_longest = -1.0;
+        Vec3d vert_mid, vert_norm = Vec3d::Zero(), base_mid, base_floor = Vec3d::Zero();
+        std::vector<int> vert_tris, base_tris;
+        for (const auto& kv : edges) {
+            const EdgeD& ed = kv.second;
+            if (ed.n != 2) continue;                  // needs exactly two triangles
+            const Vec3d n1 = tri_normal(ed.t1), n2 = tri_normal(ed.t2);
+            if (n1.isZero() || n2.isZero()) continue; // skip degenerate faces
+            const Vec3d d = pos[size_t(ed.b)] - pos[size_t(ed.a)];
+            const double L = d.norm();
+            if (L < 1e-9) continue;
+            const Vec3d e = d / L;
+            const double theta = std::acos(std::max(-1.0, std::min(1.0, n1.dot(n2)))) * 180.0 / M_PI;
+            const bool convex = (n1.cross(n2)).dot(d) > 0.0;   // convex -> + (see the sign note above)
+            const Vec3d mid = (pos[size_t(ed.a)] + pos[size_t(ed.b)]) * 0.5;
+
+            if (convex && std::abs(e.z()) > 0.95 && theta >= 45.0 && L >= 8.0 && part_h >= 10.0) {
+                ++vert_n;
+                if (vert_tris.size() < 2000) vert_tris.push_back(ed.t1);
+                if (vert_tris.size() < 2000 && ed.t2 != ed.t1) vert_tris.push_back(ed.t2);
+                if (L > vert_longest) { vert_longest = L; vert_mid = mid; vert_norm = (n1 + n2).normalized(); }
+            }
+            else if (!convex && theta >= 60.0 && L >= 8.0 && std::abs(e.z()) < 0.1) {
+                const double z1 = n1.z(), z2 = n2.z();
+                if ((z1 > 0.95 && std::abs(z2) < 0.1) || (z2 > 0.95 && std::abs(z1) < 0.1)) {   // one up-facing floor, one wall
+                    ++base_n;
+                    if (base_tris.size() < 2000) base_tris.push_back(ed.t1);
+                    if (base_tris.size() < 2000 && ed.t2 != ed.t1) base_tris.push_back(ed.t2);
+                    if (L > base_longest) { base_longest = L; base_mid = mid; base_floor = z1 > 0.95 ? n1 : n2; }
+                }
+            }
+        }
+        if (vert_n > 0) {
+            const std::string text = num(double(vert_n)) + " sharp vertical edge(s): fillet them (R >= 2 mm) to reduce ringing where the head changes direction";
+            add_note("vertical_edge", "suggestion", text, vert_mid, to_model_dir(vert_norm), vert_tris);
+            suggestions.push_back(json{{"kind", "vertical_edge_fillet"}, {"edges", vert_n}, {"why", text}});
+            out["vertical_edges"] = vert_n;
+        }
+        if (base_n > 0) {
+            const std::string text = num(double(base_n)) + " sharp inside corner(s) between a wall and a base: a fillet or 45 deg chamfer adds interface and strengthens the join";
+            add_note("base_corner", "suggestion", text, base_mid, to_model_dir(base_floor), base_tris);
+            suggestions.push_back(json{{"kind", "base_fillet"}, {"corners", base_n}, {"why", text}});
+            out["base_corners"] = base_n;
+        }
+
+        // Tip 16: curve_axis. Group triangles into smooth components (union-find over the
+        // 2-triangle edges with theta <= 25 deg); a cylinder-like component has a low-rank
+        // normal covariance whose smallest eigenvalue (normalised) is ~0 and whose second is
+        // substantial, and its axis is the corresponding eigenvector.
+        std::vector<int> parent(F.size());
+        for (size_t i = 0; i < parent.size(); ++i) parent[i] = int(i);
+        std::function<int(int)> root = [&](int x) { while (parent[size_t(x)] != x) { parent[size_t(x)] = parent[size_t(parent[size_t(x)])]; x = parent[size_t(x)]; } return x; };
+        for (const auto& kv : edges) {
+            const EdgeD& ed = kv.second;
+            if (ed.n != 2) continue;
+            const Vec3d n1 = tri_normal(ed.t1), n2 = tri_normal(ed.t2);
+            if (n1.isZero() || n2.isZero()) continue;
+            if (std::acos(std::max(-1.0, std::min(1.0, n1.dot(n2)))) * 180.0 / M_PI <= 25.0) {
+                const int r1 = root(ed.t1), r2 = root(ed.t2);
+                if (r1 != r2) parent[size_t(r1)] = r2;
+            }
+        }
+        struct CurveComp {
+            double area{0}, s{0};      // s = sum of n.(tri centroid)
+            Vec3d c{Vec3d::Zero()}, sn{Vec3d::Zero()};   // c: area-weighted centroid sum, sn: sum of normals
+            Eigen::Matrix3d cov{Eigen::Matrix3d::Zero()};
+            int biggest_tri{-1}; double big_area{0};
+            std::vector<int> tris;
+        };
+        std::map<int, CurveComp> cs;
+        for (size_t i = 0; i < F.size(); ++i) {
+            const auto& f = F[i];
+            const Vec3d p0 = V[f(0)].cast<double>(), p1 = V[f(1)].cast<double>(), p2 = V[f(2)].cast<double>();
+            const Vec3d nraw = (p1 - p0).cross(p2 - p0);
+            const double nn = nraw.norm();
+            if (nn < 1e-12) continue;
+            const double a = 0.5 * nn;
+            const Vec3d n = nraw / nn;
+            const Vec3d cen = (p0 + p1 + p2) / 3.0;
+            CurveComp& cc = cs[root(int(i))];
+            cc.area += a;
+            cc.c += a * cen;
+            cc.cov += a * (n * n.transpose());
+            cc.s += n.dot(cen);
+            cc.sn += n;
+            if (a > cc.big_area) { cc.big_area = a; cc.biggest_tri = int(i); }
+            if (cc.tris.size() < 2000) cc.tris.push_back(int(i));
+        }
+        int curve_count = 0;
+        for (auto& kv : cs) {
+            CurveComp& cc = kv.second;
+            if (cc.area < 100.0) continue;
+            cc.c /= cc.area;
+            // Skip a concave (holed) surface: the mean of normal . (tri centroid - comp centroid) < 0.
+            if (cc.s - cc.sn.dot(cc.c) < 0) continue;
+            const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(cc.cov);
+            const Eigen::Vector3d ev = solver.eigenvalues();
+            const double tr = ev.sum();
+            if (tr < 1e-12) continue;
+            const double l0n = ev(0) / tr, l1n = ev(1) / tr;
+            if (l0n > 0.02 || l1n < 0.15) continue;   // not cylinder-like
+            const Eigen::Vector3d axis = solver.eigenvectors().col(0);
+            if (std::abs(axis.z()) >= 0.7) continue;   // axis near-vertical: stair-stepping is not an issue
+            const double ang_from_z = std::acos(std::max(0.0, std::min(1.0, std::abs(axis.z())))) * 180.0 / M_PI;
+            const Vec3d t_n = tri_normal(cc.biggest_tri);
+            const auto& bf = F[size_t(cc.biggest_tri)];
+            const Vec3d pin = (V[bf(0)].cast<double>() + V[bf(1)].cast<double>() + V[bf(2)].cast<double>()) / 3.0;
+            const std::string text = "Curved surface with its axis " + num(ang_from_z) + " deg from Z: layer stair-steps show on it; orient the part so the axis is vertical if the finish matters";
+            add_note("curve_axis", "suggestion", text, pin, to_model_dir(t_n), cc.tris);
+            suggestions.push_back(json{{"kind", "curve_axis"}, {"angle_from_z_deg", ang_from_z}, {"area_mm2", cc.area}, {"why", text}});
+            ++curve_count;
+            if (curve_count >= 6) break;
+        }
+        if (curve_count > 0) out["curve_axes"] = curve_count;
+    }
+
     // Tip 8: a rounded surface facing the bed. Overhanging triangles joined by shared vertices; a component whose slope varies a lot is a curve.
     {
         std::map<std::array<long, 3>, int> vid;
@@ -3927,8 +4087,9 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
     }
 
     // Tip 6: parts that fit each other need about 0.3 mm of clearance. Pairs closer than that but not touching.
+    // Hoisted above the block: the tip 23 compliance advice below re-reads whether any tight pair fired.
+    json pairs = json::array();
     {
-        json pairs = json::array();
         const size_t nb = std::min<size_t>(doc.bodies.size(), 12);
         for (size_t i = 0; i < nb; ++i)
             for (size_t j = i + 1; j < nb; ++j) {
@@ -3946,6 +4107,31 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
         out["tight_pairs"] = pairs;
         out["clearance_mm"] = clearance;
     }
+
+    // Tips 11 / 18 / 22 / 23 / 24: design-based global advice (from the document, no mesh).
+    // Pin-less global notes only (no normal, no tris).
+    json tips_advice = json::array();
+    auto advise = [&](const char* kind, const std::string& text) {
+        tips_advice.push_back(kind);
+        notes.push_back(json{{"kind", kind}, {"severity", "suggestion"}, {"text", text}, {"at", nullptr}});
+    };
+    bool has_hole = false, has_text = false;
+    for (const CadFeature& f : doc.features) {
+        if (f.type == CadFeatureType::Hole || f.type == CadFeatureType::Thread) has_hole = true;   // hole, hole_styled and thread all bore into the body
+        if (f.is_text()) has_text = true;
+    }
+    if (doc.variables.empty() && doc.features.size() >= 3)
+        advise("use_parameters", "No named variables: drive the key dimensions from variables so the design is easy to edit and iterate");
+    if (has_hole)
+        advise("slit_nut_trap", "A bore can take a slit with a bolt and a trapped nut so it clamps around another part");
+    if (doc.bodies.size() >= 2)
+        advise("test_fit", "Fitted parts: print a small test piece of the mating region first to check the fit before the full print");
+    if (pairs.size() > 0)
+        advise("compliance", "Parts that press together can use thin flexible tabs (compliance) for a push fit");
+    if (has_text)
+        advise("text_indent", "Text reads best indented into a vertical face (cut, not raised): less overhang and better resolution");
+    if (!tips_advice.empty()) out["tips_advice"] = tips_advice;
+
     return out;
 }
 

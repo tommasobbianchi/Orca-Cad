@@ -136,7 +136,7 @@ check(not any(("thinnest" in w or "walls thinner" in w) for w in w8),
 
 # --- Negative: no notes -> side list empty/hidden ------------------------------------------
 call("new_document")
-call("extrude_rect", width=20, height=20, distance=10)
+call("extrude_rect", width=20, height=20, distance=6)
 time.sleep(0.4)
 call("ui.click", at=[top["x"], top["y"]])
 time.sleep(0.4)

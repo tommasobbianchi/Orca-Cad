@@ -377,7 +377,16 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.f * em, 6.f * em));
         if (ImGui::Begin("##printcheck_panel", nullptr,
                          ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_AlwaysAutoResize)) {   // auto-resize: the row count changes
-            if (ImGui::CollapsingHeader("Print check", ImGuiTreeNodeFlags_DefaultOpen)) {
+            // neutral header: the theme's orange bar does not belong in a Design sub-window
+            ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.22f, 0.22f, 0.24f, 1.f));
+            ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.28f, 0.28f, 0.30f, 1.f));
+            ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.32f, 0.32f, 0.34f, 1.f));
+            const bool hdr_open = ImGui::CollapsingHeader("Print check", ImGuiTreeNodeFlags_DefaultOpen);
+            ImGui::PopStyleColor(3);
+            if (hdr_open) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.30f, 0.30f, 0.32f, 1.f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.40f, 0.40f, 0.43f, 1.f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.48f, 0.48f, 0.52f, 1.f));
                 const float row_h = ImGui::GetTextLineHeight() + 8.f * em;
                 const float badge_w = 24.f * em;
                 const float btn_w = 26.f * em;
@@ -407,6 +416,7 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
                     if (ImGui::IsItemClicked()) { if (focus) focus(i); }
                     ImGui::PopID();
                 }
+                ImGui::PopStyleColor(3);
             }
         }
         ImGui::End();
