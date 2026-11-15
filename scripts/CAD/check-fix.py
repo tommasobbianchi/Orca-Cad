@@ -402,6 +402,17 @@ safe_call("new_document")
 safe_call("extrude_rect", width=8, height=8, distance=20)
 res = safe_call("analyze_printability", body=0)
 check(len(kind_notes(res, "bed_adhesion")) == 1, "ck10: an 8x8 base (64 mm2) gets bed_adhesion")
+ba = kind_notes(res, "bed_adhesion")
+check(len(ba) == 1 and has_fix(ba[0]), "ck10: bed_adhesion carries a brim-pad fix")
+r = safe_call("apply_print_fix", kind="bed_adhesion", body=0)
+check(isinstance(r, dict) and r.get("ok") is True, "ck10: apply_print_fix bed_adhesion ok")
+d = safe_call("describe_scene")
+try:
+    bb = d["bodies"][0]["bbox"]
+    check(abs((bb["max"][0] - bb["min"][0]) - 14) < 0.1 and abs(bb["min"][2]) < 0.05, "ck10: the pad widens the base to 14 mm at the bed")
+except Exception as e:  # noqa: BLE001
+    check(False, "ck10: pad bbox readable (%s)" % e)
+check(not kind_notes(safe_call("analyze_printability", body=0), "bed_adhesion"), "ck10: no bed_adhesion note after the pad")
 safe_call("new_document")
 safe_call("extrude_rect", width=40, height=2, distance=20)
 check(len(kind_notes(safe_call("analyze_printability", body=0), "bed_adhesion")) == 1, "ck10: a 2 mm wide base gets bed_adhesion")

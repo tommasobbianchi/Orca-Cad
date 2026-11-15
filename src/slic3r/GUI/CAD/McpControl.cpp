@@ -4042,6 +4042,9 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
                                  : std::string("Nothing flat touches the bed: use a brim or a flat base"),
                      at, to_model_dir(Vec3d(0, 0, -1)), btris);
             out["bed_adhesion_mm2"] = area;
+            if (area > 1e-6)
+                suggestions.push_back(json{{"kind", "brim_pad"}, {"min", json::array({x0, y0})}, {"max", json::array({x1, y1})}, {"bed_z", bed},
+                                           {"why", "a 0.3 mm sacrificial pad 3 mm wider than the contact patch, cut away after printing"}});
         }
     }
 
@@ -4442,6 +4445,19 @@ static void attach_print_fixes(json& notes, const json& suggestions, const CadDo
             steps.push_back(json{{"method", "sketch_add"}, {"params", {{"rect", json::array({minx - mo.x(), miny - mo.y(), maxx - mo.x(), maxy - mo.y()})}}}});
             steps.push_back(json{{"method", "sketch_commit"}, {"params", json::object()}});
             steps.push_back(json{{"method", "extrude"}, {"params", {{"sketch", "{prev.sketch_index}"}, {"distance", layer_h}, {"boolean", "union"}, {"body", body}}}});
+        } else if (kind == "bed_adhesion" && rot_id) {
+            // A sacrificial pad under the footprint: a rect 3 mm wider on every side, one layer pair (0.3 mm) thick, fused to the base.
+            const json* bp = nullptr;
+            for (const json& sg : suggestions) if (sg.value("kind", std::string()) == "brim_pad") bp = &sg;
+            if (!bp || bp->value("bed_z", 0.0) < -0.05) continue;
+            const double m3 = 3.0, th = 0.3, zb = std::max(0.0, bp->value("bed_z", 0.0));
+            const double minx = jn((*bp)["min"], 0) - m3, miny = jn((*bp)["min"], 1) - m3, maxx = jn((*bp)["max"], 0) + m3, maxy = jn((*bp)["max"], 1) + m3;
+            label = "Add a 0.3 mm sacrificial brim pad (cut it away after printing)";
+            steps.push_back(json{{"method", "plane"}, {"params", {{"type", "offset"}, {"base", 0}, {"offset", zb}}}});
+            steps.push_back(json{{"method", "sketch_begin"}, {"params", {{"plane", "datum:{prev.newest_datum}"}}}});
+            steps.push_back(json{{"method", "sketch_add"}, {"params", {{"rect", json::array({minx - mo.x(), miny - mo.y(), maxx - mo.x(), maxy - mo.y()})}}}});
+            steps.push_back(json{{"method", "sketch_commit"}, {"params", json::object()}});
+            steps.push_back(json{{"method", "extrude"}, {"params", {{"sketch", "{prev.sketch_index}"}, {"distance", th}, {"boolean", "union"}, {"body", body}}}});
         } else if (kind == "fillet_from_below" && rot_id) {
             // The last disabled Fillet feature is the bed fillet: suppress it, then chamfer the bed edges at its radius.
             int fidx = -1;
