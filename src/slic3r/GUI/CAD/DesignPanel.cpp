@@ -2031,6 +2031,8 @@ DesignPanel::DesignPanel(wxWindow* parent)
     
     m_hole_through->SetValue(true);
     c_m_box_hole->row(_L("Through"), m_hole_through);
+    m_hole_teardrop = c_m_box_hole->make_check();
+    c_m_box_hole->row(_L("Teardrop (horizontal hole)"), m_hole_teardrop);
     m_hole_target_label = c_m_box_hole->make_text(_L("(none — uses Hole plane)"));
     m_hole_target_label->SetReference(false);
     c_m_box_hole->row(_L("On face"), m_hole_target_label);
@@ -5497,6 +5499,7 @@ void DesignPanel::on_add_hole()
     m_feature_counter++;
     const int hidx = m_doc.add_hole(dia, depth, through, px, py, plane,
                                     feature_name(_L("Hole")));
+    if (hidx >= 0 && hidx < int(m_doc.features.size())) m_doc.features[hidx].hole_teardrop = m_hole_teardrop->GetValue();
     // On-face holes drill the body the face belongs to (even after the pick was cleared).
     if (m_hole_on_face && hidx >= 0 && hidx < int(m_doc.features.size())) {
         m_doc.features[hidx].target_body = m_hole_face_body;
@@ -10377,6 +10380,7 @@ void DesignPanel::load_feature_into_dialog(const CadFeature& f)
         m_hole_diameter->SetValue(f.hole_diameter);
         m_hole_depth->SetValue(f.hole_depth);
         m_hole_through->SetValue(f.hole_through);
+        m_hole_teardrop->SetValue(f.hole_teardrop);
         m_hole_x->SetValue(f.hole_x);
         m_hole_y->SetValue(f.hole_y);
         // Re-latch the on-face state FROM THE STORED FEATURE (uif9). m_hole_on_face is
@@ -11180,6 +11184,7 @@ CadFeature DesignPanel::build_candidate(Tool t) const
         f.hole_diameter = m_hole_diameter->GetValue();
         f.hole_depth    = m_hole_depth->GetValue();
         f.hole_through  = m_hole_through->GetValue();
+        f.hole_teardrop = m_hole_teardrop->GetValue();
         f.hole_x        = m_hole_x->GetValue();
         f.hole_y        = m_hole_y->GetValue();
         if (m_hole_on_face) { f.target_body = m_hole_face_body; attach_to_face(f, m_hole_face_body, m_hole_face, false); }   // preview the right body

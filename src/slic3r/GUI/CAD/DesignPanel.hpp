@@ -1096,6 +1096,7 @@ private:
     NumField* m_hole_diameter{nullptr};
     NumField* m_hole_depth{nullptr};
     ToggleField*         m_hole_through{nullptr};
+    ToggleField*         m_hole_teardrop{nullptr};   // horizontal bore: pointed 45 deg top so it prints without support
     NumField* m_hole_x{nullptr};
     NumField* m_hole_y{nullptr};
     // #2: when the Hole tool is opened on a picked solid face, drill on that face centred
