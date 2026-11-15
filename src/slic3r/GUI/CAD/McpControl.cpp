@@ -3975,6 +3975,71 @@ static void build_print_pins(const json& notes, bool warnings_only, std::vector<
     }
 }
 
+// ponytail: the inscribed-circle diameter of a flat roof. A strip bridges its width whatever its length, an
+// L or a ring bridge their narrowest corridor. Rasterise on a grid, chamfer distance transform to the nearest
+// empty cell, double the largest distance = the circle diameter.
+static double inscribed_span(const std::vector<std::array<float, 6>>& xy, double x0, double y0, double x1, double y1)
+{
+    if (xy.empty()) return std::min(x1 - x0, y1 - y0);   // fall back to the bbox short side
+    const double sx = x1 - x0, sy = y1 - y0;
+    double cell = std::max(sx, sy) / 200.0;
+    if (cell < 0.05) cell = 0.05;
+    int W = int(std::ceil(sx / cell)) + 3;   // 1-cell border of empty cells each side
+    int H = int(std::ceil(sy / cell)) + 3;
+    if (W > 260) W = 260;
+    if (H > 260) H = 260;
+    std::vector<double> dist(size_t(W) * size_t(H), 0.0);   // filled start at 1e9, empty at 0
+    const double BIG = 1e9;
+    for (const auto& t : xy) {   // rasterise: mark every cell whose centre lies inside a triangle
+        const double ax = t[0], ay = t[1], bx = t[2], by = t[3], cx = t[4], cy = t[5];
+        // grid cell i covers x0 + (i - 1) * cell: index 0 is the empty border on the low side
+        const int i0 = std::max(1, int(std::floor((std::min({ax, bx, cx}) - x0) / cell)) + 1);
+        const int i1 = std::min(W - 2, int(std::ceil((std::max({ax, bx, cx}) - x0) / cell)) + 1);
+        const int j0 = std::max(1, int(std::floor((std::min({ay, by, cy}) - y0) / cell)) + 1);
+        const int j1 = std::min(H - 2, int(std::ceil((std::max({ay, by, cy}) - y0) / cell)) + 1);
+        const double v0x = bx - ax, v0y = by - ay, v1x = cx - ax, v1y = cy - ay;
+        const double denom = v0x * v1y - v0y * v1x;
+        if (denom == 0.0) continue;
+        for (int j = j0; j <= j1; ++j) {
+            const double py = y0 + (j - 0.5) * cell;
+            for (int i = i0; i <= i1; ++i) {
+                const double px = x0 + (i - 0.5) * cell;
+                const double v2x = px - ax, v2y = py - ay;
+                const double u = (v2x * v1y - v2y * v1x) / denom;
+                const double v = (v0x * v2y - v0y * v2x) / denom;
+                if (u >= -1e-9 && v >= -1e-9 && u + v <= 1.0 + 1e-9)
+                    dist[size_t(j) * size_t(W) + size_t(i)] = BIG;
+            }
+        }
+    }
+    // two-pass chamfer distance transform to the nearest empty cell (orthogonal 1, diagonal 1.4142)
+    for (int j = 0; j < H; ++j)
+        for (int i = 0; i < W; ++i) {
+            double& d = dist[size_t(j) * size_t(W) + size_t(i)];
+            if (d <= 0) continue;
+            const double up = j > 0 ? dist[size_t(j - 1) * size_t(W) + size_t(i)] + 1.0 : BIG;
+            const double lf = i > 0 ? dist[size_t(j) * size_t(W) + size_t(i - 1)] + 1.0 : BIG;
+            const double ul = (j > 0 && i > 0) ? dist[size_t(j - 1) * size_t(W) + size_t(i - 1)] + 1.4142 : BIG;
+            const double ur = (j > 0 && i < W - 1) ? dist[size_t(j - 1) * size_t(W) + size_t(i + 1)] + 1.4142 : BIG;
+            const double dl = (j < H - 1 && i > 0) ? dist[size_t(j + 1) * size_t(W) + size_t(i - 1)] + 1.4142 : BIG;
+            d = std::min(d, std::min({up, lf, ul, ur, dl}));
+        }
+    for (int j = H - 1; j >= 0; --j)
+        for (int i = W - 1; i >= 0; --i) {
+            double& d = dist[size_t(j) * size_t(W) + size_t(i)];
+            if (d <= 0) continue;
+            const double dn = j < H - 1 ? dist[size_t(j + 1) * size_t(W) + size_t(i)] + 1.0 : BIG;
+            const double rt = i < W - 1 ? dist[size_t(j) * size_t(W) + size_t(i + 1)] + 1.0 : BIG;
+            const double lr = (j < H - 1 && i < W - 1) ? dist[size_t(j + 1) * size_t(W) + size_t(i + 1)] + 1.4142 : BIG;
+            const double ll = (j < H - 1 && i > 0) ? dist[size_t(j + 1) * size_t(W) + size_t(i - 1)] + 1.4142 : BIG;
+            const double lu = (j > 0 && i < W - 1) ? dist[size_t(j - 1) * size_t(W) + size_t(i + 1)] + 1.4142 : BIG;
+            d = std::min(d, std::min({dn, rt, lr, ll, lu}));
+        }
+    double maxd = 0.0;
+    for (double v : dist) maxd = std::max(maxd, v);
+    return std::max(2.0 * maxd * cell, cell);
+}
+
 json action_analyze_printability(DesignPanel* panel, const json& params)
 {
     CadDocument& doc = panel->mcp_doc();
@@ -4001,7 +4066,7 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
     const double zmin = bb.min.z();
     const double cos_lim = std::cos((90.0 - ang) * M_PI / 180.0);   // a down-facing normal with -nz > cos_lim overhangs by more than `ang`
     double area = 0, bed = 0, over = 0;
-    struct Level { std::array<double, 13> d; std::vector<int> tris; };   // d: area, x0, y0, x1, y1, z, biggest tri area, its centroid x y z, its normal x y z
+    struct Level { std::array<double, 13> d; std::vector<int> tris; std::vector<std::array<float, 6>> xy; };   // d: area, x0, y0, x1, y1, z, biggest tri area, its centroid x y z, its normal x y z; xy: every tri's x0,y0,x1,y1,x2,y2 (uncapped, for the inscribed-circle span)
     std::map<long, Level> levels;
     size_t fi = 0;
     for (const stl_triangle_vertex_indices& f : m.its.indices) {
@@ -4024,6 +4089,7 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
         L[0] += a;
         if (a > L[6]) { L[6] = a; L[7] = (p0.x() + p1.x() + p2.x()) / 3.0; L[8] = (p0.y() + p1.y() + p2.y()) / 3.0; L[9] = zc; L[10] = n.x() / nn; L[11] = n.y() / nn; L[12] = n.z() / nn; }
         if (btris.size() < 2000) btris.push_back(int(fidx));
+        lev.xy.push_back({p0.x(), p0.y(), p1.x(), p1.y(), p2.x(), p2.y()});   // every tri, uncapped: feeds the inscribed-circle span
         for (const Vec3f* q : {&p0, &p1, &p2}) { L[1] = std::min<double>(L[1], q->x()); L[2] = std::min<double>(L[2], q->y()); L[3] = std::max<double>(L[3], q->x()); L[4] = std::max<double>(L[4], q->y()); }
     }
     std::vector<Level> top;
@@ -4046,9 +4112,11 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
         notes.push_back(std::move(j));
     };
     for (size_t i = 0; i < top.size() && i < 6; ++i) {
-        // ponytail: span = the shorter side of the level's bounding box (a strip bridges across its short side); a ring or an L
-        // over-reports. Exact spans need the face outline.
-        const double span = std::min(top[i].d[3] - top[i].d[1], top[i].d[4] - top[i].d[2]);
+        // ponytail: span = the inscribed-circle diameter of the roof (a strip bridges its width whatever its
+        // length; an L or a ring bridge their narrowest corridor). Fall back to the bbox short side if empty.
+        const double span = top[i].xy.empty()
+            ? std::min(top[i].d[3] - top[i].d[1], top[i].d[4] - top[i].d[2])
+            : inscribed_span(top[i].xy, top[i].d[1], top[i].d[2], top[i].d[3], top[i].d[4]);
         lv.push_back(json{{"z", top[i].d[5] - zmin}, {"area_mm2", top[i].d[0]}, {"min", {top[i].d[1], top[i].d[2]}}, {"max", {top[i].d[3], top[i].d[4]}},
                           {"span_mm", span}, {"too_long_to_bridge", span > bridge_max}});
         const Vec3d lvl_n = to_model_dir(Vec3d(top[i].d[10], top[i].d[11], top[i].d[12]));   // the level's biggest triangle normal, model frame
