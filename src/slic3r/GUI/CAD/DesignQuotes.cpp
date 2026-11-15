@@ -400,7 +400,7 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
                     if (ImGui::SmallButton("X")) { if (dismiss) dismiss(i); }
                     ImGui::SameLine();
                     // wrapped to the panel width: the whole note is readable without a tooltip; click focuses the pin
-                    const float text_w = std::max(40.f * em, pw - badge_w - 2.f * btn_w - 24.f * em);
+                    const float text_w = std::max(40.f * em, pw - badge_w - 2.f * btn_w - 44.f * em);
                     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + text_w);
                     ImGui::TextUnformatted(n.text.c_str());
                     ImGui::PopTextWrapPos();
