@@ -3696,16 +3696,31 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
         out["curved_overhangs"] = cur;
     }
 
-    // Tip 1: wall thickness against the extrusion line width. Rays from sampled side faces inward to the opposite surface.
+    // Tip 1: wall thickness against the extrusion line width. Rays from sampled side faces inward to the opposite surface,
+    // plus downward-facing bore-roof faces: a horizontal bore under a flat top leaves a thin lid over the bore
+    // that side-face rays miss (their normals are near-vertical).
     {
         AABBMesh am(m);
-        size_t side = 0;
+        const double zmin = m.bounding_box().min.z();
+        auto is_roof = [&](const Vec3d& p0, const Vec3d& p1, const Vec3d& p2) {
+            // a downward-facing (bore-roof) face off the bed: the roof arc of a horizontal bore
+            const Vec3d n = (p1 - p0).cross(p2 - p0);
+            const double nn = n.norm();
+            if (nn < 1e-9) return false;
+            const double nz_n = n.z() / nn;
+            const Vec3d c = (p0 + p1 + p2) / 3.0;
+            return nz_n < -0.3 && !(c.z() - zmin < 0.05 && -nz_n > 0.99);
+        };
+        size_t side = 0, roof = 0;
         for (const stl_triangle_vertex_indices& f : F) {
             const Vec3d p0 = V[f(0)].cast<double>(), p1 = V[f(1)].cast<double>(), p2 = V[f(2)].cast<double>();
             const Vec3d n = (p1 - p0).cross(p2 - p0);
-            if (n.norm() > 1e-9 && std::abs(n.z()) / n.norm() < 0.3) ++side;
+            const double nn = n.norm();
+            if (nn < 1e-9 || 0.5 * nn < 0.2) continue;
+            if (std::abs(n.z()) / nn < 0.3) ++side;
+            else if (is_roof(p0, p1, p2)) ++roof;
         }
-        const size_t stride = std::max<size_t>(1, side / 1200);
+        const size_t stride = std::max<size_t>(1, (side + roof) / 1200);
         size_t seen = 0, used = 0, thin = 0, off = 0;
         double tmin = 1e30;
         Vec3d  tat = Vec3d::Zero();   // where the thinnest wall was measured
@@ -3713,9 +3728,12 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
             const Vec3d p0 = V[f(0)].cast<double>(), p1 = V[f(1)].cast<double>(), p2 = V[f(2)].cast<double>();
             const Vec3d n = (p1 - p0).cross(p2 - p0);
             const double nn = n.norm();
-            if (nn < 1e-9 || 0.5 * nn < 0.2 || std::abs(n.z()) / nn >= 0.3) continue;
+            if (nn < 1e-9 || 0.5 * nn < 0.2) continue;
+            const double nz_n = n.z() / nn;
+            if (std::abs(nz_n) >= 0.3 && !is_roof(p0, p1, p2)) continue;
             if (seen++ % stride) continue;
             const Vec3d nu = n / nn, c = (p0 + p1 + p2) / 3.0;
+            // same query as side faces: offset slightly along the inward normal, cast the opposite way to the far surface
             const AABBMesh::hit_result h = am.query_ray_hit(c - nu * 0.02, -nu);
             if (!h.is_hit()) continue;
             const double t = h.distance() + 0.02;
