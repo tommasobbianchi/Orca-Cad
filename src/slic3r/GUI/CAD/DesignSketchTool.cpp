@@ -105,6 +105,19 @@ static double ray_axis_proj(const Linef3& ray, const Vec3d& anchor, const Vec3d&
 // ribbons, labels, pick tolerances) is "N px" times this. It used to be 1 / camera.get_zoom(), which is only right for an orthographic camera
 // or a perspective one that zooms by its frustum: where zooming moves the camera, get_zoom() stays put, so those sizes stayed fixed in world
 // units and grew with every zoom-in. Measured over a 100-unit baseline so the pixel rounding does not matter.
+// World units per pixel across the view at depth `at`: right for body edges, whose depth is the body's, not the sketch plane's.
+double DesignSketchTool::px_unit_at(const Camera& cam, const Vec3d& at) const
+{
+    const Eigen::Matrix4d m = cam.get_projection_matrix().matrix() * cam.get_view_matrix().matrix();
+    const std::array<int, 4>& vp = cam.get_viewport();
+    constexpr double base = 100.0;
+    const Vec3d r = cam.get_dir_right();
+    const Eigen::Vector4d ca = m * at.homogeneous(), cb = m * (at + r * base).homogeneous();
+    if (ca.w() < 1e-9 || cb.w() < 1e-9) return px_unit(cam);
+    const double px = std::abs(cb.x() / cb.w() - ca.x() / ca.w()) * 0.5 * vp[2];
+    return px > 1e-6 ? base / px : px_unit(cam);
+}
+
 double DesignSketchTool::px_unit(const Camera& cam) const
 {
     const Eigen::Matrix4d m = cam.get_projection_matrix().matrix() * cam.get_view_matrix().matrix();
@@ -3920,6 +3933,31 @@ std::vector<SketchEntity> DesignSketchTool::make_rounded_rect(const Vec2d& a, co
     return rounded_rect_entities(xmin, ymin, xmax, ymax, r);
 }
 
+std::vector<SketchEntity> DesignSketchTool::make_polygon_edge(const Vec2d& a, const Vec2d& b, int sides, Vec2d& center) const
+{
+    std::vector<SketchEntity> out;
+    if (sides < 3) sides = 3;
+    const Vec2d ab = b - a;
+    const double s = ab.norm();
+    if (s < 1e-6) return out;
+    // Side s, n sides: apothem = s / (2 tan(pi/n)). The centre sits that far from the side's midpoint, on its left.
+    const double apothem = s / (2.0 * std::tan(M_PI / double(sides)));
+    center = 0.5 * (a + b) + Vec2d(-ab.y(), ab.x()) / s * apothem;
+    const double a0 = std::atan2(a.y() - center.y(), a.x() - center.x()), R = (a - center).norm();
+    std::vector<Vec2d> verts;
+    for (int i = 0; i < sides; ++i) {
+        const double t = a0 + 2.0 * M_PI * double(i) / double(sides);   // counter-clockwise from a, so the next vertex is b
+        verts.push_back(Vec2d(center.x() + R * std::cos(t), center.y() + R * std::sin(t)));
+    }
+    for (int i = 0; i < sides; ++i) {
+        SketchEntity e; e.type = SketchEntity::Type::Line;
+        e.p0 = verts[i]; e.p1 = verts[(i + 1) % sides];
+        e.construction = m_construction;
+        out.push_back(e);
+    }
+    return out;
+}
+
 std::vector<SketchEntity> DesignSketchTool::make_polygon(const Vec2d& center, const Vec2d& vertex, int sides) const
 {
     std::vector<SketchEntity> out;
@@ -4371,9 +4409,9 @@ void DesignSketchTool::render_body_edges()
 {
     if (m_body_edges_hidden || m_solid_bodies == nullptr)
         return;
-    const Camera& cam = wxGetApp().plater()->get_camera();
+    Camera& cam = wxGetApp().plater()->get_camera();
     const Vec3d vd = cam.get_dir_forward();
-    const double px = px_unit(cam);
+    const double px = px_unit_at(cam, cam.get_target());   // the body's depth, not the sketch plane's
     const double hw = 1.0 * px;      // ~2 px wide: at 1.5 the lines read as hairlines
     const Vec3d pull = -vd * (3.0 * px);
     // Two passes: the edges of a body faded by body focus are fainter, like the body itself.
@@ -5279,7 +5317,7 @@ void DesignSketchTool::render_view_helpers()
             fill.add_vertex((Vec3f)c[3].cast<float>()); fill.add_triangle(fb, fb+1, fb+2); fb += 3;
         }
         if (fb > 0) { GLModel fm; fm.init_from(std::move(fill));
-            fm.set_color(ColorRGBA(0.61f, 0.74f, 0.82f, 0.30f)); fm.render(); }   // xShape plane: light blue, alpha 0.3
+            fm.set_color(ColorRGBA(0.61f, 0.74f, 0.82f, 0.12f)); fm.render(); }   // xShape plane: light blue, faint so the body shows through
     }
 
     if (m_show_axes) {
@@ -5393,7 +5431,7 @@ void DesignSketchTool::render_sketch_plane_frame()
     glsafe(::glEnable(GL_BLEND));
     glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
     GLModel fm; fm.init_from(std::move(fill));
-    fm.set_color(ColorRGBA(0.61f, 0.74f, 0.82f, 0.30f));   // xShape plane
+    fm.set_color(ColorRGBA(0.61f, 0.74f, 0.82f, 0.12f));   // xShape plane, faint
     fm.render();
     if (bb > 0) {
         GLModel bm; bm.init_from(std::move(border));
@@ -5450,7 +5488,7 @@ void DesignSketchTool::render_datum_planes()
     glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
     if (fb > 0) {
         GLModel fm; fm.init_from(std::move(fill));
-        fm.set_color(ColorRGBA(0.61f, 0.74f, 0.82f, 0.30f));   // xShape plane fill
+        fm.set_color(ColorRGBA(0.61f, 0.74f, 0.82f, 0.12f));   // xShape plane fill
         fm.render();
     }
     if (bb > 0) {
@@ -6736,7 +6774,7 @@ void DesignSketchTool::render_base_pick()
     // selection colour would match one of the three.
     auto fill = [&](size_t i) {
         ColorRGBA c = look(i) == Look::Hover ? ColorRGBA(0.80f, 0.80f, 0.80f, 1.0f) : hue(i);
-        c.a(look(i) == Look::Selected ? 0.85f : look(i) == Look::Hover ? 0.45f : 0.30f);   // xDesign plane alpha 0.3
+        c.a(look(i) == Look::Selected ? 0.45f : look(i) == Look::Hover ? 0.25f : 0.12f);   // faint: stacked planes must not hide the body
         return c;
     };
     auto ink = [&](size_t i) {
@@ -11558,8 +11596,11 @@ void DesignSketchTool::render(GLCanvas3D& canvas)
 
     case Mode::Polygon: {
         draw_vertices(m_vertex_model, m_points, yellow);
-        if (m_points.size() == 1 && m_has_cursor)
-            draw_entities_preview(make_polygon(m_points[0], m_cursor, m_polygon_sides), preview);
+        if (m_points.size() == 1 && m_has_cursor) {
+            Vec2d c;
+            draw_entities_preview(m_polygon_edge ? make_polygon_edge(m_points[0], m_cursor, m_polygon_sides, c)
+                                                 : make_polygon(m_points[0], m_cursor, m_polygon_sides), preview);
+        }
         break;
     }
 
@@ -13847,9 +13888,11 @@ bool DesignSketchTool::on_mouse_impl(wxMouseEvent& evt, GLCanvas3D& canvas)
             } else {
                 const int base = int(m_entities.size());
                 begin_feature(FeatureKind::Polygon);
-                append_entities(make_polygon(m_points[0], p, m_polygon_sides));
+                Vec2d c0 = m_points[0], c1 = p;   // a feature is stored as centre + first vertex, which is what edit/reload read back
+                if (m_polygon_edge) { append_entities(make_polygon_edge(m_points[0], p, m_polygon_sides, c0)); c1 = m_points[0]; }
+                else                  append_entities(make_polygon(m_points[0], p, m_polygon_sides));
                 infer_auto_constraints(base);
-                end_feature(m_points[0], p, (p - m_points[0]).norm(), m_polygon_sides);
+                end_feature(c0, c1, (c1 - c0).norm(), m_polygon_sides);
                 m_points.clear();
             }
             return true;

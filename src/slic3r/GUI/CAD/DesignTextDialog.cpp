@@ -61,6 +61,20 @@ static bool parse_mm(wxString t, double& out)
     return t.Trim(true).Trim(false).ToCDouble(&out) && out >= 0.5 && out <= 500.0;
 }
 
+ImportRegions vectorise_text(const std::string& text, const std::string& font_desc, double height)
+{
+    if (text.empty() || !(height > 0.0)) return {};
+    wxFont font = wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT);
+    if (!font_desc.empty()) {
+        wxFont f = WxFontUtils::load_wxFont(font_desc);
+        if (f.IsOk()) font = f;
+    }
+    if (!WxFontUtils::can_load(font)) return {};
+    std::shared_ptr<const Emboss::FontFile> file = WxFontUtils::create_font_file(font);
+    if (!file) return {};
+    return text_to_regions(text, height, file);
+}
+
 DesignTextDialog::DesignTextDialog(wxWindow* parent, const Spec* initial)
     : DPIDialog(parent, wxID_ANY, _L("Text"), wxDefaultPosition, wxDefaultSize, wxCAPTION | wxCLOSE_BOX)
 {
@@ -231,7 +245,7 @@ void DesignTextDialog::update_preview()
     const std::string utf8(text().ToUTF8().data());
     m_regions.clear();
     if (m_font_file && !utf8.empty())
-        m_regions = text_to_regions(utf8, height_mm(), m_font_file);
+        m_regions = vectorise_text(utf8, WxFontUtils::store_wxFont(current_font()), height_mm());
 
     wxString line;
     if (!m_font_file)

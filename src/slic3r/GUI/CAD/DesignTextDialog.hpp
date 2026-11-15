@@ -75,6 +75,12 @@ private:
     ImportRegions                           m_regions;
 };
 
+// Vectorise UTF-8 text into sketch regions (mm, centred on the origin) from a WxFontUtils font
+// descriptor ("" = the default GUI font, as the dialog starts with) at `height` mm cap height.
+// Shared by the Text dialog's live preview and the headless MCP `add_text` verb, so both draw
+// exactly the same glyphs. Returns empty on empty text, a missing/unloadable font, or no outline.
+ImportRegions vectorise_text(const std::string& text, const std::string& font_desc, double height);
+
 } // namespace GUI
 } // namespace Slic3r
 

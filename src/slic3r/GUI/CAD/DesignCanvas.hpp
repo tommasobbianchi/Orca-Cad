@@ -24,6 +24,9 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/CAD/SketchEngine.hpp"
 #include "slic3r/GUI/CAD/DesignSketchTool.hpp"
+#include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/AABBMesh.hpp"
+#include <chrono>
 
 class wxActivateEvent;
 class wxEvent;
@@ -95,6 +98,19 @@ public:
     DesignRibbonOverlay& ribbon_overlay() { return m_ribbon; }
     // The body's dimensions drawn over the viewport (the Dimensions verb); the panel supplies the quotes and what a click on one does.
     DesignQuoteOverlay& quote_overlay() { return m_quotes; }
+    // The print check's issues, pinned on the part (replaces the previous set; empty clears them).
+    // `body_mesh` is the checked body's display mesh (model frame): it feeds the hidden-pin occlusion
+    // ray cast and the red-tint triangle fill. It is copied; the doc may rebuild its meshes later.
+    void set_print_notes(std::vector<PrintNote> n, const TriangleMesh* body_mesh = nullptr);
+    const std::vector<PrintNote>& print_notes() const { return m_print_note_list; }
+    // The "Print check" toggle: when off, no pins, tint or side list are drawn and no analysis runs.
+    bool print_check_on() const { return m_print_check_on; }
+    void set_print_check_on(bool on);
+    std::function<void()>  on_print_check_toggle;   // the toggle turned the check ON: a fresh analysis is wanted
+    std::function<void(int)> on_print_fix_requested; // a Fix row was clicked in the Print check panel
+    void set_print_note_state(int i, bool open, bool resolved);   // a side-list row's resolve/dismiss
+    void set_print_focus(int i);                                  // ring the pin ~2 s (camera does not move)
+    std::function<void()> on_print_notes_changed;
     bool quotes_on() const { return m_quotes_on; }
     void set_quotes_on(bool on) { m_quotes_on = on; request_repaint(); }
     DesignPalette&       palette() { return m_palette; }
@@ -134,6 +150,7 @@ public:
     bool add_sketch_regions(const std::vector<std::vector<std::vector<Vec2d>>>& regions);
     void set_sketch_polygon_sides(int n);
     void set_sketch_polygon_circumscribed(bool c);
+    void set_sketch_polygon_edge(bool e);
     void finish_sketch();
     bool is_sketching() const;
     void refresh_bed();   // re-sync the bed to the current printer (call on tab activation)
@@ -482,6 +499,7 @@ private:
     // Design is up, this canvas's view while it is not. Seeded in the constructor so the first
     // entry inherits the view the user was already looking at.
     Camera      m_parked_camera;
+    bool        m_view_carried{false};     // after the first visit the camera follows the user between Design and Prepare
     bool        m_camera_swapped{false};   // guards a leave without an enter, and the reverse
     Model       m_model;
     int         m_hl_body_target{-1};
@@ -510,6 +528,13 @@ private:
     DesignRibbonOverlay m_ribbon;
     DesignTopBar        m_topbar;
     DesignQuoteOverlay  m_quotes;
+    DesignPrintNotesOverlay m_print_notes;
+    std::vector<PrintNote>  m_print_note_list;
+    TriangleMesh            m_print_mesh;                  // a copy of the checked body's display mesh
+    std::unique_ptr<AABBMesh> m_print_aabb;               // for the occlusion ray cast
+    int                     m_print_focus{-1};
+    std::chrono::steady_clock::time_point m_print_focus_at;
+    bool                    m_print_check_on{true};        // the "Print check" toggle (persisted in AppConfig)
     bool                m_quotes_on{false};
     DesignSidebarOverlay m_sidebar;
     bool                m_sidebar_on{false};

@@ -1,5 +1,6 @@
 #include "slic3r/GUI/CAD/McpControl.hpp"
 #include "libslic3r/Point.hpp"
+#include <Eigen/Eigenvalues>   // SelfAdjointEigenSolver for the curve_axis (tip 16) normal covariance
 #include <functional>
 #include <stdexcept>
 #include <math.h>
@@ -69,12 +70,15 @@
 #include "slic3r/GUI/CAD/DesignCanvas.hpp"
 #include "slic3r/GUI/CAD/DesignSketchTool.hpp"
 #include "slic3r/GUI/CAD/DesignOffer.hpp"   // offer table — served whole by list_verbs, fired by run_verb
+#include "slic3r/GUI/CAD/DesignTextDialog.hpp"   // vectorise_text — the headless Text tool's shared vectorisation
 
 #include "libslic3r/CAD/CadDocument.hpp"
 #include "libslic3r/CAD/SketchEngine.hpp"
 #include "libslic3r/CAD/GeometryEngine.hpp"
 #include "libslic3r/CAD/SketchSolver.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/AABBMesh.hpp"
+#include <functional>
 #include "libslic3r/Format/OBJ.hpp"
 #include <boost/algorithm/string/case_conv.hpp>
 #include <boost/filesystem/path.hpp>
@@ -318,6 +322,9 @@ json describe_tools_core()
                      json{{"name", "diameter"}, {"type", "number"}, {"unit", "mm"}, {"default", 5}, {"min", 0.01}},
                      json{{"name", "depth"},    {"type", "number"}, {"unit", "mm"}, {"default", 10}, {"min", 0.01}},
                      json{{"name", "through"},  {"type", "boolean"}, {"default", false}},
+                     json{{"name", "teardrop"}, {"type", "boolean"}, {"default", false}, {"description", "pointed 45 deg top for a bore lying horizontal on the bed (prints without support); ignored when the axis is near-vertical"}},
+                     json{{"name", "layer_h"}, {"type", "number"}, {"unit", "mm"}, {"default", 0.2}, {"description", "print layer height the teardrop flat top is snapped UP to (its Z sits on a layer boundary, at least one layer above the circle); the flat may come out narrower than asked"}},
+                     json{{"name", "teardrop_flat"}, {"type", "number"}, {"unit", "mm"}, {"default", 0}, {"description", "teardrop with a flat top of this width instead of a sharp point (0 = pointed). The 45 deg sides stay tangent to the circle; the width is capped at 0.8 x the radius"}},
                      json{{"name", "x"},        {"type", "number"}, {"unit", "mm"}, {"default", 0}, {"description", "in the sketch plane's frame (origin = describe_scene.modeling_origin), NOT world"}},
                      json{{"name", "y"},        {"type", "number"}, {"unit", "mm"}, {"default", 0}, {"description", "in the sketch plane's frame (origin = describe_scene.modeling_origin), NOT world"}},
                      json{{"name", "plane"},    {"type", "string"}, {"enum", json::array({"XY", "XZ", "YZ"})}, {"default", "XY"}},
@@ -338,6 +345,8 @@ json describe_tools_core()
                      json{{"name", "csink_diameter"},  {"type", "number"}, {"unit", "mm"}, {"default", 0}},
                      json{{"name", "csink_angle"},     {"type", "number"}, {"unit", "deg"}, {"default", 90}},
                      json{{"name", "standard"},        {"type", "string"}, {"default", ""}, {"description", "provenance designation, e.g. M6"}},
+                     json{{"name", "bridge_layer_h"},  {"type", "number"}, {"unit", "mm"}, {"default", 0}, {"description", "counterbore only: >0 leaves two crossed sacrificial strips of this thickness (0.4 typical) under the ledge so a counterbore printed ledge-down bridges without support; marked in, drill the small bore through after printing"}},
+                     json{{"name", "teardrop"},        {"type", "boolean"}, {"default", false}, {"description", "pointed 45 deg top for a horizontal bore"}},
                  })}},
             json{{"name", "hole_standard"}, {"summary", "Drill a standard clearance hole (ISO 273 / ANSI) at (x,y) on a plane. style: 0=simple, 1=counterbore, 2=countersink."},
                  {"params", json::array({
@@ -716,7 +725,8 @@ json describe_tools()
         compact_tool("job_status", "Any tool call with async:true in its params answers at once with a job id and runs in the background; this returns {state: running|done, elapsed_s, reply}. Answered even while the app is busy with the job.", {{"job", "string", "job id from the async call"}}),
         compact_tool("name_dimension", "Name a sketch dimension (index from sketch_dimensions); set_feature_expr then takes field \"dim:<name>\". name \"\" removes it. Names are positions: deleting a constraint from the sketch shifts the ones after it.", {{"sketch", "integer", "Sketch feature index"}, {"index", "integer", "dimension index"}, {"name", "string", "letters, digits, _"}}),
         compact_tool("min_distance", "Shortest distance between two bodies and the closest points; b can be tried at a hypothetical offset (move_b) without changing anything.", {{"a", "integer", "body index or name"}, {"b", "integer", "body index or name"}, {"move_b", "array", "[dx,dy,dz] mm"}}),
-        compact_tool("analyze_printability", "Overhang area and levels (a flat pocket ceiling shows as one level), bed contact, height and disconnected solids of a body in a print orientation. rotate [rx,ry,rz] deg; the body rests on its lowest point.", {{"body", "integer", "body index or name"}, {"rotate", "array", "[rx,ry,rz] deg"}, {"overhang_angle", "number", "deg from vertical, default 45"}}),
+        compact_tool("analyze_printability", "Overhang area and levels (a flat pocket ceiling shows as one level), bed contact, height and disconnected solids of a body in a print orientation. rotate [rx,ry,rz] deg; the body rests on its lowest point.", {{"body", "integer", "body index or name"}, {"rotate", "array", "[rx,ry,rz] deg"}, {"overhang_angle", "number", "deg from vertical, default 45"}, {"bridge_max", "number", "mm a flat roof may span before a warning, default 20"}, {"layer_h", "number", "mm, layer height used in the suggestions, default 0.4"}, {"line_width", "number", "mm, extrusion line width for the wall check, default 0.4"}, {"clearance", "number", "mm, minimum gap between fitted bodies, default 0.3"}}),
+        compact_tool("apply_print_fix", "Apply the automatic fix of a Print check note: analyse `body` (rotate identity), pick the first note of `kind` (or `index`) that has a fix, run it through the verb dispatcher and return {ok, applied_label, steps, remaining}. Refuses when the note has no fix.", {{"body", "integer", "body index or name"}, {"kind", "string", "note kind (vertical_edge, base_corner, warp_risk, tight_pair, ...)"}, {"index", "integer", "note index in the analysis' notes instead of kind"}}),
         compact_tool("rename_body", "Give a body a name. Verbs that take `body` then accept the name as well as the index (extrude, hole, pattern, fillet, boolean...).", {{"body", "integer", "body index"}, {"name", "string", "unique name"}}),
         compact_tool("set_body_visible", "Show or hide a body in the viewport (the eye in the Bodies list). Display only.", {{"body", "integer", "body id"}, {"visible", "boolean", "default true"}}),
         compact_tool("isolate_body", "Hide every body but this one; with no body (or show_all:true) show them all again.", {{"body", "integer", "body id"}, {"show_all", "boolean", ""}}),
@@ -748,6 +758,13 @@ json describe_tools()
         compact_tool("extrude_rect", "A centred rectangle extruded in ONE command: constrained sketch + sizes bound to expressions + extrude (all editable features). Use bind {distance: expr} and as for the extrude.",
                      {{"plane", "string", "XY|XZ|YZ|datum:N, default XY"}, {"width", "number", "mm, X"}, {"height", "number", "mm, Y"}, {"distance", "number", "extrude depth, > 0"}, {"boolean", "string", "new|union|subtract|intersect"},
                       {"width_expr", "string", "expression bound to the width (and half of it to the centring)"}, {"height_expr", "string", "same for the height"}, {"sketch_as", "string", "name of the sketch feature"}}),
+        compact_tool("add_text", "The headless Text tool: create a Text sketch feature — the same thing the GUI Text dialog makes — with no dialog, optionally extruded. Stops at the Text feature when extrude_distance is absent.",
+                     {{"text", "string", "the text, <= 200 chars"}, {"height", "number", "cap height mm, default 6"},
+                      {"font", "string", "optional WxFontUtils descriptor; default = what the dialog uses"},
+                      {"plane", "string", "XY|XZ|YZ|datum:N, default XY"}, {"face", "integer", "instead of plane: planar face id (query_topology)"},
+                      {"body", "integer", "body of the face / target of a boolean"}, {"x", "number", "centre offset in the plane, default 0"}, {"y", "number", "centre offset, default 0"},
+                      {"extrude_distance", "number", "chained extrude depth, > 0"}, {"boolean", "string", "new|union|subtract, default union"},
+                      {"end", "string", "blind|two_sided, default blind"}, {"distance2", "number", "second-side depth when two_sided"}}),
         compact_tool("push_pull", "Move a planar face along its normal: + grows the body, - cuts into it.",
                      {{"face", "integer", "face id from query_topology"}, {"body", "integer", "owner body (default last)"}, {"distance", "number", "mm, signed"}}),
         compact_tool("sketch_op", "On the open sketch: trim / extend (at), fillet (a, b, radius) / chamfer (a, b, distance) a corner of two lines, linear_pattern (entities, count, step) / circular_pattern (entities, count, center, angle).",
@@ -1582,7 +1599,7 @@ json action_hole(DesignPanel* panel, const json& params)
     int h = -1;
     const double tip = params.value("tip_angle", 0.0);
     if (tip < 0 || tip >= 180) throw std::runtime_error("tip_angle must be in [0, 180)");
-    for (const auto& p : pts) { h = doc.add_hole(dia, depth, thru, p.first, p.second, pl, "Hole"); doc.features[size_t(h)].hole_tip_angle = tip; attach_to_face(doc.features[size_t(h)], params, doc); if (target >= 0) doc.features[size_t(h)].target_body = target; }
+    for (const auto& p : pts) { h = doc.add_hole(dia, depth, thru, p.first, p.second, pl, "Hole"); doc.features[size_t(h)].hole_tip_angle = tip; doc.features[size_t(h)].hole_teardrop = params.value("teardrop", false); doc.features[size_t(h)].hole_teardrop_flat = params.value("teardrop_flat", 0.0); doc.features[size_t(h)].hole_layer_h = params.value("layer_h", 0.2); attach_to_face(doc.features[size_t(h)], params, doc); if (target >= 0) doc.features[size_t(h)].target_body = target; }
     bool ok = doc.recompute();
     if (!ok) { const std::string why = doc.error; doc.undo(); doc.error = why; }
     panel->mcp_after_change();
@@ -1623,6 +1640,8 @@ json action_hole_styled(DesignPanel* panel, const json& params)
                                 cbore_diameter, cbore_depth,
                                 csink_diameter, csink_angle, standard, "Hole");
         doc.features[size_t(h)].hole_tip_angle = tip;
+        doc.features[size_t(h)].hole_bridge_layer_h = params.value("bridge_layer_h", 0.0);
+        doc.features[size_t(h)].hole_teardrop = params.value("teardrop", false);
         attach_to_face(doc.features[size_t(h)], params, doc);
     }
     bool ok = doc.recompute();
@@ -3375,7 +3394,8 @@ json action_ui_option(DesignPanel* panel, const json& params)
     if (name == "imgui_ribbon") { panel->mcp_set_imgui_ribbon(on); return json{{"ok", true}, {"imgui_ribbon", on}}; }
     if (name == "imgui_menu")   { panel->mcp_set_imgui_menu(on);   return json{{"ok", true}, {"imgui_menu", on}}; }
     if (name == "imgui_topbar") { panel->mcp_set_imgui_topbar(on); return json{{"ok", true}, {"imgui_topbar", on}}; }
-    throw std::runtime_error("unknown ui option: " + name + " (imgui_tree, imgui_ribbon, imgui_menu, imgui_topbar)");
+    if (name == "print_check")  { if (DesignCanvas* vp = panel->mcp_viewport()) vp->set_print_check_on(on); return json{{"ok", true}, {"print_check", on}}; }
+    throw std::runtime_error("unknown ui option: " + name + " (imgui_tree, imgui_ribbon, imgui_menu, imgui_topbar, print_check)");
 }
 
 json action_plane(DesignPanel* panel, const json& params)
@@ -3418,7 +3438,9 @@ json action_plane(DesignPanel* panel, const json& params)
     }
     doc.recompute();   // datum-only docs yield no body; that is expected
     panel->mcp_after_change();
-    return json{{"ok", idx >= 0}, {"plane_index", idx}, {"datum_planes", int(doc.resolve_datum_planes().size())}};
+    const int datums = int(doc.resolve_datum_planes().size());
+    return json{{"ok", idx >= 0}, {"plane_index", idx}, {"datum_planes", datums},
+                {"newest_datum", datums - 1}};   // the ordinal sketch_begin's datum:N wants
 }
 
 json action_axis(DesignPanel* panel, const json& params)
@@ -3595,6 +3617,951 @@ json action_check_interference(DesignPanel* panel, const json& params)
 // {body, rotate?:[rx,ry,rz deg], overhang_angle?:45}: what a printer would meet with the body in that orientation, resting on
 // its lowest point. Down-facing triangles steeper than the angle from vertical are overhangs; they are grouped by height so a
 // flat pocket ceiling shows as one level with its area. Thin walls are not measured here.
+// The extra DfAM checks on the print-oriented mesh `m` (sheet tips 1, 6, 8, 25). They append to suggestions / warnings and return the numbers.
+json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double line_width, double clearance, double bore_r, json& suggestions, json& warnings, json& notes, const Matrix3d& rot, const Vec3d& rot_c)
+{
+    json out = json::object();
+    const auto& V = m.its.vertices;
+    const auto& F = m.its.indices;
+    const double cos_lim = std::cos((90.0 - ang) * M_PI / 180.0);
+    auto add_note = [&](const char* kind, const char* severity, const std::string& text, const Vec3d& at_print, const Vec3d& n_model, const std::vector<int>& tris) {
+        const Vec3d at = rot_c + rot.transpose() * (at_print - rot_c);   // back to the model frame the viewport draws in
+        json j = json{{"kind", kind}, {"severity", severity}, {"text", text}, {"at", {at.x(), at.y(), at.z()}}};
+        if (!n_model.isZero()) j["normal"] = json::array({n_model.x(), n_model.y(), n_model.z()});
+        if (!tris.empty()) j["tris"] = json(tris);
+        notes.push_back(std::move(j));
+    };
+    auto to_model_dir = [&](const Vec3d& d) { return rot.transpose() * d; };   // a direction: rotate by, no translation
+    auto num = [](double v) { std::ostringstream os; os.imbue(std::locale::classic()); os.precision(3); os << v; return os.str(); };
+
+    // Tip 25: print orientation. The six axis-aligned ways up, ranked by overhang area (bed contact breaks ties).
+    struct Ori { Vec3d up; double over, bed, h; };
+    std::vector<Ori> os;
+    for (const Vec3d& u : {Vec3d(0, 0, 1), Vec3d(0, 0, -1), Vec3d(1, 0, 0), Vec3d(-1, 0, 0), Vec3d(0, 1, 0), Vec3d(0, -1, 0)}) {
+        double lo = 1e30, hi = -1e30;
+        for (const Vec3f& v : V) { const double h = v.cast<double>().dot(u); lo = std::min(lo, h); hi = std::max(hi, h); }
+        double over = 0, bed = 0;
+        for (const stl_triangle_vertex_indices& f : F) {
+            const Vec3d p0 = V[f(0)].cast<double>(), p1 = V[f(1)].cast<double>(), p2 = V[f(2)].cast<double>();
+            const Vec3d n = (p1 - p0).cross(p2 - p0);
+            const double nn = n.norm();
+            if (nn < 1e-12) continue;
+            const double nu = n.dot(u) / nn;
+            if (nu >= -1e-9) continue;
+            const double hc = ((p0 + p1 + p2) / 3.0).dot(u);
+            if (hc - lo < 0.05 && -nu > 0.99) { bed += 0.5 * nn; continue; }
+            if (-nu > cos_lim) over += 0.5 * nn;
+        }
+        os.push_back({u, over, bed, hi - lo});
+    }
+    size_t best = 0;
+    for (size_t i = 1; i < os.size(); ++i)
+        if (os[i].over < os[best].over - 1e-6 || (std::abs(os[i].over - os[best].over) < 1e-6 && os[i].bed > os[best].bed)) best = i;
+    json ors = json::array();
+    for (const Ori& o : os) ors.push_back(json{{"up", {o.up.x(), o.up.y(), o.up.z()}}, {"overhang_mm2", o.over}, {"bed_contact_mm2", o.bed}, {"height_mm", o.h}});
+    out["orientations"] = ors;
+    if (best != 0 && os[best].over < 0.7 * os[0].over - 1.0) {
+        const std::string why = "printing with this model direction up cuts the overhang from " + num(os[0].over) + " to " + num(os[best].over) + " mm2";
+        suggestions.push_back(json{{"kind", "orientation"}, {"turn_up_to", {os[best].up.x(), os[best].up.y(), os[best].up.z()}}, {"overhang_mm2", os[best].over}, {"overhang_now_mm2", os[0].over},
+                                   {"why", why}});
+        notes.push_back(json{{"kind", "orientation"}, {"severity", "suggestion"}, {"text", why}, {"at", nullptr}});   // global: no pin, no normal
+    }
+
+    // Tip 19/20: warping / mouse ears. A large flat first layer with sharp corners lifts at
+    // the corners; round them (R >= 3 mm) or add mouse ears (disc 10 mm, 0.3 mm thick).
+    // ponytail: hard thresholds for the heuristic; tune here if a real part mis-fires.
+    constexpr double kWarpSpanMM = 50.0;        // max footprint span below which corners won't lift
+    constexpr double kWarpAreaMM2 = 600.0;      // bed contact below which the risk is moot
+    constexpr double kWarpSharpDeg = 120.0;     // hull corner below this counts as sharp
+    {
+        const double zmin = m.bounding_box().min.z();
+        std::vector<Vec2d> pts;                 // bed footprint (x,y) in the print frame
+        std::vector<int> bed_tris;
+        double bed_area = 0.0;
+        for (size_t i = 0; i < F.size(); ++i) {
+            const stl_triangle_vertex_indices& f = F[i];
+            const Vec3d p0 = V[f(0)].cast<double>(), p1 = V[f(1)].cast<double>(), p2 = V[f(2)].cast<double>();
+            const Vec3d n = (p1 - p0).cross(p2 - p0);
+            const double nn = n.norm();
+            if (nn < 1e-12 || n.z() / nn > -0.99) continue;        // not facing the bed
+            const Vec3d c = (p0 + p1 + p2) / 3.0;                  // same bed test the orientation block uses
+            if (c.z() - zmin >= 0.05) continue;
+            bed_area += 0.5 * nn;
+            pts.emplace_back(p0.x(), p0.y()); pts.emplace_back(p1.x(), p1.y()); pts.emplace_back(p2.x(), p2.y());
+            if (bed_tris.size() < 2000) bed_tris.push_back(int(i));
+        }
+        if (!pts.empty()) {
+            double dx = 0, dy = 0;   // footprint bbox
+            {
+                double x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30;
+                for (const Vec2d& p : pts) {
+                    x0 = std::min(x0, p.x()); y0 = std::min(y0, p.y());
+                    x1 = std::max(x1, p.x()); y1 = std::max(y1, p.y());
+                }
+                dx = x1 - x0; dy = y1 - y0;
+            }
+            // Convex hull of the bed footprint (monotone chain).
+            std::vector<Vec2d> hull;
+            if (pts.size() >= 3) {
+                auto cross2 = [](const Vec2d& o, const Vec2d& a, const Vec2d& b) {
+                    return (a.x() - o.x()) * (b.y() - o.y()) - (a.y() - o.y()) * (b.x() - o.x()); };
+                std::sort(pts.begin(), pts.end(), [](const Vec2d& a, const Vec2d& b) {
+                    return a.x() < b.x() || (a.x() == b.x() && a.y() < b.y()); });
+                std::vector<Vec2d> h;
+                h.reserve(pts.size());
+                for (size_t j = 0; j < pts.size(); ++j) {
+                    while (h.size() >= 2 && cross2(h[h.size() - 2], h.back(), pts[j]) <= 0) h.pop_back();
+                    h.push_back(pts[j]);
+                }
+                const size_t lower = h.size() + 1;
+                for (size_t j = pts.size(); j-- > 0;) {
+                    while (h.size() >= lower && cross2(h[h.size() - 2], h.back(), pts[j]) <= 0) h.pop_back();
+                    h.push_back(pts[j]);
+                }
+                h.pop_back();
+                hull.swap(h);
+            }
+            // Interior angle at each hull vertex; a sharp corner can lift and warp.
+            std::vector<Vec3d> sharp_pts;                         // print-frame (x, y, zmin) of every sharp corner
+            size_t worst = 0; double worst_ang = 1e9;
+            if (hull.size() >= 3) {
+                for (size_t j = 0; j < hull.size(); ++j) {
+                    const Vec2d& pa = hull[(j + hull.size() - 1) % hull.size()];
+                    const Vec2d& pb = hull[j];
+                    const Vec2d& pc = hull[(j + 1) % hull.size()];
+                    const Vec2d u = pa - pb, v = pc - pb;
+                    const double dot = u.x() * v.x() + u.y() * v.y();
+                    const double corner_deg = std::acos(std::min(1.0, std::max(-1.0, dot / (u.norm() * v.norm())))) * 180.0 / M_PI;
+                    if (corner_deg < worst_ang) { worst_ang = corner_deg; worst = j; }
+                    if (corner_deg < kWarpSharpDeg) sharp_pts.emplace_back(pb.x(), pb.y(), zmin);
+                }
+            }
+            const bool risk = !sharp_pts.empty() && std::max(dx, dy) >= kWarpSpanMM && bed_area >= kWarpAreaMM2;
+            if (risk) {
+                const std::string text = "Flat first layer " + num(dx) + " x " + num(dy) +
+                    " mm with sharp corners: the corners may lift (warping). Round them (R >= 3 mm) or add mouse ears (disc 10 mm, 0.3 mm thick)";
+                const Vec3d sharpest(hull[worst].x(), hull[worst].y(), zmin);
+                add_note("warp_risk", "warning", text, sharpest, to_model_dir(Vec3d(0, 0, -1)), bed_tris);
+                warnings.push_back(text);
+                json corners = json::array();
+                for (const Vec3d& p : sharp_pts) {
+                    const Vec3d mp = rot_c + rot.transpose() * (p - rot_c);   // to the model frame, like add_note
+                    corners.push_back(json::array({mp.x(), mp.y(), mp.z()}));
+                }
+                suggestions.push_back(json{{"kind", "mouse_ears"}, {"corners", corners}, {"disc_d_mm", 10.0}, {"thickness_mm", 0.3}, {"why", text}});
+                out["warp"] = json{{"bed_mm", {dx, dy}}, {"bed_area_mm2", bed_area}, {"sharp_corners", int(sharp_pts.size())}};
+            }
+        }
+    }
+
+    // Tip 21: mesh integrity. Gaps (open edges), non-manifold edges, and reversed faces
+    // (inconsistent winding) make the slicer fail or print holes.
+    {
+        // Weld vertices by quantised position (same trick as Tip 8).
+        std::map<std::array<long, 3>, int> vid;
+        std::vector<int> id(V.size());
+        for (size_t i = 0; i < V.size(); ++i) {
+            const std::array<long, 3> k{std::lround(V[i].x() * 1000.0), std::lround(V[i].y() * 1000.0), std::lround(V[i].z() * 1000.0)};
+            id[i] = vid.emplace(k, int(vid.size())).first->second;
+        }
+        std::vector<Vec3d> pos(vid.size());
+        for (size_t i = 0; i < V.size(); ++i) pos[id[i]] = V[i].cast<double>();
+        // Per undirected edge (min,max): total traversals, forward count, one triangle index.
+        struct EdgeC { int n = 0, fwd = 0, tri = -1; };
+        std::map<std::pair<int, int>, EdgeC> edges;
+        for (size_t i = 0; i < F.size(); ++i) {
+            const stl_triangle_vertex_indices& f = F[i];
+            const int a[3] = {id[f(0)], id[f(1)], id[f(2)]};
+            for (int e = 0; e < 3; ++e) {
+                const int u = a[e], v = a[(e + 1) % 3];
+                if (u == v) continue;                 // degenerate edge
+                const std::pair<int, int> key{std::min(u, v), std::max(u, v)};
+                EdgeC& ec = edges[key];
+                ++ec.n;
+                if (u < v) ++ec.fwd;
+                if (ec.tri < 0) ec.tri = int(i);
+            }
+        }
+        int open = 0, nonmanifold = 0, flipped = 0;
+        Vec3d first_at; bool have_first = false;
+        std::vector<int> tris;
+        for (const auto& kv : edges) {
+            const EdgeC& ec = kv.second;
+            const bool is_open = ec.n == 1, bad_manifold = ec.n > 2, bad_winding = !is_open && !bad_manifold && ec.fwd != 1;
+            if (!is_open && !bad_manifold && !bad_winding) continue;
+            if (is_open) ++open;
+            if (bad_manifold) ++nonmanifold;
+            if (bad_winding) ++flipped;
+            if (!have_first) { first_at = (pos[kv.first.first] + pos[kv.first.second]) * 0.5; have_first = true; }
+            if (tris.size() < 2000 && ec.tri >= 0) tris.push_back(ec.tri);
+        }
+        if (open + nonmanifold + flipped > 0) {
+            std::string text = "Mesh problems: ";
+            bool first_part = true;
+            if (open) { if (!first_part) text += ", "; text += std::to_string(open) + " open edges (gaps)"; first_part = false; }
+            if (nonmanifold) { if (!first_part) text += ", "; text += std::to_string(nonmanifold) + " non-manifold edges"; first_part = false; }
+            if (flipped) { if (!first_part) text += ", "; text += std::to_string(flipped) + " reversed faces"; }
+            text += " - the slicer may fail or print holes; repair before slicing";
+            add_note("mesh_integrity", "warning", text, first_at, Vec3d::Zero(), tris);
+            warnings.push_back(text);
+            suggestions.push_back(json{{"kind", "mesh_repair"}, {"open_edges", open}, {"non_manifold_edges", nonmanifold}, {"reversed_faces", flipped}, {"why", text}});
+            out["mesh_integrity"] = json{{"open_edges", open}, {"non_manifold_edges", nonmanifold}, {"reversed_faces", flipped}};
+        }
+    }
+
+    // Tips 5 / 7 / 16: DfAM edge/curve geometry (print frame). One welded edge adjacency
+    // built once, reused by the three checks. Only edges with exactly two triangles count;
+    // convex vs concave is read from the dihedral sign s = (n1 x n2).(b-a), where n1/n2 are
+    // the two face normals and a->b the edge as traversed by the first triangle. Convex -> s > 0,
+    // concave -> s < 0 (a cube's outer corner gives +, an inside corner gives -).
+    {
+        // Weld vertices at 1e-3 mm (same trick as Tip 21).
+        std::map<std::array<long, 3>, int> vid;
+        std::vector<int> id(V.size());
+        for (size_t i = 0; i < V.size(); ++i) {
+            const std::array<long, 3> k{std::lround(V[i].x() * 1000.0), std::lround(V[i].y() * 1000.0), std::lround(V[i].z() * 1000.0)};
+            id[i] = vid.emplace(k, int(vid.size())).first->second;
+        }
+        std::vector<Vec3d> pos(vid.size());
+        for (size_t i = 0; i < V.size(); ++i) pos[size_t(id[i])] = V[i].cast<double>();
+        // Per undirected edge: the up-to-two triangles and the directed edge a->b as traversed by the first.
+        struct EdgeD { int n = 0, t1 = -1, t2 = -1; int a = -1, b = -1; };
+        std::map<std::pair<int, int>, EdgeD> edges;
+        for (size_t i = 0; i < F.size(); ++i) {
+            const stl_triangle_vertex_indices& f = F[i];
+            const int a[3] = {id[f(0)], id[f(1)], id[f(2)]};
+            for (int e = 0; e < 3; ++e) {
+                const int u = a[e], v = a[(e + 1) % 3];
+                if (u == v) continue;                 // degenerate edge
+                const std::pair<int, int> key{std::min(u, v), std::max(u, v)};
+                EdgeD& ed = edges[key];
+                ++ed.n;
+                if (ed.t1 < 0) { ed.t1 = int(i); ed.a = u; ed.b = v; }
+                else if (ed.t2 < 0 && ed.t1 != int(i)) ed.t2 = int(i);
+                // a third triangle -> non-manifold; the edge is rejected by the n != 2 check below
+            }
+        }
+        auto tri_normal = [&](int ti) -> Vec3d {
+            const auto& f = F[size_t(ti)];
+            const Vec3d p0 = V[f(0)].cast<double>(), p1 = V[f(1)].cast<double>(), p2 = V[f(2)].cast<double>();
+            const Vec3d n = (p1 - p0).cross(p2 - p0);
+            const double nn = n.norm();
+            return nn > 1e-12 ? Vec3d(n / nn) : Vec3d(Vec3d::Zero());
+        };
+        const double part_h = m.bounding_box().max.z() - m.bounding_box().min.z();
+
+        // Tip 5: vertical_edge (convex). Tip 7: base_corner (concave wall+floor junction).
+        int vert_n = 0, base_n = 0;
+        double vert_longest = -1.0, base_longest = -1.0;
+        Vec3d vert_mid, vert_norm = Vec3d::Zero(), base_mid, base_floor = Vec3d::Zero();
+        std::vector<int> vert_tris, base_tris;
+        for (const auto& kv : edges) {
+            const EdgeD& ed = kv.second;
+            if (ed.n != 2) continue;                  // needs exactly two triangles
+            const Vec3d n1 = tri_normal(ed.t1), n2 = tri_normal(ed.t2);
+            if (n1.isZero() || n2.isZero()) continue; // skip degenerate faces
+            const Vec3d d = pos[size_t(ed.b)] - pos[size_t(ed.a)];
+            const double L = d.norm();
+            if (L < 1e-9) continue;
+            const Vec3d e = d / L;
+            const double theta = std::acos(std::max(-1.0, std::min(1.0, n1.dot(n2)))) * 180.0 / M_PI;
+            const bool convex = (n1.cross(n2)).dot(d) > 0.0;   // convex -> + (see the sign note above)
+            const Vec3d mid = (pos[size_t(ed.a)] + pos[size_t(ed.b)]) * 0.5;
+
+            if (convex && std::abs(e.z()) > 0.95 && theta >= 45.0 && L >= 8.0 && part_h >= 10.0) {
+                ++vert_n;
+                if (vert_tris.size() < 2000) vert_tris.push_back(ed.t1);
+                if (vert_tris.size() < 2000 && ed.t2 != ed.t1) vert_tris.push_back(ed.t2);
+                if (L > vert_longest) { vert_longest = L; vert_mid = mid; vert_norm = (n1 + n2).normalized(); }
+            }
+            else if (!convex && theta >= 60.0 && L >= 8.0 && std::abs(e.z()) < 0.1) {
+                const double z1 = n1.z(), z2 = n2.z();
+                if ((z1 > 0.95 && std::abs(z2) < 0.1) || (z2 > 0.95 && std::abs(z1) < 0.1)) {   // one up-facing floor, one wall
+                    ++base_n;
+                    if (base_tris.size() < 2000) base_tris.push_back(ed.t1);
+                    if (base_tris.size() < 2000 && ed.t2 != ed.t1) base_tris.push_back(ed.t2);
+                    if (L > base_longest) { base_longest = L; base_mid = mid; base_floor = z1 > 0.95 ? n1 : n2; }
+                }
+            }
+        }
+        if (vert_n > 0) {
+            const std::string text = num(double(vert_n)) + " sharp vertical edge(s): fillet them (R >= 2 mm) to reduce ringing where the head changes direction";
+            add_note("vertical_edge", "suggestion", text, vert_mid, to_model_dir(vert_norm), vert_tris);
+            suggestions.push_back(json{{"kind", "vertical_edge_fillet"}, {"edges", vert_n}, {"why", text}});
+            out["vertical_edges"] = vert_n;
+        }
+        if (base_n > 0) {
+            const std::string text = num(double(base_n)) + " sharp inside corner(s) between a wall and a base: a fillet or 45 deg chamfer adds interface and strengthens the join";
+            add_note("base_corner", "suggestion", text, base_mid, to_model_dir(base_floor), base_tris);
+            suggestions.push_back(json{{"kind", "base_fillet"}, {"corners", base_n}, {"why", text}});
+            out["base_corners"] = base_n;
+        }
+
+        // Tip 16: curve_axis. Group triangles into smooth components (union-find over the
+        // 2-triangle edges with theta <= 25 deg); a cylinder-like component has a low-rank
+        // normal covariance whose smallest eigenvalue (normalised) is ~0 and whose second is
+        // substantial, and its axis is the corresponding eigenvector.
+        std::vector<int> parent(F.size());
+        for (size_t i = 0; i < parent.size(); ++i) parent[i] = int(i);
+        std::function<int(int)> root = [&](int x) { while (parent[size_t(x)] != x) { parent[size_t(x)] = parent[size_t(parent[size_t(x)])]; x = parent[size_t(x)]; } return x; };
+        for (const auto& kv : edges) {
+            const EdgeD& ed = kv.second;
+            if (ed.n != 2) continue;
+            const Vec3d n1 = tri_normal(ed.t1), n2 = tri_normal(ed.t2);
+            if (n1.isZero() || n2.isZero()) continue;
+            if (std::acos(std::max(-1.0, std::min(1.0, n1.dot(n2)))) * 180.0 / M_PI <= 25.0) {
+                const int r1 = root(ed.t1), r2 = root(ed.t2);
+                if (r1 != r2) parent[size_t(r1)] = r2;
+            }
+        }
+        struct CurveComp {
+            double area{0}, s{0};      // s = sum of n.(tri centroid)
+            Vec3d c{Vec3d::Zero()}, sn{Vec3d::Zero()};   // c: area-weighted centroid sum, sn: sum of normals
+            Eigen::Matrix3d cov{Eigen::Matrix3d::Zero()};
+            int biggest_tri{-1}; double big_area{0};
+            std::vector<int> tris;
+        };
+        std::map<int, CurveComp> cs;
+        for (size_t i = 0; i < F.size(); ++i) {
+            const auto& f = F[i];
+            const Vec3d p0 = V[f(0)].cast<double>(), p1 = V[f(1)].cast<double>(), p2 = V[f(2)].cast<double>();
+            const Vec3d nraw = (p1 - p0).cross(p2 - p0);
+            const double nn = nraw.norm();
+            if (nn < 1e-12) continue;
+            const double a = 0.5 * nn;
+            const Vec3d n = nraw / nn;
+            const Vec3d cen = (p0 + p1 + p2) / 3.0;
+            CurveComp& cc = cs[root(int(i))];
+            cc.area += a;
+            cc.c += a * cen;
+            cc.cov += a * (n * n.transpose());
+            cc.s += n.dot(cen);
+            cc.sn += n;
+            if (a > cc.big_area) { cc.big_area = a; cc.biggest_tri = int(i); }
+            if (cc.tris.size() < 2000) cc.tris.push_back(int(i));
+        }
+        int curve_count = 0;
+        for (auto& kv : cs) {
+            CurveComp& cc = kv.second;
+            if (cc.area < 100.0) continue;
+            cc.c /= cc.area;
+            // Skip a concave (holed) surface: the mean of normal . (tri centroid - comp centroid) < 0.
+            if (cc.s - cc.sn.dot(cc.c) < 0) continue;
+            const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(cc.cov);
+            const Eigen::Vector3d ev = solver.eigenvalues();
+            const double tr = ev.sum();
+            if (tr < 1e-12) continue;
+            const double l0n = ev(0) / tr, l1n = ev(1) / tr;
+            if (l0n > 0.02 || l1n < 0.15) continue;   // not cylinder-like
+            const Eigen::Vector3d axis = solver.eigenvectors().col(0);
+            if (std::abs(axis.z()) >= 0.7) continue;   // axis near-vertical: stair-stepping is not an issue
+            const double ang_from_z = std::acos(std::max(0.0, std::min(1.0, std::abs(axis.z())))) * 180.0 / M_PI;
+            const Vec3d t_n = tri_normal(cc.biggest_tri);
+            const auto& bf = F[size_t(cc.biggest_tri)];
+            const Vec3d pin = (V[bf(0)].cast<double>() + V[bf(1)].cast<double>() + V[bf(2)].cast<double>()) / 3.0;
+            const std::string text = "Curved surface with its axis " + num(ang_from_z) + " deg from Z: layer stair-steps show on it; orient the part so the axis is vertical if the finish matters";
+            add_note("curve_axis", "suggestion", text, pin, to_model_dir(t_n), cc.tris);
+            const Vec3d ax_model = to_model_dir(Vec3d(axis.x(), axis.y(), axis.z()));   // the unit axis, model frame
+            notes.back()["axis"] = json::array({ax_model.x(), ax_model.y(), ax_model.z()});
+            suggestions.push_back(json{{"kind", "curve_axis"}, {"angle_from_z_deg", ang_from_z}, {"area_mm2", cc.area}, {"why", text},
+                                       {"axis", json::array({ax_model.x(), ax_model.y(), ax_model.z()})}});
+            ++curve_count;
+            if (curve_count >= 6) break;
+        }
+        if (curve_count > 0) out["curve_axes"] = curve_count;
+    }
+
+    // Floating parts and bed adhesion (print frame, bed = lowest z). Components = triangles joined by shared (welded) vertices.
+    {
+        double bed = 1e30;
+        for (const Vec3f& v : V) bed = std::min(bed, double(v.z()));
+        std::map<std::array<long, 3>, int> vid;
+        std::vector<int> id(V.size());
+        for (size_t i = 0; i < V.size(); ++i) {
+            const std::array<long, 3> k{std::lround(V[i].x() * 1000.0), std::lround(V[i].y() * 1000.0), std::lround(V[i].z() * 1000.0)};
+            id[i] = vid.emplace(k, int(vid.size())).first->second;
+        }
+        std::vector<int> par(vid.size());
+        for (size_t i = 0; i < par.size(); ++i) par[i] = int(i);
+        std::function<int(int)> fnd = [&](int a) { while (par[a] != a) a = par[a] = par[par[a]]; return a; };
+        for (const stl_triangle_vertex_indices& f : F) { par[fnd(id[f(0)])] = fnd(id[f(1)]); par[fnd(id[f(1)])] = fnd(id[f(2)]); }
+        struct Comp { double z0 = 1e30, z1 = -1e30, x0 = 1e30, x1 = -1e30, y0 = 1e30, y1 = -1e30; std::vector<int> tris; };
+        std::map<int, Comp> comps;
+        for (size_t i = 0; i < F.size(); ++i) {
+            Comp& c = comps[fnd(id[F[i](0)])];
+            c.tris.push_back(int(i));
+            for (int k = 0; k < 3; ++k) {
+                const Vec3f& v = V[F[i](k)];
+                c.z0 = std::min(c.z0, double(v.z())); c.z1 = std::max(c.z1, double(v.z()));
+                c.x0 = std::min(c.x0, double(v.x())); c.x1 = std::max(c.x1, double(v.x()));
+                c.y0 = std::min(c.y0, double(v.y())); c.y1 = std::max(c.y1, double(v.y()));
+            }
+        }
+        // A component floats when it is above the bed and no other component reaches up to its lowest point under its footprint.
+        // ponytail: bounding-box footprint test; a component hooked over another's corner can be missed.
+        int floating = 0;
+        for (const auto& kv : comps) {
+            const Comp& c = kv.second;
+            if (c.z0 - bed < 0.1) continue;
+            bool held = false;
+            for (const auto& ov : comps) {
+                if (ov.first == kv.first) continue;
+                const Comp& o = ov.second;
+                if (o.z1 >= c.z0 - 0.1 && o.z0 <= c.z0 && o.x0 <= c.x1 && o.x1 >= c.x0 && o.y0 <= c.y1 && o.y1 >= c.y0) { held = true; break; }
+            }
+            if (held || floating >= 6) continue;
+            ++floating;
+            std::vector<int> tr = c.tris;
+            if (tr.size() > 2000) tr.resize(2000);
+            add_note("floating_part", "warning",
+                     "A part floats " + num(c.z0 - bed) + " mm above the bed with nothing under it: it will not print; connect it to the model or add a support",
+                     Vec3d(0.5 * (c.x0 + c.x1), 0.5 * (c.y0 + c.y1), c.z0), to_model_dir(Vec3d(0, 0, -1)), tr);
+        }
+        if (floating > 0) out["floating_parts"] = floating;
+
+        // Bed adhesion: the area (and narrowest side) of what touches the bed.
+        double area = 0, x0 = 1e30, x1 = -1e30, y0 = 1e30, y1 = -1e30;
+        Vec3d ctr(0, 0, 0);
+        std::vector<int> btris;
+        for (size_t i = 0; i < F.size(); ++i) {
+            const Vec3d p0 = V[F[i](0)].cast<double>(), p1 = V[F[i](1)].cast<double>(), p2 = V[F[i](2)].cast<double>();
+            if (std::max(std::max(p0.z(), p1.z()), p2.z()) - bed > 0.05) continue;
+            const Vec3d nv = (p1 - p0).cross(p2 - p0);
+            const double nn = nv.norm();
+            if (nn < 1e-12 || nv.z() / nn > -0.99) continue;
+            const double a = 0.5 * nn;
+            area += a; ctr += a * ((p0 + p1 + p2) / 3.0);
+            for (const Vec3d& q : {p0, p1, p2}) { x0 = std::min(x0, q.x()); x1 = std::max(x1, q.x()); y0 = std::min(y0, q.y()); y1 = std::max(y1, q.y()); }
+            if (btris.size() < 2000) btris.push_back(int(i));
+        }
+        // ponytail: 100 mm2 / 3 mm are rule-of-thumb limits for PLA/PETG on a textured plate; the bbox side misjudges a ring.
+        if (!F.empty() && (area < 100.0 || std::min(x1 - x0, y1 - y0) < 3.0)) {
+            const Vec3d at = area > 1e-6 ? Vec3d(ctr.x() / area, ctr.y() / area, bed) : Vec3d(0.0, 0.0, bed);
+            add_note("bed_adhesion", "warning",
+                     area > 1e-6 ? "Only " + num(area) + " mm2 touches the bed (narrowest side " + num(std::min(x1 - x0, y1 - y0)) + " mm): it may peel off; use a brim, a wider base or a larger first-layer contact"
+                                 : std::string("Nothing flat touches the bed: use a brim or a flat base"),
+                     at, to_model_dir(Vec3d(0, 0, -1)), btris);
+            out["bed_adhesion_mm2"] = area;
+            if (area > 1e-6)
+                suggestions.push_back(json{{"kind", "brim_pad"}, {"min", json::array({x0, y0})}, {"max", json::array({x1, y1})}, {"bed_z", bed},
+                                           {"why", "a 0.3 mm sacrificial pad 3 mm wider than the contact patch, cut away after printing"}});
+        }
+    }
+
+    // Tip 8: a rounded surface facing the bed. Overhanging triangles joined by shared vertices; a component whose slope varies a lot is a curve.
+    {
+        std::map<std::array<long, 3>, int> vid;
+        std::vector<int> id(V.size());
+        for (size_t i = 0; i < V.size(); ++i) {
+            const std::array<long, 3> k{std::lround(V[i].x() * 1000.0), std::lround(V[i].y() * 1000.0), std::lround(V[i].z() * 1000.0)};
+            id[i] = vid.emplace(k, int(vid.size())).first->second;
+        }
+        std::vector<int> parent(vid.size());
+        for (size_t i = 0; i < parent.size(); ++i) parent[i] = int(i);
+        std::function<int(int)> root = [&](int x) { while (parent[size_t(x)] != x) { parent[size_t(x)] = parent[size_t(parent[size_t(x)])]; x = parent[size_t(x)]; } return x; };
+        const double zmin = m.bounding_box().min.z();
+        struct Comp { double area{0}, a0{1e9}, a1{-1e9}, z0{1e30}, z1{-1e30}, pa{0}; Vec3d p{Vec3d::Zero()}, pn{Vec3d::Zero()}; std::vector<int> tris; };
+        std::map<int, Comp> comps;
+        std::vector<std::array<int, 4>> tris;   // v0, v1, v2, kept
+        for (const stl_triangle_vertex_indices& f : F) {
+            const Vec3d p0 = V[f(0)].cast<double>(), p1 = V[f(1)].cast<double>(), p2 = V[f(2)].cast<double>();
+            const Vec3d n = (p1 - p0).cross(p2 - p0);
+            const double nn = n.norm();
+            const double nz = nn > 1e-12 ? n.z() / nn : 0.0;
+            const bool keep = nn > 1e-12 && nz < 0 && -nz > cos_lim * 0.5 && !((p0.z() + p1.z() + p2.z()) / 3.0 - zmin < 0.05 && -nz > 0.99);
+            tris.push_back({id[f(0)], id[f(1)], id[f(2)], keep ? 1 : 0});
+            if (keep) { parent[size_t(root(id[f(1)]))] = root(id[f(0)]); parent[size_t(root(id[f(2)]))] = root(id[f(0)]); }
+        }
+        size_t ti = 0;
+        for (const stl_triangle_vertex_indices& f : F) {
+            const auto& t = tris[ti++];
+            if (!t[3]) continue;
+            const Vec3d p0 = V[f(0)].cast<double>(), p1 = V[f(1)].cast<double>(), p2 = V[f(2)].cast<double>();
+            const Vec3d n = (p1 - p0).cross(p2 - p0);
+            const double nn = n.norm(), a = 0.5 * nn, deg = std::acos(std::min(1.0, -n.z() / nn)) * 180.0 / M_PI;   // angle from straight down
+            Comp& c = comps[root(t[0])];
+            c.area += a; c.a0 = std::min(c.a0, deg); c.a1 = std::max(c.a1, deg);
+            if (a > c.pa) { c.pa = a; c.p = (p0 + p1 + p2) / 3.0; c.pn = n / nn; }
+            if (c.tris.size() < 2000) c.tris.push_back(int(ti - 1));
+            c.z0 = std::min(c.z0, std::min({p0.z(), p1.z(), p2.z()})); c.z1 = std::max(c.z1, std::max({p0.z(), p1.z(), p2.z()}));
+        }
+        json cur = json::array();
+        json chamfers = json::array();
+        for (const auto& kv : comps) {
+            const Comp& c = kv.second;
+            // Tip 9/10: a planar sloped face (e.g. a chamfer) that is neither a flat roof
+            // (<=3 deg from straight down) nor at/above the overhang limit is still an
+            // overhang; a chamfer there must be 45 deg or steeper to print without support.
+            // ponytail: reuse the component fields already gathered for the rounded branch.
+            if (c.area >= 2.0 && c.a1 - c.a0 < 3.0 && c.a0 > 3.0 && c.a1 < 90.0 - ang) {
+                if (bore_r > 0 && c.z1 - c.z0 <= bore_r * 1.05) continue;   // the roof arc of a horizontal bore: under horizontal_holes
+                const double from_vert = 90.0 - 0.5 * (c.a0 + c.a1);
+                const std::string text = "Sloped face " + num(from_vert) + " deg from vertical overhangs (limit " + num(ang) + "): make this chamfer 45 deg or steeper so it prints without support";
+                add_note("steep_chamfer", "warning", text, c.p, to_model_dir(c.pn), c.tris);
+                warnings.push_back(text);
+                suggestions.push_back(json{{"kind", "steep_chamfer"}, {"area_mm2", c.area}, {"from_vertical_deg", from_vert},
+                                           {"z", {c.z0 - zmin, c.z1 - zmin}}, {"why", text}});
+                chamfers.push_back(json{{"area_mm2", c.area}, {"from_vertical_deg", from_vert}, {"z", {c.z0 - zmin, c.z1 - zmin}}});
+                continue;
+            }
+            if (c.area < 4.0 || c.a1 - c.a0 < 12.0 || c.a1 < 90.0 - ang) continue;   // flat, tiny, or never steep enough to matter
+            if (bore_r > 0 && c.z1 - c.z0 <= bore_r * 1.05) continue;                 // the roof arc of a horizontal bore: reported under horizontal_holes
+            add_note("fillet_from_below", "suggestion", "A rounded surface faces the bed: an equal 45 deg chamfer prints cleaner", c.p, to_model_dir(c.pn), c.tris);
+            cur.push_back(json{{"area_mm2", c.area}, {"z", {c.z0 - zmin, c.z1 - zmin}}, {"slope_from_bed_deg", {c.a0, c.a1}}});
+            suggestions.push_back(json{{"kind", "fillet_from_below"}, {"area_mm2", c.area}, {"z", {c.z0 - zmin, c.z1 - zmin}},
+                                       {"why", "a rounded surface faces the bed (slope " + num(c.a0) + "-" + num(c.a1) + " deg from straight down): an equal 45 deg chamfer prints cleaner (a horizontal bore's roof is under horizontal_holes)"}});
+        }
+        out["curved_overhangs"] = cur;
+        out["shallow_chamfers"] = chamfers;
+    }
+
+    // Tip 1: wall thickness against the extrusion line width. Rays from sampled side faces inward to the opposite surface,
+    // plus downward-facing bore-roof faces: a horizontal bore under a flat top leaves a thin lid over the bore
+    // that side-face rays miss (their normals are near-vertical).
+    {
+        AABBMesh am(m);
+        const double zmin = m.bounding_box().min.z();
+        auto is_roof = [&](const Vec3d& p0, const Vec3d& p1, const Vec3d& p2) {
+            // a downward-facing (bore-roof) face off the bed: the roof arc of a horizontal bore
+            const Vec3d n = (p1 - p0).cross(p2 - p0);
+            const double nn = n.norm();
+            if (nn < 1e-9) return false;
+            const double nz_n = n.z() / nn;
+            const Vec3d c = (p0 + p1 + p2) / 3.0;
+            return nz_n < -0.3 && !(c.z() - zmin < 0.05 && -nz_n > 0.99);
+        };
+        size_t side = 0, roof = 0;
+        for (const stl_triangle_vertex_indices& f : F) {
+            const Vec3d p0 = V[f(0)].cast<double>(), p1 = V[f(1)].cast<double>(), p2 = V[f(2)].cast<double>();
+            const Vec3d n = (p1 - p0).cross(p2 - p0);
+            const double nn = n.norm();
+            if (nn < 1e-9 || 0.5 * nn < 0.2) continue;
+            if (std::abs(n.z()) / nn < 0.3) ++side;
+            else if (is_roof(p0, p1, p2)) ++roof;
+        }
+        const size_t stride = std::max<size_t>(1, (side + roof) / 1200);
+        size_t seen = 0, used = 0, thin = 0, off = 0, fi = 0;
+        double tmin = 1e30;
+        Vec3d tat = Vec3d::Zero(), tat_n = Vec3d::Zero();   // where the thinnest wall was measured
+        std::vector<int> thin_tris;   // faces whose measured wall is under 2 line widths (first 2000)
+        for (const stl_triangle_vertex_indices& f : F) {
+            const size_t fidx = fi++;
+            const Vec3d p0 = V[f(0)].cast<double>(), p1 = V[f(1)].cast<double>(), p2 = V[f(2)].cast<double>();
+            const Vec3d n = (p1 - p0).cross(p2 - p0);
+            const double nn = n.norm();
+            if (nn < 1e-9 || 0.5 * nn < 0.2) continue;
+            const double nz_n = n.z() / nn;
+            if (std::abs(nz_n) >= 0.3 && !is_roof(p0, p1, p2)) continue;
+            if (seen++ % stride) continue;
+            const Vec3d nu = n / nn, c = (p0 + p1 + p2) / 3.0;
+            // same query as side faces: offset slightly along the inward normal, cast the opposite way to the far surface
+            const AABBMesh::hit_result h = am.query_ray_hit(c - nu * 0.02, -nu);
+            if (!h.is_hit()) continue;
+            const double t = h.distance() + 0.02;
+            if (t > 10.0 * line_width) continue;   // a block, not a wall
+            ++used; if (t < tmin) { tmin = t; tat = c; tat_n = nu; }
+            if (t < 2.0 * line_width) { ++thin; if (thin_tris.size() < 2000) thin_tris.push_back(int(fidx)); }
+            const double k = t / line_width, r = std::round(k);
+            if (r >= 1 && std::abs(k - r) > 0.25) ++off;
+        }
+        json w = json{{"line_width_mm", line_width}, {"samples", int(used)}};
+        if (used > 0) {
+            w["min_mm"] = tmin; w["thin_pct"] = 100.0 * thin / used; w["off_multiple_pct"] = 100.0 * off / used;
+            if (thin > 0) {
+                warnings.push_back("walls thinner than 2 line widths (" + num(2 * line_width) + " mm); the thinnest is " + num(tmin) + " mm");
+                add_note("thin_wall", "warning", "Wall " + num(tmin) + " mm thick: under 2 line widths (" + num(2 * line_width) + " mm), it will not print solid", tat, to_model_dir(tat_n), thin_tris);
+            }
+            if (100.0 * off / used > 20.0)
+                suggestions.push_back(json{{"kind", "wall_thickness"}, {"line_width_mm", line_width}, {"off_multiple_pct", 100.0 * off / used},
+                                           {"why", "most walls are not a whole number of lines: make them " + num(2 * line_width) + ", " + num(3 * line_width) + ", " + num(4 * line_width) + " mm ... for a clean slice"}});
+        }
+        out["walls"] = w;
+    }
+
+    // Tip 6: parts that fit each other need about 0.3 mm of clearance. Pairs closer than that but not touching.
+    // Hoisted above the block: the tip 23 compliance advice below re-reads whether any tight pair fired.
+    json pairs = json::array();
+    {
+        const size_t nb = std::min<size_t>(doc.bodies.size(), 12);
+        for (size_t i = 0; i < nb; ++i)
+            for (size_t j = i + 1; j < nb; ++j) {
+                if (doc.bodies[i].shape.IsNull() || doc.bodies[j].shape.IsNull()) continue;
+                const json r = distance_report(doc.bodies[i].shape, doc.bodies[j].shape);
+                if (!r["distance"].is_number()) continue;
+                const double d = r["distance"].get<double>();
+                if (d > 1e-6 && d < clearance - 1e-9) {
+                    pairs.push_back(json{{"a", int(i)}, {"b", int(j)}, {"gap_mm", d}});
+                    const std::string w = "bodies " + std::to_string(i) + " and " + std::to_string(j) + " are " + num(d) + " mm apart: fitted parts need about " + num(clearance) + " mm of clearance";
+                    warnings.push_back(w);
+                    notes.push_back(json{{"kind", "tight_pair"}, {"severity", "warning"}, {"text", w}, {"at", nullptr}, {"a", int(i)}, {"b", int(j)}, {"gap_mm", d}});   // global: no pin, no normal
+                }
+            }
+        out["tight_pairs"] = pairs;
+        out["clearance_mm"] = clearance;
+    }
+
+    // Floating bodies: a whole body above the lowest body with no other body under its footprint (global note: it names the body, no pin).
+    // ponytail: bounding boxes only, and only for an unrotated analysis; a body resting on a hooked or sloped neighbour can be missed.
+    if (rot.isIdentity(1e-9) && doc.bodies.size() >= 2) {
+        const size_t nb = std::min<size_t>(doc.bodies.size(), 12);
+        std::vector<std::array<double, 6>> bx(nb, std::array<double, 6>{0, 0, 0, 0, 0, 0});
+        std::vector<char> ok(nb, 0);
+        double lowest = 1e30;
+        for (size_t i = 0; i < nb; ++i) {
+            if (doc.bodies[i].shape.IsNull()) continue;
+            Bnd_Box bb; BRepBndLib::Add(doc.bodies[i].shape, bb);
+            if (bb.IsVoid()) continue;
+            bb.Get(bx[i][0], bx[i][1], bx[i][2], bx[i][3], bx[i][4], bx[i][5]);
+            ok[i] = 1; lowest = std::min(lowest, bx[i][2]);
+        }
+        int fb = 0;
+        for (size_t i = 0; i < nb; ++i) {
+            if (!ok[i] || bx[i][2] - lowest < 0.1) continue;
+            bool held = false;
+            for (size_t j = 0; j < nb && !held; ++j)
+                held = j != i && ok[j] && bx[j][5] >= bx[i][2] - 0.1 && bx[j][2] <= bx[i][2] && bx[j][0] <= bx[i][3] && bx[j][3] >= bx[i][0] && bx[j][1] <= bx[i][4] && bx[j][4] >= bx[i][1];
+            if (held) continue;
+            ++fb;
+            notes.push_back(json{{"kind", "floating_part"}, {"severity", "warning"}, {"at", nullptr}, {"body", int(i)},
+                                 {"text", "Body " + std::to_string(i) + " floats " + num(bx[i][2] - lowest) + " mm above the bed with nothing under it: it will not print; connect it to the model or add a support"}});
+        }
+        if (fb > 0) out["floating_bodies"] = fb;
+    }
+
+    // Tips 11 / 18 / 22 / 23 / 24: design-based global advice (from the document, no mesh).
+    // Pin-less global notes only (no normal, no tris).
+    json tips_advice = json::array();
+    auto advise = [&](const char* kind, const std::string& text) {
+        tips_advice.push_back(kind);
+        notes.push_back(json{{"kind", kind}, {"severity", "suggestion"}, {"text", text}, {"at", nullptr}});
+    };
+    bool has_hole = false, has_text = false;
+    for (const CadFeature& f : doc.features) {
+        if (f.type == CadFeatureType::Hole || f.type == CadFeatureType::Thread) has_hole = true;   // hole, hole_styled and thread all bore into the body
+        if (f.is_text()) has_text = true;
+    }
+    if (doc.variables.empty() && doc.features.size() >= 3)
+        advise("use_parameters", "No named variables: drive the key dimensions from variables so the design is easy to edit and iterate");
+    if (has_hole)
+        advise("slit_nut_trap", "A bore can take a slit with a bolt and a trapped nut so it clamps around another part");
+    if (doc.bodies.size() >= 2)
+        advise("test_fit", "Fitted parts: print a small test piece of the mating region first to check the fit before the full print");
+    if (pairs.size() > 0)
+        advise("compliance", "Parts that press together can use thin flexible tabs (compliance) for a push fit");
+    if (has_text)
+        advise("text_indent", "Text reads best indented into a vertical face (cut, not raised): less overhang and better resolution");
+    if (!tips_advice.empty()) out["tips_advice"] = tips_advice;
+
+    return out;
+}
+
+// Turn `analyze_printability`'s `notes` JSON into the viewport's PrintNote vector. `at:null` notes
+// (orientation / tight_pair) are kept as pin-less global notes; `n` runs across ALL kept notes.
+static void build_print_pins(const json& notes, bool warnings_only, std::vector<PrintNote>* pins)
+{
+    pins->clear();
+    int n = 0;
+    for (const json& j : notes) {
+        const bool warn = j.value("severity", std::string()) == "warning";
+        if (warnings_only && !warn) continue;
+        PrintNote p;
+        if (j.contains("at") && !j["at"].is_null()) {
+            p.has_pin = true;
+            p.at = Vec3d(j["at"][0].get<double>(), j["at"][1].get<double>(), j["at"][2].get<double>());
+        } else {
+            p.has_pin = false;   // a global note (orientation / tight_pair): listed in the sidebar, no pin
+        }
+        p.kind = j.value("kind", std::string());
+        p.text = j.value("text", std::string());
+        p.warning = warn;
+        if (j.contains("fix") && j["fix"].is_object()) {
+            p.fix_label = j["fix"].value("label", std::string());
+            if (j["fix"].contains("steps")) p.fix_json = j["fix"]["steps"].dump();   // {"method","params"} steps for run_print_fix
+        }
+        if (j.contains("normal")) { p.normal = Vec3d(j["normal"][0].get<double>(), j["normal"][1].get<double>(), j["normal"][2].get<double>()); p.has_normal = true; }
+        if (j.contains("tris")) for (const json& t : j["tris"]) p.tris.push_back(t.get<int>());
+        p.n = ++n;
+        pins->push_back(std::move(p));
+    }
+}
+
+// ponytail: the inscribed-circle diameter of a flat roof. A strip bridges its width whatever its length, an
+// L or a ring bridge their narrowest corridor. Rasterise on a grid, chamfer distance transform to the nearest
+// empty cell, double the largest distance = the circle diameter.
+static double inscribed_span(const std::vector<std::array<float, 6>>& xy, double x0, double y0, double x1, double y1)
+{
+    if (xy.empty()) return std::min(x1 - x0, y1 - y0);   // fall back to the bbox short side
+    const double sx = x1 - x0, sy = y1 - y0;
+    double cell = std::max(sx, sy) / 200.0;
+    if (cell < 0.05) cell = 0.05;
+    int W = int(std::ceil(sx / cell)) + 3;   // 1-cell border of empty cells each side
+    int H = int(std::ceil(sy / cell)) + 3;
+    if (W > 260) W = 260;
+    if (H > 260) H = 260;
+    std::vector<double> dist(size_t(W) * size_t(H), 0.0);   // filled start at 1e9, empty at 0
+    const double BIG = 1e9;
+    for (const auto& t : xy) {   // rasterise: mark every cell whose centre lies inside a triangle
+        const double ax = t[0], ay = t[1], bx = t[2], by = t[3], cx = t[4], cy = t[5];
+        // grid cell i covers x0 + (i - 1) * cell: index 0 is the empty border on the low side
+        const int i0 = std::max(1, int(std::floor((std::min({ax, bx, cx}) - x0) / cell)) + 1);
+        const int i1 = std::min(W - 2, int(std::ceil((std::max({ax, bx, cx}) - x0) / cell)) + 1);
+        const int j0 = std::max(1, int(std::floor((std::min({ay, by, cy}) - y0) / cell)) + 1);
+        const int j1 = std::min(H - 2, int(std::ceil((std::max({ay, by, cy}) - y0) / cell)) + 1);
+        const double v0x = bx - ax, v0y = by - ay, v1x = cx - ax, v1y = cy - ay;
+        const double denom = v0x * v1y - v0y * v1x;
+        if (denom == 0.0) continue;
+        for (int j = j0; j <= j1; ++j) {
+            const double py = y0 + (j - 0.5) * cell;
+            for (int i = i0; i <= i1; ++i) {
+                const double px = x0 + (i - 0.5) * cell;
+                const double v2x = px - ax, v2y = py - ay;
+                const double u = (v2x * v1y - v2y * v1x) / denom;
+                const double v = (v0x * v2y - v0y * v2x) / denom;
+                if (u >= -1e-9 && v >= -1e-9 && u + v <= 1.0 + 1e-9)
+                    dist[size_t(j) * size_t(W) + size_t(i)] = BIG;
+            }
+        }
+    }
+    // two-pass chamfer distance transform to the nearest empty cell (orthogonal 1, diagonal 1.4142)
+    for (int j = 0; j < H; ++j)
+        for (int i = 0; i < W; ++i) {
+            double& d = dist[size_t(j) * size_t(W) + size_t(i)];
+            if (d <= 0) continue;
+            const double up = j > 0 ? dist[size_t(j - 1) * size_t(W) + size_t(i)] + 1.0 : BIG;
+            const double lf = i > 0 ? dist[size_t(j) * size_t(W) + size_t(i - 1)] + 1.0 : BIG;
+            const double ul = (j > 0 && i > 0) ? dist[size_t(j - 1) * size_t(W) + size_t(i - 1)] + 1.4142 : BIG;
+            const double ur = (j > 0 && i < W - 1) ? dist[size_t(j - 1) * size_t(W) + size_t(i + 1)] + 1.4142 : BIG;
+            const double dl = (j < H - 1 && i > 0) ? dist[size_t(j + 1) * size_t(W) + size_t(i - 1)] + 1.4142 : BIG;
+            d = std::min(d, std::min({up, lf, ul, ur, dl}));
+        }
+    for (int j = H - 1; j >= 0; --j)
+        for (int i = W - 1; i >= 0; --i) {
+            double& d = dist[size_t(j) * size_t(W) + size_t(i)];
+            if (d <= 0) continue;
+            const double dn = j < H - 1 ? dist[size_t(j + 1) * size_t(W) + size_t(i)] + 1.0 : BIG;
+            const double rt = i < W - 1 ? dist[size_t(j) * size_t(W) + size_t(i + 1)] + 1.0 : BIG;
+            const double lr = (j < H - 1 && i < W - 1) ? dist[size_t(j + 1) * size_t(W) + size_t(i + 1)] + 1.4142 : BIG;
+            const double ll = (j < H - 1 && i > 0) ? dist[size_t(j + 1) * size_t(W) + size_t(i - 1)] + 1.4142 : BIG;
+            const double lu = (j > 0 && i < W - 1) ? dist[size_t(j - 1) * size_t(W) + size_t(i + 1)] + 1.4142 : BIG;
+            d = std::min(d, std::min({dn, rt, lr, ll, lu}));
+        }
+    double maxd = 0.0;
+    for (double v : dist) maxd = std::max(maxd, v);
+    return std::max(2.0 * maxd * cell, cell);
+}
+
+// The centre of body `i` in the model frame (from the tessellated display mesh, else the solid's bbox).
+static Vec3d body_bbox_center(const CadDocument& doc, int i)
+{
+    if (i >= 0 && i < int(doc.display_body_meshes.size()) && !doc.display_body_meshes[i].empty())
+        return doc.display_body_meshes[i].bounding_box().center();
+    if (i >= 0 && i < int(doc.bodies.size()) && !doc.bodies[i].shape.IsNull()) {
+        Bnd_Box bb; BRepBndLib::Add(doc.bodies[i].shape, bb);
+        return Vec3d(0.5 * (bb.CornerMin().X() + bb.CornerMax().X()),
+                     0.5 * (bb.CornerMin().Y() + bb.CornerMax().Y()),
+                     0.5 * (bb.CornerMin().Z() + bb.CornerMax().Z()));
+    }
+    return Vec3d::Zero();
+}
+
+// Attach an automatic "fix" (label + steps of existing MCP verbs) to every note that can be
+// auto-corrected. The note producers stay untouched; this walks the final notes/suggestions.
+// Geometry fixes are only valid in the unrotated model frame (`rot_id`), because the analysis
+// detects them in the print frame; with a rotation the model-frame edge/position selectors would
+// address the wrong geometry.
+static void attach_print_fixes(json& notes, const json& suggestions, const CadDocument& doc, int body, bool rot_id, double clearance, double bed_z)
+{
+    const Vec3d mo = doc.modeling_origin;   // extrude_circle's x/y are relative to it, per the sketch-plane convention
+    std::vector<Vec3d> ear_corners;         // model-frame corners from the mouse_ears suggestion
+    if (rot_id)
+        for (const json& s : suggestions)
+            if (s.value("kind", std::string()) == "mouse_ears" && s.contains("corners") && s["corners"].is_array())
+                for (const json& c : s["corners"])
+                    if (c.is_array() && c.size() >= 3)
+                        ear_corners.emplace_back(jn(c, 0), jn(c, 1), jn(c, 2));
+    for (json& n : notes) {
+        const std::string kind = n.value("kind", std::string());
+        std::string label;
+        json steps = json::array();
+        if (kind == "vertical_edge" && rot_id) {
+            label = "Fillet the vertical edges (R 2 mm)";
+            steps.push_back(json{{"method", "fillet"}, {"params", {{"where", json{{"kind", "line"}, {"parallel", "z"}}}, {"radius", 2.0}, {"body", body}}}});
+        } else if (kind == "base_corner" && rot_id) {
+            double z = 0.0;
+            if (n.contains("at") && !n["at"].is_null()) z = jn(n["at"], 2);
+            label = "Chamfer the inside corners (2 mm)";
+            steps.push_back(json{{"method", "chamfer"}, {"params", {{"where", json{{"kind", "line"}, {"z", z}}}, {"distance", 2.0}, {"body", body}}}});
+        } else if (kind == "warp_risk" && rot_id) {
+            label = "Add mouse ears (disc 10 mm, 0.3 mm)";
+            for (const Vec3d& c : ear_corners) {
+                if (std::abs(c.z() - bed_z) >= 0.1) continue;   // only ears on the bed help
+                steps.push_back(json{{"method", "extrude_circle"}, {"params", {{"plane", "XY"}, {"diameter", 10.0},
+                                     {"x", c.x() - mo.x()}, {"y", c.y() - mo.y()}, {"distance", 0.3}, {"boolean", "union"}, {"body", body}}}});
+            }
+            if (steps.empty()) continue;   // no corner on the bed: nothing to add
+        } else if (kind == "tight_pair") {
+            if (!n.contains("a") || !n.contains("b") || !n.contains("gap_mm")) continue;
+            const int a = n["a"].get<int>(), b = n["b"].get<int>();
+            const double dist = clearance - n["gap_mm"].get<double>();
+            if (dist <= 0) continue;
+            Vec3d dir = body_bbox_center(doc, b) - body_bbox_center(doc, a);
+            const double L = dir.norm();
+            if (L < 1e-9) continue;
+            dir /= L;
+            label = "Move the parts apart to the clearance";
+            steps.push_back(json{{"method", "transform"}, {"params", {{"body", b}, {"dx", dir.x() * dist}, {"dy", dir.y() * dist}, {"dz", dir.z() * dist}}}});
+        } else if (kind == "long_bridge" && rot_id) {
+            // One rib per gap: a thin wall across the roof's X span, spaced along Y at the suggestion's pitch.
+            if (!n.contains("roof") || !n.contains("ribs")) continue;
+            const json& rf = n["roof"]; const json& rb = n["ribs"];
+            if (!rf.contains("z") || !rf.contains("min") || !rf.contains("max") || !rb.contains("count") || !rb.contains("pitch_mm")) continue;
+            const int cnt = rb["count"].get<int>();
+            const double pitch = rb["pitch_mm"].get<double>();
+            if (cnt <= 0 || pitch <= 0) continue;
+            const double rz = rf["z"].get<double>();
+            const double minx = jn(rf["min"], 0), maxx = jn(rf["max"], 0), miny = jn(rf["min"], 1);
+            label = "Add sacrificial ribs under the roof";
+            for (int i = 0; i < cnt; ++i) {
+                const double y = miny + (i + 1) * pitch;   // model frame; profile coords are relative to modeling_origin
+                steps.push_back(json{{"method", "extrude"}, {"params", {{"plane", "XY"},
+                    {"profile", json::array({json::array({minx - mo.x(), y - 0.4 - mo.y()}),
+                                             json::array({maxx - mo.x(), y - 0.4 - mo.y()}),
+                                             json::array({maxx - mo.x(), y + 0.4 - mo.y()}),
+                                             json::array({minx - mo.x(), y + 0.4 - mo.y()})})},
+                    {"distance", rz}, {"boolean", "union"}, {"body", body}}}});
+            }
+        } else if (kind == "sacrificial_layer" && rot_id) {
+            // A thin plate directly under the roof: a datum plane at (roof z - layer height), a rect sketch on it, extruded up.
+            if (!n.contains("roof")) continue;
+            const json& rf = n["roof"];
+            if (!rf.contains("z") || !rf.contains("min") || !rf.contains("max")) continue;
+            const double layer_h = n.value("layer_h", 0.4);
+            const double zoff = rf["z"].get<double>() - layer_h;
+            if (zoff < 0) continue;
+            const double minx = jn(rf["min"], 0), maxx = jn(rf["max"], 0), miny = jn(rf["min"], 1), maxy = jn(rf["max"], 1);
+            label = "Add a one-layer sacrificial membrane under the roof";
+            steps.push_back(json{{"method", "plane"}, {"params", {{"type", "offset"}, {"base", 0}, {"offset", zoff}}}});
+            steps.push_back(json{{"method", "sketch_begin"}, {"params", {{"plane", "datum:{prev.newest_datum}"}}}});
+            steps.push_back(json{{"method", "sketch_add"}, {"params", {{"rect", json::array({minx - mo.x(), miny - mo.y(), maxx - mo.x(), maxy - mo.y()})}}}});
+            steps.push_back(json{{"method", "sketch_commit"}, {"params", json::object()}});
+            steps.push_back(json{{"method", "extrude"}, {"params", {{"sketch", "{prev.sketch_index}"}, {"distance", layer_h}, {"boolean", "union"}, {"body", body}}}});
+        } else if (kind == "bed_adhesion" && rot_id) {
+            // A sacrificial pad under the footprint: a rect 3 mm wider on every side, one layer pair (0.3 mm) thick, fused to the base.
+            const json* bp = nullptr;
+            for (const json& sg : suggestions) if (sg.value("kind", std::string()) == "brim_pad") bp = &sg;
+            if (!bp || bp->value("bed_z", 0.0) < -0.05) continue;
+            const double m3 = 3.0, th = 0.3, zb = std::max(0.0, bp->value("bed_z", 0.0));
+            const double minx = jn((*bp)["min"], 0) - m3, miny = jn((*bp)["min"], 1) - m3, maxx = jn((*bp)["max"], 0) + m3, maxy = jn((*bp)["max"], 1) + m3;
+            label = "Add a 0.3 mm sacrificial brim pad (cut it away after printing)";
+            steps.push_back(json{{"method", "plane"}, {"params", {{"type", "offset"}, {"base", 0}, {"offset", zb}}}});
+            steps.push_back(json{{"method", "sketch_begin"}, {"params", {{"plane", "datum:{prev.newest_datum}"}}}});
+            steps.push_back(json{{"method", "sketch_add"}, {"params", {{"shape", "rounded_rect"}, {"rect", json::array({minx - mo.x(), miny - mo.y(), maxx - mo.x(), maxy - mo.y()})},
+                                 {"radius", std::min(m3, 0.5 * std::min(maxx - minx, maxy - miny) - 0.01)}}}});   // rounded corners: a square pad corner lifts first
+            steps.push_back(json{{"method", "sketch_commit"}, {"params", json::object()}});
+            steps.push_back(json{{"method", "extrude"}, {"params", {{"sketch", "{prev.sketch_index}"}, {"distance", th}, {"boolean", "union"}, {"body", body}}}});
+        } else if (kind == "fillet_from_below" && rot_id) {
+            // The last disabled Fillet feature is the bed fillet: suppress it, then chamfer the bed edges at its radius.
+            int fidx = -1;
+            for (int i = int(doc.features.size()) - 1; i >= 0; --i)
+                if (doc.features[size_t(i)].type == CadFeatureType::Fillet && doc.features[size_t(i)].enabled) { fidx = i; break; }
+            if (fidx < 0) continue;
+            const double frad = doc.features[size_t(fidx)].dressup_size;
+            if (!(frad > 0)) continue;
+            label = "Replace the bed fillet with a 45 deg chamfer";
+            steps.push_back(json{{"method", "suppress"}, {"params", {{"feature", fidx}, {"suppressed", true}}}});
+            steps.push_back(json{{"method", "chamfer"}, {"params", {{"where", json{{"kind", "line"}, {"z", bed_z}}}, {"distance", frad}, {"body", body}}}});
+        } else if (kind == "steep_chamfer" && rot_id) {
+            // A sloped face from a tapered extrude: set that feature's taper to 45 deg. With more than one
+            // tapered extrude the note's face cannot be tied to a source, so skip.
+            std::vector<int> tap;
+            for (size_t i = 0; i < doc.features.size(); ++i)
+                if (doc.features[i].type == CadFeatureType::Extrude && doc.features[i].enabled && std::abs(doc.features[i].taper_deg) > 1e-9)
+                    tap.push_back(int(i));
+            if (tap.size() != 1) continue;
+            label = "Make the slope 45 deg";
+            steps.push_back(json{{"method", "set_feature_expr"}, {"params", {{"feature", tap[0]}, {"field", "taper_deg"}, {"expr", "45"}}}});
+        } else if (kind == "horizontal_hole" && rot_id) {
+            // Every enabled plain Hole of the noted diameter (parsed from "d=<mm>") gets its teardrop flag on;
+            // a vertical hole of the same size ignores the flag, so the match needs no axis test.
+            double d = 0;
+            const std::string t = n.value("text", std::string());
+            if (const size_t k = t.find("d="); k != std::string::npos) d = std::atof(t.c_str() + k + 2);
+            if (!(d > 0)) continue;
+            for (size_t i = 0; i < doc.features.size() && steps.size() < 6; ++i) {
+                const CadFeature& f = doc.features[i];
+                if (f.type == CadFeatureType::Hole && f.enabled && !f.hole_teardrop && std::abs(f.hole_diameter - d) <= std::max(0.06, 0.02 * d))   // the note's d comes from the tessellated bore (49.9 for a 50 mm hole)
+                    steps.push_back(json{{"method", "set_feature_expr"}, {"params", {{"feature", int(i)}, {"field", "hole_teardrop"}, {"expr", "1"}}}});
+            }
+            if (steps.empty()) continue;
+            label = "Make the hole a teardrop";
+        } else if (kind == "orientation" && rot_id) {
+            // Turn every body about the origin so the suggested model direction becomes +Z (the analysis is relative to the lowest point, so no drop-to-bed is needed).
+            Vec3d up(0, 0, 1);
+            for (const json& sg : suggestions)
+                if (sg.value("kind", std::string()) == "orientation" && sg.contains("turn_up_to") && sg["turn_up_to"].is_array() && sg["turn_up_to"].size() >= 3)
+                    up = Vec3d(jn(sg["turn_up_to"], 0), jn(sg["turn_up_to"], 1), jn(sg["turn_up_to"], 2));
+            if (up.norm() < 1e-9) continue;
+            up.normalize();
+            if (up.z() > 0.9999) continue;
+            Vec3d u = up.cross(Vec3d::UnitZ());
+            u = u.norm() < 1e-9 ? Vec3d::UnitX() : Vec3d(u.normalized());   // straight down: any horizontal axis turns it over
+            const double ang = std::acos(std::max(-1.0, std::min(1.0, up.dot(Vec3d::UnitZ())))) * 180.0 / M_PI;
+            label = "Rotate the part to the suggested orientation";
+            for (size_t i = 0; i < doc.bodies.size(); ++i)
+                steps.push_back(json{{"method", "transform"}, {"params", {{"body", int(i)},
+                    {"axis_x", u.x()}, {"axis_y", u.y()}, {"axis_z", u.z()}, {"angle", ang},
+                    {"pivot_x", 0.0}, {"pivot_y", 0.0}, {"pivot_z", 0.0}}}});
+        } else if (kind == "text_indent") {
+            // Raised text (an Add extrude of a text sketch) becomes a cut of the same depth into the face: mode -> Cut, direction flipped.
+            for (size_t i = 0; i < doc.features.size() && steps.size() < 12; ++i) {
+                const CadFeature& f = doc.features[i];
+                if (f.type != CadFeatureType::Extrude || !f.enabled || f.mode != BooleanMode::Add) continue;
+                if (f.sketch_ref < 0 || f.sketch_ref >= int(doc.features.size()) || !doc.features[size_t(f.sketch_ref)].is_text()) continue;
+                // flip first: a Cut that still points outward removes nothing and the recompute refuses it
+                steps.push_back(json{{"method", "set_feature_expr"}, {"params", {{"feature", int(i)}, {"field", "extrude_flip"}, {"expr", f.flip ? "0" : "1"}}}});
+                steps.push_back(json{{"method", "set_feature_expr"}, {"params", {{"feature", int(i)}, {"field", "extrude_mode"}, {"expr", "2"}}}});
+            }
+            if (steps.empty()) continue;   // the text is already cut (or has no extrude)
+            label = "Cut the text into the face instead of raising it";
+        } else if (kind == "curve_axis" && rot_id) {
+            // Rotate every body about the origin so the curve's (sign-flipped, up-pointing) axis maps to +Z.
+            // A verb to drop the result back onto the bed does not exist; the transform is reported as-is.
+            if (!n.contains("axis") || !n["axis"].is_array() || n["axis"].size() < 3) continue;
+            Vec3d ax(jn(n["axis"], 0), jn(n["axis"], 1), jn(n["axis"], 2));
+            const double L = ax.norm();
+            if (L < 1e-9) continue;
+            ax /= L;
+            if (ax.z() < 0) ax = -ax;   // eigenvector sign is arbitrary; aim for +Z
+            if (std::abs(ax.z()) > 0.9999) continue;   // already near-vertical
+            const Vec3d u = ax.cross(Vec3d::UnitZ()).normalized();
+            const double ang = std::acos(std::max(-1.0, std::min(1.0, ax.dot(Vec3d::UnitZ())))) * 180.0 / M_PI;
+            label = "Stand the curve upright (rotate the part)";
+            for (size_t i = 0; i < doc.bodies.size(); ++i)
+                steps.push_back(json{{"method", "transform"}, {"params", {{"body", int(i)},
+                    {"axis_x", u.x()}, {"axis_y", u.y()}, {"axis_z", u.z()}, {"angle", ang},
+                    {"pivot_x", 0.0}, {"pivot_y", 0.0}, {"pivot_z", 0.0}}}});
+        } else if (kind == "use_parameters") {
+            // Advice: create depth_<n> variables for the (up to 6) extrudes with a literal distance and bind them.
+            label = "Create variables for the extrude depths";
+            int made = 0;
+            for (size_t i = 0; i < doc.features.size() && made < 6; ++i) {
+                const CadFeature& f = doc.features[i];
+                if (f.type != CadFeatureType::Extrude || !f.enabled || !(f.distance > 0)) continue;
+                if (f.expr.count("distance")) continue;   // already bound
+                const std::string vname = "depth_" + std::to_string(made + 1);
+                std::ostringstream os; os.imbue(std::locale::classic()); os.precision(9); os << f.distance;
+                steps.push_back(json{{"method", "set_variable"}, {"params", {{"name", vname}, {"expr", os.str()}}}});
+                steps.push_back(json{{"method", "set_feature_expr"}, {"params", {{"feature", int(i)}, {"field", "distance"}, {"expr", vname}}}});
+                ++made;
+            }
+            if (made == 0) continue;
+        } else {
+            continue;   // no automatic fix for this kind
+        }
+        n["fix"] = json{{"label", label}, {"steps", std::move(steps)}};
+    }
+}
+
 json action_analyze_printability(DesignPanel* panel, const json& params)
 {
     CadDocument& doc = panel->mcp_doc();
@@ -3603,13 +4570,17 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
     const double ang = params.value("overhang_angle", 45.0);
     if (ang <= 0 || ang >= 90) throw std::runtime_error("overhang_angle is in (0, 90) degrees from vertical");
     TriangleMesh m = doc.display_body_meshes[b];
+    Matrix3d rot = Matrix3d::Identity();   // the print orientation, to turn cylinder axes the same way as the mesh
+    Vec3d rot_c = Vec3d::Zero();           // the centre it turned about
     if (params.contains("rotate")) {
         if (!params["rotate"].is_array() || params["rotate"].size() != 3) throw std::runtime_error("'rotate' is [rx, ry, rz] in degrees");
         const double k = M_PI / 180.0;
         const Vec3d c = m.bounding_box().center();
+        rot_c = c;
         Transform3d t = Transform3d::Identity();
         t.translate(c);
-        t.rotate(Eigen::AngleAxisd(jn(params["rotate"], 2) * k, Vec3d::UnitZ()) * Eigen::AngleAxisd(jn(params["rotate"], 1) * k, Vec3d::UnitY()) * Eigen::AngleAxisd(jn(params["rotate"], 0) * k, Vec3d::UnitX()));
+        rot = (Eigen::AngleAxisd(jn(params["rotate"], 2) * k, Vec3d::UnitZ()) * Eigen::AngleAxisd(jn(params["rotate"], 1) * k, Vec3d::UnitY()) * Eigen::AngleAxisd(jn(params["rotate"], 0) * k, Vec3d::UnitX())).toRotationMatrix();
+        t.rotate(rot);
         t.translate(-c);
         m.transform(t);
     }
@@ -3617,36 +4588,154 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
     const double zmin = bb.min.z();
     const double cos_lim = std::cos((90.0 - ang) * M_PI / 180.0);   // a down-facing normal with -nz > cos_lim overhangs by more than `ang`
     double area = 0, bed = 0, over = 0;
-    std::map<long, std::array<double, 7>> levels;   // z (0.1 mm) -> area, x0, y0, x1, y1, z
+    struct Level { std::array<double, 13> d; std::vector<int> tris; std::vector<std::array<float, 6>> xy; };   // d: area, x0, y0, x1, y1, z, biggest tri area, its centroid x y z, its normal x y z; xy: every tri's x0,y0,x1,y1,x2,y2 (uncapped, for the inscribed-circle span)
+    std::map<long, Level> levels;
+    size_t fi = 0;
     for (const stl_triangle_vertex_indices& f : m.its.indices) {
+        const size_t fidx = fi++;
         const Vec3f& p0 = m.its.vertices[f(0)]; const Vec3f& p1 = m.its.vertices[f(1)]; const Vec3f& p2 = m.its.vertices[f(2)];
         const Vec3d n = (p1 - p0).cast<double>().cross((p2 - p0).cast<double>());
-        const double a = 0.5 * n.norm();
+        const double nn = n.norm();
+        const double a = 0.5 * nn;
         if (a < 1e-12) continue;
         area += a;
-        const double nz = n.z() / n.norm();
+        const double nz = n.z() / nn;
         if (nz >= -1e-9) continue;
         const double zc = (p0.z() + p1.z() + p2.z()) / 3.0;
         if (zc - zmin < 0.05 && -nz > 0.99) { bed += a; continue; }   // flat on the bed: contact, not an overhang
         if (-nz <= cos_lim) continue;
         over += a;
-        auto& L = levels[std::lround(zc * 10.0)];
-        if (L[0] == 0) L = {0, 1e30, 1e30, -1e30, -1e30, zc, 0};
+        auto& lev = levels[std::lround(zc * 10.0)];
+        auto& L = lev.d; auto& btris = lev.tris;
+        if (L[0] == 0) L = {0, 1e30, 1e30, -1e30, -1e30, zc, 0, 0, 0, 0, 0, 0, 0};
         L[0] += a;
+        if (a > L[6]) { L[6] = a; L[7] = (p0.x() + p1.x() + p2.x()) / 3.0; L[8] = (p0.y() + p1.y() + p2.y()) / 3.0; L[9] = zc; L[10] = n.x() / nn; L[11] = n.y() / nn; L[12] = n.z() / nn; }
+        if (btris.size() < 2000) btris.push_back(int(fidx));
+        lev.xy.push_back({p0.x(), p0.y(), p1.x(), p1.y(), p2.x(), p2.y()});   // every tri, uncapped: feeds the inscribed-circle span
         for (const Vec3f* q : {&p0, &p1, &p2}) { L[1] = std::min<double>(L[1], q->x()); L[2] = std::min<double>(L[2], q->y()); L[3] = std::max<double>(L[3], q->x()); L[4] = std::max<double>(L[4], q->y()); }
     }
-    std::vector<std::array<double, 7>> top;
-    for (auto& kv : levels) top.push_back(kv.second);
-    std::sort(top.begin(), top.end(), [](const auto& x, const auto& y) { return x[0] > y[0]; });
+    std::vector<Level> top;
+    for (auto& kv : levels) top.push_back(std::move(kv.second));
+    std::sort(top.begin(), top.end(), [](const Level& x, const Level& y) { return x.d[0] > y.d[0]; });
     json lv = json::array();
-    for (size_t i = 0; i < top.size() && i < 6; ++i)
-        lv.push_back(json{{"z", top[i][5] - zmin}, {"area_mm2", top[i][0]}, {"min", {top[i][1], top[i][2]}}, {"max", {top[i][3], top[i][4]}}});
+    const double bridge_max = params.value("bridge_max", 20.0);   // sheet tip 12: printers bridge ~2 cm
+    json warnings = json::array();
+    json suggestions = json::array();   // sheet tips 12-14 and the bridging ones: what to add under a roof, with numbers; analysis only, nothing is built
+    const double layer_h = params.value("layer_h", 0.4);
+    bool layer_done = false;
+    int small_marked = 0;
+    auto num = [](double v) { std::ostringstream os; os.imbue(std::locale::classic()); os.precision(3); os << v; return os.str(); };
+    json notes = json::array();   // the issues that have a place on the part: the viewport pins each one there (model frame)
+    auto to_model = [&](const Vec3d& p) { return Vec3d(rot_c + rot.transpose() * (p - rot_c)); };
+    auto to_model_dir = [&](const Vec3d& d) { return rot.transpose() * d; };   // a direction: rotate only, no translation
+    auto note = [&](const char* kind, const char* severity, const std::string& text, const Vec3d& at, const Vec3d& n_model, const std::vector<int>& tris) {
+        json j = json{{"kind", kind}, {"severity", severity}, {"text", text}, {"at", {at.x(), at.y(), at.z()}}};
+        if (!n_model.isZero()) j["normal"] = json::array({n_model.x(), n_model.y(), n_model.z()});
+        if (!tris.empty()) j["tris"] = json(tris);
+        notes.push_back(std::move(j));
+    };
+    for (size_t i = 0; i < top.size() && i < 6; ++i) {
+        // ponytail: span = the inscribed-circle diameter of the roof (a strip bridges its width whatever its
+        // length; an L or a ring bridge their narrowest corridor). Fall back to the bbox short side if empty.
+        const double span = top[i].xy.empty()
+            ? std::min(top[i].d[3] - top[i].d[1], top[i].d[4] - top[i].d[2])
+            : inscribed_span(top[i].xy, top[i].d[1], top[i].d[2], top[i].d[3], top[i].d[4]);
+        lv.push_back(json{{"z", top[i].d[5] - zmin}, {"area_mm2", top[i].d[0]}, {"min", {top[i].d[1], top[i].d[2]}}, {"max", {top[i].d[3], top[i].d[4]}},
+                          {"span_mm", span}, {"too_long_to_bridge", span > bridge_max}});
+        const Vec3d lvl_n = to_model_dir(Vec3d(top[i].d[10], top[i].d[11], top[i].d[12]));   // the level's biggest triangle normal, model frame
+        if (span > bridge_max) {
+            warnings.push_back("flat roof at z=" + num(top[i].d[5] - zmin) + " spans " + num(span) + " mm, over " + num(bridge_max) + ": stagger triangles under it or add sacrificial ribs");
+            note("long_bridge", "warning", "Flat roof spans " + num(span) + " mm (over " + num(bridge_max) + "): add ribs or staggered triangles under it",
+                 to_model(Vec3d(top[i].d[7], top[i].d[8], top[i].d[9])), lvl_n, top[i].tris);
+            // Carry the roof geometry to the post-pass fix (model frame; valid because fixes are unrotated-only).
+            const int nbr = int(std::ceil(span / bridge_max)) - 1;
+            const double pitchr = span / (nbr + 1);
+            notes.back()["roof"] = json{{"z", top[i].d[5] - zmin}, {"min", {top[i].d[1], top[i].d[2]}}, {"max", {top[i].d[3], top[i].d[4]}}};
+            notes.back()["ribs"] = json{{"count", nbr}, {"pitch_mm", pitchr}};
+        }
+        // ponytail: thresholds are the sheet's rule of thumb (a printer bridges ~2 cm easily); 5 mm below which nothing is worth adding.
+        const json at = json{{"level", int(i)}, {"z", top[i].d[5] - zmin}, {"min", {top[i].d[1], top[i].d[2]}}, {"max", {top[i].d[3], top[i].d[4]}}, {"span_mm", span}};
+        auto add = [&](const char* kind, json extra) { json j = at; j["kind"] = kind; for (auto it = extra.begin(); it != extra.end(); ++it) j[it.key()] = it.value(); suggestions.push_back(j); };
+        if (span > 5.0 && span <= bridge_max && !layer_done) {
+            layer_done = true;   // levels are sorted by area: the biggest roof gets the suggestion, a curve's slices do not each get one
+            note("sacrificial_layer", "suggestion", "A " + num(span) + " mm roof: a one-layer sacrificial membrane under it bridges cleanly",
+                 to_model(Vec3d(top[i].d[7], top[i].d[8], top[i].d[9])), lvl_n, top[i].tris);
+            add("sacrificial_layer", json{{"layer_h", layer_h}, {"why", "thin one-layer membrane under the roof, cut away after printing"}});
+            notes.back()["roof"] = json{{"z", top[i].d[5] - zmin}, {"min", {top[i].d[1], top[i].d[2]}}, {"max", {top[i].d[3], top[i].d[4]}}};
+            notes.back()["layer_h"] = layer_h;
+        }
+        // Small flat roofs (span <= 5 mm) bridge with no help; mark them so the user sees where overhangs are, capped at 3 pins.
+        else if (span > 0.5 && span <= 5.0 && small_marked < 3) {
+            ++small_marked;
+            note("small_overhang", "suggestion", "A " + num(span) + " mm overhang: it bridges without support",
+                 to_model(Vec3d(top[i].d[7], top[i].d[8], top[i].d[9])), lvl_n, top[i].tris);
+        }
+        if (span > bridge_max) {
+            const int n = int(std::ceil(span / bridge_max)) - 1;   // ribs so that every gap is within bridge_max
+            const double pitch = span / (n + 1);
+            add("sacrificial_ribs", json{{"count", n}, {"pitch_mm", pitch}, {"angle_deg", 0}, {"why", "perpendicular ribs under the roof; each gap bridges"}});
+            add("diagonal_ribs", json{{"count", n}, {"pitch_mm", pitch}, {"angle_deg", 45}, {"why", "diagonal ribs bridge between them; good inside a model"}});
+            add("staggered_triangles", json{{"rows", n + 1}, {"base_mm", pitch}, {"why", "triangles staggered under a large roof so each bridge stays short"}});
+            add("stepped_bridge_lip", json{{"step_mm", layer_h}, {"steps", 2}, {"why", "thin stepped ledge at both ends of the span; the first bridge layers have something to land on"}});
+        }
+    }
+    // Horizontal holes (sheet tip 3): a bore whose axis lies near the bed plane prints with a sagging roof unless teardrop-shaped.
+    // A bore is split into several cylinder faces (seams, a teardrop's cut-away): group the faces that share one axis line and radius,
+    // and compare their summed area to the full cylinder. About 3/4 left = a teardrop is already cut in, so no suggestion.
+    struct Bore { Vec3d base, ax; double r, lo, hi, area; };   // lo/hi: the bore's extent along its axis (faces may be split lengthwise)
+    std::vector<Bore> bores;
+    for (const TopoDS_Face& f : GeometryEngine::faces_of(doc.bodies[b].shape)) {
+        const GeometryEngine::CylinderFace cyl = GeometryEngine::cylinder_of_face(f);
+        if (!cyl.ok || !cyl.internal) continue;
+        const Vec3d ax = (rot * cyl.axis).normalized();
+        if (std::abs(ax.z()) > 0.5) continue;   // closer to vertical than horizontal: prints round
+        GProp_GProps sp; BRepGProp::SurfaceProperties(f, sp);
+        bool merged = false;
+        for (Bore& o : bores) {
+            const Vec3d d = cyl.base - o.base;
+            if (std::abs(o.ax.dot(ax)) > 0.999 && std::abs(o.r - cyl.radius) < 1e-6 && (d - o.ax * d.dot(o.ax)).norm() < 1e-4) { o.area += sp.Mass(); o.lo = std::min(o.lo, std::min(d.dot(o.ax), (d + ax * cyl.height).dot(o.ax))); o.hi = std::max(o.hi, std::max(d.dot(o.ax), (d + ax * cyl.height).dot(o.ax))); merged = true; break; }
+        }
+        if (!merged) bores.push_back({cyl.base, ax, cyl.radius, 0.0, cyl.height, sp.Mass()});
+    }
+    json holes = json::array();
+    double bore_r_max = 0;
+    for (const Bore& o : bores) bore_r_max = std::max(bore_r_max, o.r);
+    for (const Bore& o : bores) {
+        const double full = 2 * M_PI * o.r * (o.hi - o.lo);
+        const bool teardrop_done = full > 0 && o.area < 0.9 * full;   // ponytail: assumes equal-length faces; a stepped bore may misread
+        holes.push_back(json{{"diameter_mm", 2 * o.r}, {"teardrop_suggested", !teardrop_done}, {"has_teardrop", teardrop_done}, {"bore_fraction", full > 0 ? o.area / full : 0.0}});
+        if (!teardrop_done) {
+            warnings.push_back("horizontal hole d=" + num(2 * o.r) + " mm: use a teardrop profile");
+            // the pin sits on the roof of the bore, halfway along it (model frame: the axis turned back, "up" is the print's +Z turned back)
+            note("horizontal_hole", "warning", "Horizontal hole d=" + num(2 * o.r) + " mm: use a teardrop profile",
+                 Vec3d(o.base + (rot.transpose() * o.ax) * (0.5 * (o.lo + o.hi)) + (rot.transpose() * Vec3d::UnitZ()) * o.r),
+                 -(rot.transpose() * Vec3d::UnitZ()), {});   // the roof faces down into the bore; no tris on a bore
+        }
+    }
+
+    // Sacrificial geometry is marked in (kept in the part): list the features that added it, so a caller knows what to cut away after printing.
+    json sacrificial = json::array();
+    for (size_t i = 0; i < doc.features.size(); ++i)
+        if (doc.features[i].type == CadFeatureType::Hole && doc.features[i].hole_bridge_layer_h > 1e-6)
+            sacrificial.push_back(json{{"feature", int(i)}, {"kind", "hole bridge layers"}, {"layer_h", doc.features[i].hole_bridge_layer_h}, {"layers", 2}});
+    const json extras = dfam_extras(m, doc, ang, params.value("line_width", 0.4), params.value("clearance", 0.3), bore_r_max, suggestions, warnings, notes, rot, rot_c);
+    const bool rot_id = !params.contains("rotate")
+        || (jn(params["rotate"], 0) == 0.0 && jn(params["rotate"], 1) == 0.0 && jn(params["rotate"], 2) == 0.0);
+    attach_print_fixes(notes, suggestions, doc, b, rot_id, params.value("clearance", 0.3), m.bounding_box().min.z());
     int solids = 0;
     for (TopExp_Explorer ex(doc.bodies[b].shape, TopAbs_SOLID); ex.More(); ex.Next()) ++solids;
+    if (solids > 1) warnings.push_back("the body is " + std::to_string(solids) + " disconnected solids");
+    // The analyze verb is a print check too: feed the viewport so the pins, red tint and side list
+    // reflect this analysis (the harness inspects them right after analyze_printability).
+    if (DesignCanvas* v = panel->mcp_viewport()) {
+        std::vector<PrintNote> pnl;
+        build_print_pins(notes, false, &pnl);
+        v->set_print_notes(std::move(pnl), &doc.display_body_meshes[b]);
+    }
     return json{{"ok", true}, {"body", b}, {"height_mm", bb.size().z()}, {"footprint_mm", {bb.size().x(), bb.size().y()}},
                 {"bed_contact_mm2", bed}, {"overhang_mm2", over}, {"overhang_pct", area > 0 ? 100.0 * over / area : 0.0},
-                {"overhang_angle", ang}, {"overhang_levels", lv}, {"solids", solids},
-                {"warnings", solids > 1 ? json::array({"the body is " + std::to_string(solids) + " disconnected solids"}) : json::array()}};
+                {"overhang_angle", ang}, {"overhang_levels", lv}, {"horizontal_holes", holes}, {"solids", solids},
+                {"sacrificial", sacrificial}, {"suggestions", suggestions}, {"warnings", warnings}, {"extras", extras}, {"notes", notes}};
 }
 
 // {name, values:[expr...], expect?:{bodies, volume_min, volume_max, size_max:[x,y,z], size_min:[x,y,z], no_interference}}
@@ -4678,6 +5767,14 @@ json ui_inspect(DesignPanel* panel)
         for (const auto& hh : v->select_panel_hits()) hits.push_back(json::array({hh.first, hh.second}));
         out["select_panel"] = {{"checks", hits}};
     }
+    if (v) {   // the last print check's notes (global ones included), one entry per note
+        json pnl = json::array();
+        for (const PrintNote& pnpt : v->print_notes())
+            pnl.push_back({{"n", pnpt.n}, {"open", pnpt.open}, {"resolved", pnpt.resolved}, {"tinted_tris", pnpt.tinted_tris},
+                           {"visible", pnpt.visible}, {"has_pin", pnpt.has_pin}, {"kind", pnpt.kind}});
+        out["print_notes"] = pnl;
+        out["print_check_on"] = v->print_check_on();
+    }
     if (v && v->tree_overlay_on()) {   // the on-canvas tree: where each row is, so a rig test can drag one
         const DesignTreeOverlay& to = const_cast<DesignCanvas*>(v)->tree_overlay();
         out["tree"] = {{"rows_y", to.row_mids()}, {"x", to.row_x()}, {"selected", panel->mcp_tree_selection()}};
@@ -5076,6 +6173,7 @@ json action_batch(DesignPanel* panel, const json& params)
 }
 
 json call_method_core(DesignPanel* panel, const std::string& method, const json& params);
+json action_apply_print_fix(DesignPanel* panel, const json& params);   // defined after the dispatcher
 
 // The one dispatch point: the socket handler and `batch` both come through here. A call that changes the design
 // reports WHAT it changed - created/changed/removed bodies, features added, warnings - so a caller need not diff
@@ -5248,6 +6346,100 @@ json action_extrude_circle(DesignPanel* panel, const json& params)
         if (r.contains("ok") && !r["ok"].get<bool>()) { undo_all(); }
         return r;
     } catch (...) { undo_all(); throw; }
+}
+
+// The headless Text tool: builds the Text sketch feature the GUI dialog makes (sketch -> imported
+// regions -> optional extrude) straight from the params, no dialog — typing into the dialog over the
+// socket never worked. One undo boundary around the whole verb. Shared vectorisation: vectorise_text.
+json action_add_text(DesignPanel* panel, const json& params)
+{
+    if (!params.contains("text") || !params["text"].is_string())
+        throw std::runtime_error("add_text needs 'text' (a string)");
+    const std::string text = params["text"].get<std::string>();
+    if (text.empty()) throw std::runtime_error("text must not be empty");
+    if (text.size() > 200) throw std::runtime_error("text is limited to 200 characters");
+
+    const double height = params.value("height", 6.0);
+    if (!(height > 0)) throw std::runtime_error("height must be > 0");
+    const std::string font = params.value("font", std::string());
+
+    CadDocument& doc = panel->mcp_doc();
+    DesignCanvas* vp = panel->mcp_viewport();
+    if (vp == nullptr || vp->is_sketching()) throw std::runtime_error("a sketch is already open: commit or cancel it first");
+
+    // Vectorise BEFORE touching the document, so a bad font / no outline throws clean.
+    const ImportRegions regions = vectorise_text(text, font, height);
+    if (regions.empty())
+        throw std::runtime_error(font.empty()
+            ? "could not vectorise the text: missing font or no outline for these glyphs"
+            : "could not vectorise the text with font '" + font + "': missing font or no outline for these glyphs");
+
+    // plane_from silently falls back to XY, so reject an unknown plane name up front.
+    if (params.contains("plane") && !params.contains("face")) {
+        const std::string ps = params["plane"].is_string() ? params["plane"].get<std::string>() : std::string();
+        if (ps != "XY" && ps != "XZ" && ps != "YZ" && ps.rfind("datum:", 0) != 0)
+            throw std::runtime_error("plane is XY, XZ, YZ or datum:N");
+    }
+    // Plane or picked face, resolved (read-only) before the checkpoint, like sketch_begin / the dialog.
+    SketchPlane pl;
+    Vec2d off(0, 0);
+    bool on_face = false; int face_body = -1;
+    int body_i = -1, face_i = -1; TopoDS_Face fc;
+    if (face_of_params(params, doc, body_i, face_i, fc)) {
+        pl = SketchPlane::from_face(fc);
+        off = pl.project(GeometryEngine::face_centroid_world(fc), pl.normal);
+        on_face = true; face_body = body_i;
+    } else {
+        pl = plane_from(params, doc);
+        off = Vec2d(params.value("x", 0.0), params.value("y", 0.0));
+    }
+
+    // Chained extrude params, validated before any mutation.
+    const bool has_extrude = params.contains("extrude_distance");
+    double d = 0, distance2 = 0;
+    BooleanMode mode = BooleanMode::Add;
+    ExtrudeEnd end = ExtrudeEnd::Blind;
+    if (has_extrude) {
+        d = params["extrude_distance"].get<double>();
+        if (!(d > 0)) throw std::runtime_error("extrude_distance must be > 0");
+        mode = bool_from(params.value("boolean", std::string("union")));
+        const std::string end_s = params.value("end", std::string("blind"));
+        if (end_s == "two_sided")      { end = ExtrudeEnd::TwoSided; distance2 = params.value("distance2", d); }
+        else if (end_s == "symmetric")   end = ExtrudeEnd::Symmetric;
+        else if (end_s == "through_all") end = ExtrudeEnd::ThroughAll;
+        else if (end_s == "up_to_face")  end = ExtrudeEnd::UpToFace;
+        else if (end_s != "blind") throw std::runtime_error("end is blind|two_sided|symmetric|through_all|up_to_face");
+    }
+
+    doc.checkpoint();   // one undo boundary around the whole verb
+    CadFeature f;
+    f.type             = CadFeatureType::Sketch;
+    f.name             = panel->mcp_new_feature_name(wxString("Text"));
+    f.plane            = pl;
+    f.import_offset    = off;
+    f.import_on_face   = on_face;
+    f.import_face_body = face_body;
+    f.imported_regions = regions;
+    f.text_string      = text;
+    f.text_font        = font;
+    f.text_height      = height;
+    const int si = doc.append_feature(f);
+
+    int ei = -1;
+    if (has_extrude) {
+        ei = doc.add_extrude(si, d, /*symmetric*/false, mode, "Extrude");
+        CadFeature& fe = doc.features[size_t(ei)];
+        fe.extrude_end = end;
+        fe.distance2 = distance2;
+        const int target = target_body_arg(params, doc);
+        if (target >= 0) fe.target_body = target;
+    }
+    bool ok = doc.recompute();
+    if (!ok) { const std::string why = doc.error; doc.undo(); doc.error = why; }
+    panel->mcp_after_change();
+    json r{{"ok", ok}, {"text_index", si}, {"bodies", int(doc.bodies.size())}, {"error", doc.error}};
+    if (ei >= 0) r["extrude_index"] = ei;
+    return r;
 }
 
 // Memory guard. A command that builds geometry can use hundreds of MB (a helical sweep keeps 100-300 MB of triangulation), and a loop of
@@ -5425,6 +6617,7 @@ json call_method_core(DesignPanel* panel, const std::string& method, const json&
     if (method == "sketch_constrain") return action_sketch_constrain(panel, params);
     if (method == "extrude_rect")   return action_extrude_rect(panel, params);
     if (method == "extrude_circle") return action_extrude_circle(panel, params);
+    if (method == "add_text")       return action_add_text(panel, params);
     if (method == "export")         return action_export(panel, params);
     if (method == "list_commands")  return action_list_commands(panel, params);
     if (method == "execute")        return action_execute(panel, params);
@@ -5495,7 +6688,103 @@ json call_method_core(DesignPanel* panel, const std::string& method, const json&
     if (method == "select_topology")    return action_select_topology(panel, params);
     if (method == "sweep_variable")     return action_sweep_variable(panel, params);
     if (method == "analyze_printability") return action_analyze_printability(panel, params);
+    if (method == "apply_print_fix") return action_apply_print_fix(panel, params);
     throw MethodNotFound{};
+}
+
+// Run one automatic fix: each step goes through the same dispatcher the socket uses (call_method_core),
+// so behaviour is identical to a user calling the verb. The first failing step stops the fix, rolls the
+// already-applied steps back (features/variables restored, exactly as the atomic verbs and call_method's
+// transaction do) and rethrows the verb's message. Returns {ok, applied_label, steps}.
+json run_print_fix_impl(DesignPanel* panel, const json& fix)
+{
+    CadDocument& doc = panel->mcp_doc();
+    if (!fix.is_object() || !fix.contains("steps") || !fix["steps"].is_array())
+        throw std::runtime_error("the fix has no steps");
+    const std::string label = fix.value("label", std::string());
+    const auto saved_features = doc.features;
+    const auto saved_vars = doc.variables;
+    int applied = 0;
+    json prev_result = json::object();   // the previous step's result, for {prev.<key>} step chaining
+    try {
+        for (size_t si = 0; si < fix["steps"].size(); ++si) {
+            const json& st = fix["steps"][si];
+            if (!st.is_object() || !st.contains("method") || !st["method"].is_string())
+                throw std::runtime_error("a fix step has no 'method'");
+            const std::string method = st["method"].get<std::string>();
+            json params = st.value("params", json::object());
+            // Step chaining: replace {prev.<key>} (bare, or embedded in a string) with the previous step's
+            // result value for that key. A bare placeholder keeps the number a JSON number; a missing key fails the step.
+            if (si > 0) {
+                std::function<json(const json&)> subst = [&](const json& v) -> json {
+                    if (v.is_string()) {
+                        const std::string s = v.get<std::string>();
+                        std::string out = s; size_t pos = 0; bool changed = false;
+                        while (pos < out.size()) {
+                            const size_t p = out.find("{prev.", pos);
+                            if (p == std::string::npos) break;
+                            const size_t q = out.find('}', p);
+                            if (q == std::string::npos) break;
+                            const std::string key = out.substr(p + 6, q - (p + 6));
+                            if (!prev_result.contains(key))
+                                throw std::runtime_error(method + " step references missing previous-result key '" + key + "'");
+                            const json& rv = prev_result[key];
+                            if (p == 0 && q == out.size() - 1) return rv;   // whole string: number stays a number
+                            const std::string rep = rv.is_string() ? rv.get<std::string>()
+                                : rv.is_number() ? (std::ostringstream() << rv.get<double>()).str() : rv.dump();
+                            out.replace(p, q - p + 1, rep);
+                            pos = p + rep.size(); changed = true;
+                        }
+                        return changed ? json(out) : v;
+                    }
+                    if (v.is_array()) { json a = v; for (auto& e : a) e = subst(e); return a; }
+                    if (v.is_object()) { json o = v; for (auto it = o.begin(); it != o.end(); ++it) it.value() = subst(it.value()); return o; }
+                    return v;
+                };
+                params = subst(params);
+            }
+            json r;
+            try { r = call_method_core(panel, method, params); }
+            catch (const MethodNotFound&) { throw std::runtime_error("unknown fix verb: " + method); }
+            if (!r.is_object() || !r.value("ok", false))
+                throw std::runtime_error(method + ": " + r.value("error", std::string("failed")));
+            prev_result = r;
+            ++applied;
+        }
+    } catch (...) {
+        doc.features = saved_features; doc.variables = saved_vars;
+        try { doc.recompute(); } catch (const std::exception&) {}
+        throw;
+    }
+    return json{{"ok", true}, {"applied_label", label}, {"steps", applied}};
+}
+
+// apply_print_fix: analyse `body` (rotate identity), pick the first note of `kind` (or `index`) that has
+// a fix, run it, and report the note kinds left after a fresh analysis. Refuses when the note has no fix.
+json action_apply_print_fix(DesignPanel* panel, const json& params)
+{
+    CadDocument& doc = panel->mcp_doc();
+    const int b = params.contains("body") && params["body"].is_string() ? body_by_name(doc, params["body"].get<std::string>()) : params.value("body", 0);
+    const std::string kind = params.value("kind", std::string());
+    const int index = params.value("index", -1);
+    if (kind.empty() && index < 0) throw std::runtime_error("apply_print_fix needs 'kind' (note kind) or 'index' (note index)");
+    const json an = action_analyze_printability(panel, json{{"body", b}});
+    const json& notes = an["notes"];
+    int target = -1;
+    if (index >= 0) { if (index < int(notes.size())) target = index; }
+    else { for (size_t i = 0; i < notes.size(); ++i) if (notes[i].value("kind", std::string()) == kind) { target = int(i); break; } }
+    if (target < 0) throw std::runtime_error(index >= 0 ? "no note at that index" : "no note of kind '" + kind + "'");
+    const json& n = notes[size_t(target)];
+    if (!n.contains("fix") || !n["fix"].is_object())
+        throw std::runtime_error("note '" + n.value("kind", std::string()) + "' has no automatic fix");
+    const json r = run_print_fix_impl(panel, n["fix"]);
+    const json an2 = action_analyze_printability(panel, json{{"body", b}});
+    json remaining = json::array();
+    std::set<std::string> seen;
+    for (const json& nn : an2["notes"]) { const std::string k = nn.value("kind", std::string()); if (seen.insert(k).second) remaining.push_back(k); }
+    json out = r;
+    out["remaining"] = std::move(remaining);
+    return out;
 }
 
 // Why `method` may not run now ("" = it may). Methods that only LOOK always may. Everything else changes the document
@@ -6024,6 +7313,28 @@ void tcp_server_thread(int port)
 }
 
 } // namespace
+
+// Public entry for the panel's Fix button; the implementation lives with the other verbs in the anonymous namespace.
+json run_print_fix(DesignPanel* panel, const json& fix) { return run_print_fix_impl(panel, fix); }
+
+std::string print_check_summary(DesignPanel* panel, int body, bool& clean, bool warnings_only, std::vector<PrintNote>* pins)
+{
+    const json r = action_analyze_printability(panel, json{{"body", body}});
+    if (pins) build_print_pins(r.at("notes"), warnings_only, pins);
+    std::vector<std::string> msgs;
+    std::set<std::string> kinds;
+    for (const json& w : r.at("warnings")) msgs.push_back(w.get<std::string>());
+    if (!warnings_only) for (const json& s : r.at("suggestions")) {
+        const std::string k = s.value("kind", std::string());
+        if (!kinds.insert(k).second) continue;   // one line per kind
+        msgs.push_back(k + ": " + s.value("why", std::string()));
+    }
+    clean = msgs.empty();
+    std::string out;
+    for (size_t i = 0; i < msgs.size() && i < 2; ++i) out += (i ? " | " : "") + (msgs[i].size() > 100 ? msgs[i].substr(0, 97) + "..." : msgs[i]);   // the status line is two or three lines tall
+    if (msgs.size() > 2) out += " (+" + std::to_string(msgs.size() - 2) + " more: analyze_printability lists all)";
+    return out;
+}
 
 std::string mcp_socket_path()
 {

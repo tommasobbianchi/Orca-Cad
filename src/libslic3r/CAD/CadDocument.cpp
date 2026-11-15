@@ -34,6 +34,7 @@
 #include <BRepOffsetAPI_MakeOffset.hxx>
 #include <NCollection_List.hxx>
 #include <BRepAlgoAPI_Common.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepAlgoAPI_Defeaturing.hxx>
 #include <BRepAlgoAPI_BooleanOperation.hxx>
 #include <BRepOffsetAPI_MakePipe.hxx>
@@ -606,7 +607,9 @@ static void assign_field(CadFeature& f, const std::string& field, double value)
     if (field.rfind("dim:", 0) == 0) {   // a sketch dimension: the value of entity_constraints[N]; the sketch is re-solved afterwards
         const int k = std::atoi(field.c_str() + 4);
         if (k < 0 || k >= int(f.entity_constraints.size())) throw std::runtime_error(format(_u8L("no sketch dimension %1%"), field));
-        f.entity_constraints[k].value = value;
+        // Expressions work in degrees; an angle constraint stores radians (SketchSolver converts back).
+        auto& c = f.entity_constraints[k];
+        c.value = c.type == SketchConstraintType::Angle ? value * M_PI / 180.0 : value;
         return;
     }
     const auto& dm = bindable_double_fields();
@@ -614,6 +617,9 @@ static void assign_field(CadFeature& f, const std::string& field, double value)
     // The Thread card shows a DIAMETER (the size a thread is named by: M6, 1/4"), so that is
     // the name it offers for binding; thread_radius stays for recipes that already use it.
     if (field == "thread_diameter")   { f.thread_radius = 0.5 * value; return; }
+    if (field == "extrude_mode")      { f.mode = value > 1.5 ? BooleanMode::Cut : value > 0.5 ? BooleanMode::Add : BooleanMode::New; return; }   // 0 new, 1 add, 2 cut
+    if (field == "extrude_flip")      { f.flip = value > 0.5; return; }
+    if (field == "hole_teardrop")     { f.hole_teardrop = value > 0.5; return; }   // 0/1: a boolean driven by a number, used by the Print check fix
     const auto& im = bindable_int_fields();   // rounded
     if (auto it = im.find(field); it != im.end()) { f.*(it->second) = (int)std::lround(value); return; }
     throw std::runtime_error(format(_u8L("unknown parameter: %1%"), field));
@@ -637,6 +643,9 @@ std::vector<std::string> CadDocument::bindable_fields()
     for (const auto& kv : bindable_double_fields()) v.push_back(kv.first);
     for (const auto& kv : bindable_int_fields()) v.push_back(kv.first);
     v.push_back("thread_diameter");
+    v.push_back("hole_teardrop");
+    v.push_back("extrude_mode");
+    v.push_back("extrude_flip");
     std::sort(v.begin(), v.end());
     return v;
 }
@@ -3567,6 +3576,39 @@ void CadDocument::apply_feature(TopoDS_Shape& result, bool& have_body,
         if (!cut.IsDone()) throw std::runtime_error(_u8L("hole cut failed"));
         result = cut.Shape();
 
+        // Teardrop (sheet tip 3): a bore lying on the bed sags at its roof, so add a 45 deg point on the +Z side (the print "up").
+        // Round when the axis is within ~60 deg of vertical (it already prints clean). The point is a kite: centre, two tangent points, apex at r*sqrt2.
+        if (f.hole_teardrop && std::abs(n.Z()) < 0.5) {
+            const Vec3d nn(n.X(), n.Y(), n.Z());
+            Vec3d up = Vec3d::UnitZ() - nn * nn.z();   // world +Z projected into the bore's plane
+            up.normalize();
+            const Vec3d side = nn.cross(up);
+            const double r = f.hole_diameter * 0.5, k = r / std::sqrt(2.0);
+            auto P = [&](const Vec3d& d) { return gp_Pnt(c.x() + d.x(), c.y() + d.y(), c.z() + d.z()); };
+            BRepBuilderAPI_MakePolygon kite;
+            // The two 45 deg sides are tangent to the circle, so they never cut into it. A flat top of width w sits at 2k - w/2 above the centre;
+            // that stays above the circle's own top (r) while w <= 0.828 r, hence the clamp.
+            // The flat is a roof the slicer cuts at layer heights: its Z must sit on a layer boundary and at least one layer above the circle's
+            // top, or the slicer can round it DOWN into the circle. So: ask for the width, raise the flat to the next boundary (that only
+            // narrows it, the 45 deg sides stay tangent) and fall back to a sharp point when the boundary is above the apex.
+            const double lh = std::max(0.0, f.hole_layer_h);
+            double yt = 2.0 * k - 0.5 * std::min(f.hole_teardrop_flat, 0.8 * r);
+            yt = std::max(yt, r + lh);
+            if (lh > 1e-6 && up.z() > 0.5) yt = (std::ceil((c.z() + yt * up.z()) / lh - 1e-6) * lh - c.z()) / up.z();
+            const double wf = 2.0 * (2.0 * k - yt);
+            if (f.hole_teardrop_flat > 1e-6 && wf > 0.05) {
+                kite.Add(P(Vec3d::Zero())); kite.Add(P(side * k + up * k)); kite.Add(P(side * (0.5 * wf) + up * yt)); kite.Add(P(-side * (0.5 * wf) + up * yt)); kite.Add(P(-side * k + up * k)); kite.Close();
+            } else {
+                kite.Add(P(Vec3d::Zero())); kite.Add(P(side * k + up * k)); kite.Add(P(up * (r * std::sqrt(2.0)))); kite.Add(P(-side * k + up * k)); kite.Close();
+            }
+            if (!kite.IsDone()) throw std::runtime_error(_u8L("teardrop wire failed"));
+            TopoDS_Shape pt = f.hole_through
+                ? SketchEngine::make_extrude(kite.Wire(), f.plane, 1.0e5, true, 0.0)
+                : SketchEngine::make_extrude(kite.Wire(), f.plane, f.hole_depth, false, 0.0);
+            BRepAlgoAPI_Cut kc(result, pt);
+            if (kc.IsDone() && !kc.Shape().IsNull()) result = kc.Shape();
+        }
+
         // Drill point: a cone continuing the blind bore past its shoulder (apex h = r / tan(tip / 2) further in)
         if (!f.hole_through && f.hole_tip_angle > 1.0 && f.hole_tip_angle < 179.0) {
             const double r = f.hole_diameter * 0.5;
@@ -3585,6 +3627,27 @@ void CadDocument::apply_feature(TopoDS_Shape& result, bool& have_body,
                                                        f.hole_cbore_depth).Shape();
             BRepAlgoAPI_Cut cbc(result, cb);
             if (cbc.IsDone() && !cbc.Shape().IsNull()) result = cbc.Shape();
+            // Stepped sacrificial layers (printed with the ledge facing the bed): two strips as wide as the small bore, crossed, each
+            // bridging the big bore's diameter, the lower along x, the upper along y. Clipped to the big bore. They block the small bore
+            // by 2 layers; the part is meant to be drilled through after printing.
+            const double lh = f.hole_bridge_layer_h;
+            if (lh > 1e-6 && 2 * lh < f.hole_cbore_depth) {
+                const double D = f.hole_cbore_diameter, w = f.hole_diameter;
+                auto vec = [](const Vec3d& v) { return gp_Dir(v.x(), v.y(), v.z()); };
+                const Vec3d ux = f.plane.x_axis.normalized(), uy = f.plane.y_axis.normalized();
+                TopoDS_Shape disc = BRepPrimAPI_MakeCylinder(gp_Ax2(o, n), D * 0.5, f.hole_cbore_depth).Shape();
+                for (int k = 0; k < 2; ++k) {
+                    const Vec3d lon = k == 0 ? ux : uy;   // strip runs along `lon`
+                    const Vec3d lat = Vec3d(n.X(), n.Y(), n.Z()).cross(lon);   // the box's own y axis
+                    const double z0 = f.hole_cbore_depth - (2 - k) * lh;           // k=0 lower layer, k=1 upper (against the ledge)
+                    const Vec3d corner = Vec3d(o.X(), o.Y(), o.Z()) - lon * (D * 0.5) - lat * (w * 0.5) + Vec3d(n.X(), n.Y(), n.Z()) * z0;
+                    TopoDS_Shape box = BRepPrimAPI_MakeBox(gp_Ax2(gp_Pnt(corner.x(), corner.y(), corner.z()), n, vec(lon)), D, w, lh).Shape();
+                    BRepAlgoAPI_Common clip(box, disc);
+                    if (!clip.IsDone() || clip.Shape().IsNull()) continue;
+                    BRepAlgoAPI_Fuse fz(result, clip.Shape());
+                    if (fz.IsDone() && !fz.Shape().IsNull()) result = fz.Shape();
+                }
+            }
         } else if (f.hole_style == 2 && f.hole_csink_diameter > f.hole_diameter) {
             const double Rmaj = f.hole_csink_diameter * 0.5;
             const double Rmin = f.hole_diameter * 0.5;
@@ -4899,7 +4962,8 @@ void CadDocument::bind_expressions()
                 // Only a dimension whose value MOVED needs the sketch solved again: the entities already satisfy the others, and a solve
                 // per sketch on every rebuild was a third of a cache-restored recompute.
                 const int k = std::atoi(field.c_str() + 4);
-                dims = dims || k < 0 || k >= int(f.entity_constraints.size()) || f.entity_constraints[size_t(k)].value != v;
+                dims = dims || k < 0 || k >= int(f.entity_constraints.size())
+                    || f.entity_constraints[size_t(k)].value != (f.entity_constraints[size_t(k)].type == SketchConstraintType::Angle ? v * M_PI / 180.0 : v);
             }
             assign_field(f, field, v);
         }

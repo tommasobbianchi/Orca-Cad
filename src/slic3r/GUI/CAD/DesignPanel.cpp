@@ -1,4 +1,5 @@
 #include "slic3r/GUI/CAD/DesignPanel.hpp"
+#include "slic3r/GUI/CAD/McpControl.hpp"
 #include <BRepAdaptor_Surface.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 #include <BRepAdaptor_Curve.hxx>
@@ -1121,6 +1122,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
         m_verb_actions["btn:delete_body"] = [this] { on_delete_body(); };
         m_verb_actions["btn:edit"]   = [this] { on_edit_feature(); };
         m_verb_actions["btn:mass"]   = [this] { on_mass_properties(); };
+        m_verb_actions["btn:printcheck"] = [this] { on_print_check(); };
         m_verb_actions["btn:quotes"] = [this] { on_toggle_quotes(); };
         m_verb_actions["btn:interference"] = [this] { on_check_interference(); };
         // Reachable from the offer menu on a SELECTED SKETCH, not only from the toolbar icon.
@@ -1489,16 +1491,18 @@ DesignPanel::DesignPanel(wxWindow* parent)
         auto arm_polygon = [this, select_tool] {
             push_polygon_params();
             select_tool(DesignSketchTool::Mode::Polygon,
-                        wxString::Format(_L("Click center then a vertex — %d sides, %s"),
-                                         m_poly_sides,
-                                         m_poly_circumscribed ? _L("circumscribed") : _L("inscribed")));
+                        m_poly_edge ? wxString::Format(_L("Click the two ends of one side — %d sides, built on the left of the side"), m_poly_sides)
+                                    : wxString::Format(_L("Click center then a vertex — %d sides, %s"),
+                                                       m_poly_sides,
+                                                       m_poly_circumscribed ? _L("circumscribed") : _L("inscribed")));
         };
         for (int n : {3, 4, 5, 6, 8, 12})
             m_verb_actions["btn:poly#" + std::to_string(n)] =
                 [this, arm_polygon, n] { m_poly_sides = n; arm_polygon(); };
         for (int c : {0, 1})
             m_verb_actions["btn:polyfit#" + std::to_string(c)] =
-                [this, arm_polygon, c] { m_poly_circumscribed = (c == 1); arm_polygon(); };
+                [this, arm_polygon, c] { m_poly_circumscribed = (c == 1); m_poly_edge = false; arm_polygon(); };
+        m_verb_actions["btn:polyfit#2"] = [this, arm_polygon] { m_poly_edge = true; arm_polygon(); };
 
         // Same defect, one level up: a combo whose entries are different VERBS wearing a single
         // name. "Dress-up" is Fillet or Chamfer; "Combine" is union, subtract or intersect;
@@ -2031,6 +2035,18 @@ DesignPanel::DesignPanel(wxWindow* parent)
     
     m_hole_through->SetValue(true);
     c_m_box_hole->row(_L("Through"), m_hole_through);
+    m_hole_teardrop = c_m_box_hole->make_check();
+    c_m_box_hole->row(_L("Teardrop (horizontal hole)"), m_hole_teardrop);
+    m_hole_td_flat = c_m_box_hole->make_spin(0.0, 0.0, 1000.0);
+    c_m_box_hole->row(_L("Teardrop flat top (0 = point)"), m_hole_td_flat);
+    m_hole_layer_h = c_m_box_hole->make_spin(0.2, 0.0, 2.0);
+    c_m_box_hole->row(_L("Layer height (flat top snaps to it)"), m_hole_layer_h);
+    m_hole_cbore_d = c_m_box_hole->make_spin(0.0, 0.0, 1000.0);
+    c_m_box_hole->row(_L("Counterbore Ø (0 = none)"), m_hole_cbore_d);
+    m_hole_cbore_depth = c_m_box_hole->make_spin(0.0, 0.0, 1000.0);
+    c_m_box_hole->row(_L("Counterbore depth"), m_hole_cbore_depth);
+    m_hole_bridge_h = c_m_box_hole->make_spin(0.0, 0.0, 5.0);
+    c_m_box_hole->row(_L("Sacrificial layers (0 = off)"), m_hole_bridge_h);
     m_hole_target_label = c_m_box_hole->make_text(_L("(none — uses Hole plane)"));
     m_hole_target_label->SetReference(false);
     c_m_box_hole->row(_L("On face"), m_hole_target_label);
@@ -3476,6 +3492,10 @@ DesignPanel::DesignPanel(wxWindow* parent)
         apply_dof_status(dof, ok, has_constraints);
         update_undo_redo_buttons();   // every edit of the live sketch re-solves, so this tracks it
     });
+
+    // The Print check toggle and its Fix buttons drive through the panel: the canvas only draws.
+    m_viewport->on_print_check_toggle = [this]() { auto_print_check(); };
+    m_viewport->on_print_fix_requested = [this](int i) { on_apply_print_fix(i); };
 
     // Selection no longer writes the status line: on_sketch_step owns it, says the same thing
     // for Select mode and — unlike this callback, which also fired while an edit-op mirrored its
@@ -5497,6 +5517,16 @@ void DesignPanel::on_add_hole()
     m_feature_counter++;
     const int hidx = m_doc.add_hole(dia, depth, through, px, py, plane,
                                     feature_name(_L("Hole")));
+    if (hidx >= 0 && hidx < int(m_doc.features.size())) {
+        CadFeature& hf = m_doc.features[hidx];
+        hf.hole_teardrop = m_hole_teardrop->GetValue();
+        hf.hole_teardrop_flat = m_hole_td_flat->GetValue();
+        hf.hole_layer_h = m_hole_layer_h->GetValue();
+        if (m_hole_cbore_d->GetValue() > dia && m_hole_cbore_depth->GetValue() > 0) {   // a counterbore, with the sacrificial strips under its ledge when asked
+            hf.hole_style = 1; hf.hole_cbore_diameter = m_hole_cbore_d->GetValue(); hf.hole_cbore_depth = m_hole_cbore_depth->GetValue();
+            hf.hole_bridge_layer_h = m_hole_bridge_h->GetValue();
+        }
+    }
     // On-face holes drill the body the face belongs to (even after the pick was cleared).
     if (m_hole_on_face && hidx >= 0 && hidx < int(m_doc.features.size())) {
         m_doc.features[hidx].target_body = m_hole_face_body;
@@ -6349,6 +6379,66 @@ void DesignPanel::on_toggle_quotes()
     }
     m_viewport->set_quotes_on(on);
     set_status(StatusKind::Info, on ? _L("Dimensions on — click one with a feature behind it to edit it") : _L("Dimensions off"));
+}
+
+void DesignPanel::on_print_check()
+{
+    if (!m_viewport || !m_viewport->print_check_on()) { if (m_viewport) m_viewport->set_print_notes({}); return; }   // the Print check toggle is off: nothing runs
+    const int b = m_sel_solid_body >= 0 ? m_sel_solid_body : int(m_doc.bodies.size()) - 1;
+    if (b < 0 || b >= int(m_doc.bodies.size())) {
+        set_status(StatusKind::Info, _L("Select a body to check it for printing"));
+        return;
+    }
+    bool clean = false;
+    std::string text;
+    std::vector<PrintNote> pins;
+    try { text = print_check_summary(this, b, clean, false, &pins); }
+    catch (const std::exception& e) { set_status(StatusKind::Error, wxString::FromUTF8(e.what())); return; }
+    if (m_viewport)
+        m_viewport->set_print_notes(std::move(pins),
+            b >= 0 && b < int(m_doc.display_body_meshes.size()) ? &m_doc.display_body_meshes[b] : nullptr);
+    if (clean) set_status(StatusKind::Ok, _L("Print check: nothing to fix for FDM printing as the part now lies on the bed"));
+    else       set_status(StatusKind::Warning, wxString::Format(_L("Print check: %s"), wxString::FromUTF8(text)));
+}
+
+void DesignPanel::auto_print_check()
+{
+    if (!m_viewport || !m_viewport->print_check_on()) { if (m_viewport) m_viewport->set_print_notes({}); return; }   // the Print check toggle is off: no analysis
+    if (m_auto_check_ms > 150 || m_doc.bodies.empty()) { if (m_viewport) m_viewport->set_print_notes({}); return; }   // ponytail: no background thread; a slow part opts out, the Print check button stays
+    const int b = m_sel_solid_body >= 0 && m_sel_solid_body < int(m_doc.bodies.size()) ? m_sel_solid_body : int(m_doc.bodies.size()) - 1;
+    const wxLongLong t0 = wxGetLocalTimeMillis();
+    bool clean = true;
+    std::string text;
+    std::vector<PrintNote> pins;
+    try { text = print_check_summary(this, b, clean, true, &pins); }
+    catch (...) { if (m_viewport) m_viewport->set_print_notes({}); return; }   // a body that cannot be analysed (surface, sheet) is not a problem to report here
+    if (m_viewport)
+        m_viewport->set_print_notes(std::move(pins),
+            b >= 0 && b < int(m_doc.display_body_meshes.size()) ? &m_doc.display_body_meshes[b] : nullptr);
+    m_auto_check_ms = (wxGetLocalTimeMillis() - t0).GetValue();
+    if (!clean) set_status(StatusKind::Warning, wxString::Format(_L("Print check: %s"), wxString::FromUTF8(text)));
+}
+
+void DesignPanel::on_apply_print_fix(int note_index)
+{
+    using json = nlohmann::json;
+    if (!m_viewport) return;
+    const std::vector<PrintNote>& notes = m_viewport->print_notes();
+    if (note_index < 0 || note_index >= int(notes.size())) return;
+    const PrintNote n = notes[size_t(note_index)];   // copy: auto_print_check() below replaces the viewport's notes
+    if (n.fix_json.empty()) return;
+    json fix;
+    try { fix = json::parse(n.fix_json); }
+    catch (...) { set_status(StatusKind::Error, _L("The fix data is invalid")); return; }
+    if (fix.is_array()) fix = json{{"steps", fix}, {"label", n.fix_label}};   // PrintNote keeps only the steps array
+    try {
+        const json r = run_print_fix(this, fix);
+        refresh_tree();
+        auto_print_check();
+        set_status(StatusKind::Info, wxString::Format(_L("Fixed: %s"), wxString::FromUTF8(r.value("applied_label", n.fix_label))));
+    } catch (const std::exception& e) {
+        set_status(StatusKind::Error, wxString::FromUTF8(e.what()));
+    }
 }
 
 void DesignPanel::on_mass_properties()
@@ -10377,6 +10467,12 @@ void DesignPanel::load_feature_into_dialog(const CadFeature& f)
         m_hole_diameter->SetValue(f.hole_diameter);
         m_hole_depth->SetValue(f.hole_depth);
         m_hole_through->SetValue(f.hole_through);
+        m_hole_teardrop->SetValue(f.hole_teardrop);
+        m_hole_td_flat->SetValue(f.hole_teardrop_flat);
+        m_hole_layer_h->SetValue(f.hole_layer_h);
+        m_hole_cbore_d->SetValue(f.hole_style == 1 ? f.hole_cbore_diameter : 0.0);
+        m_hole_cbore_depth->SetValue(f.hole_style == 1 ? f.hole_cbore_depth : 0.0);
+        m_hole_bridge_h->SetValue(f.hole_bridge_layer_h);
         m_hole_x->SetValue(f.hole_x);
         m_hole_y->SetValue(f.hole_y);
         // Re-latch the on-face state FROM THE STORED FEATURE (uif9). m_hole_on_face is
@@ -10992,7 +11088,7 @@ void DesignPanel::set_commit_mode(CommitMode mode)
         m_commit_drop->SetSelection(int(mode));   // the check on the current row
 }
 
-void DesignPanel::on_commit(bool to_prepare)
+void DesignPanel::on_commit(bool to_prepare, bool ask)
 {
     // A feature tool open with a live preview ghost (e.g. a fillet being previewed) is
     // NOT yet part of the body. Apply it first so "Commit to Plate" ships exactly what
@@ -11017,24 +11113,74 @@ void DesignPanel::on_commit(bool to_prepare)
     // Hidden bodies are skipped — what you see on the Design plate is what gets committed.
     sync_body_visible();
     rebuild_disp_meshes();   // ship moved bodies at their Move-gizmo positions
+    using Parts = std::vector<std::pair<const TriangleMesh*, wxString>>;
+    struct Group { int key; wxString name; Parts parts; };   // one Prepare object; key as in m_committed
+    std::vector<Group> groups;
     if (m_disp_body_meshes.size() > 1) {
-        std::vector<std::pair<const TriangleMesh*, wxString>> parts;
+        Parts parts;
+        std::vector<int> bodies;
         for (size_t b = 0; b < m_disp_body_meshes.size(); ++b) {
             if (b < m_body_visible.size() && !m_body_visible[b]) continue;   // skip hidden
             if (m_disp_body_meshes[b].its.indices.empty()) continue;
             parts.emplace_back(&m_disp_body_meshes[b], wxString::FromUTF8("Design Body " + std::to_string(b + 1)));
+            bodies.push_back(int(b));
         }
         if (parts.empty()) {   // every body hidden — nothing to ship
             set_status(_L("All bodies hidden — show one before committing"));
             return;
         }
         if (m_commit_mode == CommitMode::Assembly && parts.size() > 1)
-            obj_list->load_mesh_object(parts, "Design Assembly");
+            groups.push_back({-1, "Design Assembly", std::move(parts)});
         else
-            for (const auto& [mesh, name] : parts)
-                obj_list->load_mesh_object(*mesh, name);
+            for (size_t k = 0; k < parts.size(); ++k)
+                groups.push_back({bodies[k], parts[k].second, Parts{parts[k]}});
     } else {
-        obj_list->load_mesh_object(m_disp_pick_mesh, "Design Body");
+        groups.push_back({-1, "Design Body", Parts{{&m_disp_pick_mesh, "Design Body"}}});
+    }
+
+    // A re-commit: the objects the last commit made may still be on the plate. Updating them in place keeps
+    // their placement, settings and modifiers (painting goes with the old shape); the alternative is a copy.
+    Model& model = wxGetApp().plater()->model();
+    auto live_idx = [&](int key) {
+        for (const auto& [k, id] : m_committed)
+            if (k == key)
+                for (size_t i = 0; i < model.objects.size(); ++i)
+                    if (model.objects[i]->id() == id) return int(i);
+        return -1;
+    };
+    bool update = false;
+    if (ask) {
+        int live = 0;
+        for (const Group& g : groups) live += live_idx(g.key) >= 0;
+        if (live > 0) {
+            RichMessageDialog dlg(this,
+                              _L("This design is already on the plate.\n\nUpdate the existing object(s) with the new shape?\nYes: update (placement and settings are kept; painted supports and seams are cleared).\nNo: add another copy."),
+                              _L("Commit to Plate"), wxYES_NO | wxCANCEL | wxYES_DEFAULT | wxICON_QUESTION);
+            const int r = dlg.ShowModal();
+            if (r == wxID_CANCEL) return;
+            update = r == wxID_YES;
+        }
+    }
+    if (update)
+        wxGetApp().plater()->take_snapshot("Update from Design");
+
+    std::vector<std::pair<int, ObjectID>> committed;
+    std::vector<size_t> replaced;
+    for (const Group& g : groups) {
+        const int idx = update ? live_idx(g.key) : -1;
+        if (idx >= 0 && obj_list->replace_mesh_object(size_t(idx), g.parts)) {
+            replaced.push_back(size_t(idx));
+            committed.emplace_back(g.key, model.objects[idx]->id());
+        } else {
+            obj_list->load_mesh_object(g.parts, g.name);
+            committed.emplace_back(g.key, model.objects.back()->id());
+        }
+    }
+    m_committed = std::move(committed);
+    if (!replaced.empty()) {
+        wxGetApp().plater()->changed_objects(replaced);
+        obj_list->update_after_undo_redo();   // rebuilds the list from the model, as an undo does
+        wxGetApp().plater()->update();
     }
 
     // Persist the editable parametric recipe alongside the committed meshes so the
@@ -11130,6 +11276,13 @@ CadFeature DesignPanel::build_candidate(Tool t) const
         f.hole_diameter = m_hole_diameter->GetValue();
         f.hole_depth    = m_hole_depth->GetValue();
         f.hole_through  = m_hole_through->GetValue();
+        f.hole_teardrop = m_hole_teardrop->GetValue();
+        f.hole_teardrop_flat = m_hole_td_flat->GetValue();
+        f.hole_layer_h = m_hole_layer_h->GetValue();
+        if (m_hole_cbore_d->GetValue() > m_hole_diameter->GetValue() && m_hole_cbore_depth->GetValue() > 0) {
+            f.hole_style = 1; f.hole_cbore_diameter = m_hole_cbore_d->GetValue(); f.hole_cbore_depth = m_hole_cbore_depth->GetValue();
+            f.hole_bridge_layer_h = m_hole_bridge_h->GetValue();
+        } else { f.hole_style = 0; f.hole_bridge_layer_h = 0; }
         f.hole_x        = m_hole_x->GetValue();
         f.hole_y        = m_hole_y->GetValue();
         if (m_hole_on_face) { f.target_body = m_hole_face_body; attach_to_face(f, m_hole_face_body, m_hole_face, false); }   // preview the right body
@@ -13311,6 +13464,7 @@ void DesignPanel::push_polygon_params()
     if (m_viewport == nullptr) return;
     m_viewport->set_sketch_polygon_sides(m_poly_sides);
     m_viewport->set_sketch_polygon_circumscribed(m_poly_circumscribed);
+    m_viewport->set_sketch_polygon_edge(m_poly_edge);
 }
 
 void DesignPanel::open_tool(Tool t)
@@ -13647,6 +13801,8 @@ void DesignPanel::confirm_tool()
     // legacy Sketch card via on_add_sketch, and edit-mode replace all funnel here).
     m_doc.checkpoint();
     const bool editing_single = (m_edit_index >= 0);
+    // Tools that make no solid have nothing to print-check.
+    const bool makes_solid = m_active != Tool::Sketch && m_active != Tool::Plane && m_active != Tool::Axis && m_active != Tool::CoordSys && m_active != Tool::Mate && m_active != Tool::Project;
 
     if (editing_single) {
         // Edit mode: overwrite the existing feature instead of appending.
@@ -13655,6 +13811,7 @@ void DesignPanel::confirm_tool()
         reset_edit_state();
         close_tool();          // clears the preview ghost
         after_tree_edit(ok);   // refresh tree/viewport/status (or "Edit rejected")
+        if (ok && makes_solid) auto_print_check();
         return;
     }
 
@@ -13694,6 +13851,7 @@ void DesignPanel::confirm_tool()
     case Tool::None:    return;
     }
     close_tool(); // also clears the preview ghost; the committed body is now shown
+    if (makes_solid) auto_print_check();
 }
 
 void DesignPanel::cancel_tool()

@@ -7,6 +7,7 @@
 #include "libslic3r/Point.hpp"
 #include "libslic3r/CAD/SketchEngine.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/ObjectID.hpp"
 #include <wx/accel.h>
 #include <wx/event.h>
 #include <wx/gdicmn.h>
@@ -110,7 +111,7 @@ public:
     CadDocument& mcp_doc()        { return m_doc; }            // live document (read + mutate)
     void         mcp_end_sketch_edit();
     void         mcp_edit_feature(int i) { edit_feature_at(i); }   // reopen feature i as the tree row's Edit does
-    void         mcp_commit_meshes() { on_commit(false); }
+    void         mcp_commit_meshes() { on_commit(false, false); }
     // What the GUI keeps per body for the viewport, reachable from the MCP: show/hide, colour (alpha = opacity), the section
     // plane and an exploded layout. All of it is display only; the solids and what Export writes are untouched.
     bool         mcp_body_visible(int b, bool visible);
@@ -155,6 +156,9 @@ public:
     bool mcp_card_open(const std::string& card);
     bool mcp_card_set(const std::string& key, double value);
     void mcp_reset_feature_counter() { m_feature_counter = 0; }   // a new document numbers its features from 1 again (names must not depend on the session's history)
+    // Name the next feature like the GUI would ("Text N"), incrementing the counter. Used by the
+    // headless MCP verbs so features they add carry the same names the GUI's would.
+    std::string mcp_new_feature_name(const wxString& kind) { ++m_feature_counter; return feature_name(kind); }
     void mcp_drop_selection() { drop_selection(); }   // a replaced document must not keep the old pick (a stale body index poisons the next feature)
     bool mcp_card_confirm_enabled() const { return confirm_enabled(); }
     std::vector<int> mcp_tree_selection() const { return tree_selected_rows(); }
@@ -276,6 +280,10 @@ private:
     void on_add_helix();
     void on_add_mate();
     void on_check_interference();
+    void auto_print_check();            // after a committed feature: warnings-only print check, silent when clean or when the last run was slow
+    long long m_auto_check_ms{0};       // duration of the last automatic print check; above 150 ms it stops running by itself (the button still works)
+    void on_print_check();              // design-for-print report on the selected body, to the status line; edits nothing
+    void on_apply_print_fix(int note_index);   // run the Print check note's automatic fix (Fix button)
     void on_mass_properties();          // read-only report on the selected solid; edits nothing
     // Fill m_bool_target / m_bool_tool / m_cut_target. as_of_feature < 0 = current bodies (add);
     // >= 0 = the bodies as they existed just before that feature index (Boolean re-edit, so a
@@ -319,7 +327,12 @@ private:
     // Move / enlarge / stretch (independent X/Y) an imported Text/SVG sketch:
     // a modal dialog editing the feature's placement transform in place.
     void on_transform_imported(int feat_idx);
-    void on_commit(bool to_prepare = true);
+    // `ask` = false is the scripted path: it never opens the Update / Add a copy question and always adds.
+    void on_commit(bool to_prepare = true, bool ask = true);
+    // The Prepare objects the last commit made, by the Design key they came from (-1 = the one assembly /
+    // single-body object, else the body index). A re-commit offers to update these in place instead of
+    // adding a second copy. Held for the session only; an object deleted since is simply not found.
+    std::vector<std::pair<int, ObjectID>> m_committed;
     // What Commit to Plate sends: one object with a part per body (an assembly, which keeps the
     // bodies' relative placement), or, "as bodies", one Prepare object per body. The split
     // button's dropdown switches it, like Prepare's Slice button, without committing.
@@ -725,6 +738,7 @@ private:
     // which is exactly where the offer already is. e1p.
     int               m_poly_sides{6};           // 3..64; the submenu names the common ones
     bool              m_poly_circumscribed{false};
+    bool              m_poly_edge{false};        // Edge mode: click the two ends of one side
 
     // Which reference plane a sketch falls back to when no face is picked: 0/1/2 = XY/XZ/YZ,
     // >=3 indexes resolve_datum_planes(). Set by CLICKING a ghost plane in the viewport — there is
@@ -1090,6 +1104,12 @@ private:
     NumField* m_hole_diameter{nullptr};
     NumField* m_hole_depth{nullptr};
     ToggleField*         m_hole_through{nullptr};
+    ToggleField*         m_hole_teardrop{nullptr};
+    NumField*            m_hole_layer_h{nullptr};      // print layer height the teardrop flat top snaps up to
+    NumField*            m_hole_td_flat{nullptr};      // teardrop flat-top width (0 = pointed)
+    NumField*            m_hole_cbore_d{nullptr};      // counterbore diameter (0 = none)
+    NumField*           m_hole_cbore_depth{nullptr};
+    NumField*           m_hole_bridge_h{nullptr};     // sacrificial layer thickness under the counterbore ledge (0 = none)
     NumField* m_hole_x{nullptr};
     NumField* m_hole_y{nullptr};
     // #2: when the Hole tool is opened on a picked solid face, drill on that face centred

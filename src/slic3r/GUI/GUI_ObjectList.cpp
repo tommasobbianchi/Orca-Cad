@@ -2724,6 +2724,32 @@ void ObjectList::load_mesh_object(const std::vector<std::pair<const TriangleMesh
 #endif /* _DEBUG */
 }
 
+bool ObjectList::replace_mesh_object(size_t obj_idx, const std::vector<std::pair<const TriangleMesh*, wxString>> &parts)
+{
+    Model& model = wxGetApp().plater()->model();
+    if (obj_idx >= model.objects.size() || parts.empty())
+        return false;
+    ModelObject* obj = model.objects[obj_idx];
+    const bool sinking = obj->min_z() < SINKING_Z_THRESHOLD;
+
+    // New volumes first (an object never holds none), then the old ones out.
+    const size_t n_old = obj->volumes.size();
+    BoundingBoxf3 bb;
+    for (const auto& [mesh, part_name] : parts) {
+        bb.merge(mesh->bounding_box());
+        obj->add_volume(*mesh)->name = into_u8(part_name);
+    }
+    for (size_t i = n_old; i-- > 0;)
+        obj->delete_volume(i);
+    obj->sort_volumes(true);
+    obj->invalidate_bounding_box();
+    obj->translate(-bb.center());   // as load_mesh_object: the geometry is centred, the instance keeps the placement
+    if (!sinking)
+        obj->ensure_on_bed();
+    Slic3r::save_object_mesh(*obj);
+    return true;
+}
+
 //BBS
 bool ObjectList::del_object(const int obj_idx, bool refresh_immediately)
 {
