@@ -162,6 +162,8 @@ struct CadFeature {
     double      hole_csink_diameter{0};    // countersink major diameter at entry face (mm), style==2
     double      hole_csink_angle{90};      // countersink included angle (degrees), style==2
     double      hole_tip_angle{0};         // blind hole: included angle of the drill point (deg, 0 = flat bottom)
+    double      hole_bridge_layer_h{0};    // counterbore ceiling: >0 adds two crossed sacrificial strips of this thickness under the ledge (sheet tip: stepped hole layers); marked in, drill out after printing
+    bool        hole_teardrop{false};      // horizontal bore: pointed (45 deg) top so it prints without support; ignored when the axis is near-vertical
     std::string hole_standard;             // provenance only, e.g. "M6" / "1/4-20"; not used by geometry
 
     // Thread params (helical thread about the plane normal at a positioned point)

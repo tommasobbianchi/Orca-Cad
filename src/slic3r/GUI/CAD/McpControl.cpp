@@ -318,6 +318,7 @@ json describe_tools_core()
                      json{{"name", "diameter"}, {"type", "number"}, {"unit", "mm"}, {"default", 5}, {"min", 0.01}},
                      json{{"name", "depth"},    {"type", "number"}, {"unit", "mm"}, {"default", 10}, {"min", 0.01}},
                      json{{"name", "through"},  {"type", "boolean"}, {"default", false}},
+                     json{{"name", "teardrop"}, {"type", "boolean"}, {"default", false}, {"description", "pointed 45 deg top for a bore lying horizontal on the bed (prints without support); ignored when the axis is near-vertical"}},
                      json{{"name", "x"},        {"type", "number"}, {"unit", "mm"}, {"default", 0}, {"description", "in the sketch plane's frame (origin = describe_scene.modeling_origin), NOT world"}},
                      json{{"name", "y"},        {"type", "number"}, {"unit", "mm"}, {"default", 0}, {"description", "in the sketch plane's frame (origin = describe_scene.modeling_origin), NOT world"}},
                      json{{"name", "plane"},    {"type", "string"}, {"enum", json::array({"XY", "XZ", "YZ"})}, {"default", "XY"}},
@@ -338,6 +339,8 @@ json describe_tools_core()
                      json{{"name", "csink_diameter"},  {"type", "number"}, {"unit", "mm"}, {"default", 0}},
                      json{{"name", "csink_angle"},     {"type", "number"}, {"unit", "deg"}, {"default", 90}},
                      json{{"name", "standard"},        {"type", "string"}, {"default", ""}, {"description", "provenance designation, e.g. M6"}},
+                     json{{"name", "bridge_layer_h"},  {"type", "number"}, {"unit", "mm"}, {"default", 0}, {"description", "counterbore only: >0 leaves two crossed sacrificial strips of this thickness (0.4 typical) under the ledge so a counterbore printed ledge-down bridges without support; marked in, drill the small bore through after printing"}},
+                     json{{"name", "teardrop"},        {"type", "boolean"}, {"default", false}, {"description", "pointed 45 deg top for a horizontal bore"}},
                  })}},
             json{{"name", "hole_standard"}, {"summary", "Drill a standard clearance hole (ISO 273 / ANSI) at (x,y) on a plane. style: 0=simple, 1=counterbore, 2=countersink."},
                  {"params", json::array({
@@ -716,7 +719,7 @@ json describe_tools()
         compact_tool("job_status", "Any tool call with async:true in its params answers at once with a job id and runs in the background; this returns {state: running|done, elapsed_s, reply}. Answered even while the app is busy with the job.", {{"job", "string", "job id from the async call"}}),
         compact_tool("name_dimension", "Name a sketch dimension (index from sketch_dimensions); set_feature_expr then takes field \"dim:<name>\". name \"\" removes it. Names are positions: deleting a constraint from the sketch shifts the ones after it.", {{"sketch", "integer", "Sketch feature index"}, {"index", "integer", "dimension index"}, {"name", "string", "letters, digits, _"}}),
         compact_tool("min_distance", "Shortest distance between two bodies and the closest points; b can be tried at a hypothetical offset (move_b) without changing anything.", {{"a", "integer", "body index or name"}, {"b", "integer", "body index or name"}, {"move_b", "array", "[dx,dy,dz] mm"}}),
-        compact_tool("analyze_printability", "Overhang area and levels (a flat pocket ceiling shows as one level), bed contact, height and disconnected solids of a body in a print orientation. rotate [rx,ry,rz] deg; the body rests on its lowest point.", {{"body", "integer", "body index or name"}, {"rotate", "array", "[rx,ry,rz] deg"}, {"overhang_angle", "number", "deg from vertical, default 45"}}),
+        compact_tool("analyze_printability", "Overhang area and levels (a flat pocket ceiling shows as one level), bed contact, height and disconnected solids of a body in a print orientation. rotate [rx,ry,rz] deg; the body rests on its lowest point.", {{"body", "integer", "body index or name"}, {"rotate", "array", "[rx,ry,rz] deg"}, {"overhang_angle", "number", "deg from vertical, default 45"}, {"bridge_max", "number", "mm a flat roof may span before a warning, default 20"}, {"layer_h", "number", "mm, layer height used in the suggestions, default 0.4"}}),
         compact_tool("rename_body", "Give a body a name. Verbs that take `body` then accept the name as well as the index (extrude, hole, pattern, fillet, boolean...).", {{"body", "integer", "body index"}, {"name", "string", "unique name"}}),
         compact_tool("set_body_visible", "Show or hide a body in the viewport (the eye in the Bodies list). Display only.", {{"body", "integer", "body id"}, {"visible", "boolean", "default true"}}),
         compact_tool("isolate_body", "Hide every body but this one; with no body (or show_all:true) show them all again.", {{"body", "integer", "body id"}, {"show_all", "boolean", ""}}),
@@ -1582,7 +1585,7 @@ json action_hole(DesignPanel* panel, const json& params)
     int h = -1;
     const double tip = params.value("tip_angle", 0.0);
     if (tip < 0 || tip >= 180) throw std::runtime_error("tip_angle must be in [0, 180)");
-    for (const auto& p : pts) { h = doc.add_hole(dia, depth, thru, p.first, p.second, pl, "Hole"); doc.features[size_t(h)].hole_tip_angle = tip; attach_to_face(doc.features[size_t(h)], params, doc); if (target >= 0) doc.features[size_t(h)].target_body = target; }
+    for (const auto& p : pts) { h = doc.add_hole(dia, depth, thru, p.first, p.second, pl, "Hole"); doc.features[size_t(h)].hole_tip_angle = tip; doc.features[size_t(h)].hole_teardrop = params.value("teardrop", false); attach_to_face(doc.features[size_t(h)], params, doc); if (target >= 0) doc.features[size_t(h)].target_body = target; }
     bool ok = doc.recompute();
     if (!ok) { const std::string why = doc.error; doc.undo(); doc.error = why; }
     panel->mcp_after_change();
@@ -1623,6 +1626,8 @@ json action_hole_styled(DesignPanel* panel, const json& params)
                                 cbore_diameter, cbore_depth,
                                 csink_diameter, csink_angle, standard, "Hole");
         doc.features[size_t(h)].hole_tip_angle = tip;
+        doc.features[size_t(h)].hole_bridge_layer_h = params.value("bridge_layer_h", 0.0);
+        doc.features[size_t(h)].hole_teardrop = params.value("teardrop", false);
         attach_to_face(doc.features[size_t(h)], params, doc);
     }
     bool ok = doc.recompute();
@@ -3603,13 +3608,15 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
     const double ang = params.value("overhang_angle", 45.0);
     if (ang <= 0 || ang >= 90) throw std::runtime_error("overhang_angle is in (0, 90) degrees from vertical");
     TriangleMesh m = doc.display_body_meshes[b];
+    Matrix3d rot = Matrix3d::Identity();   // the print orientation, to turn cylinder axes the same way as the mesh
     if (params.contains("rotate")) {
         if (!params["rotate"].is_array() || params["rotate"].size() != 3) throw std::runtime_error("'rotate' is [rx, ry, rz] in degrees");
         const double k = M_PI / 180.0;
         const Vec3d c = m.bounding_box().center();
         Transform3d t = Transform3d::Identity();
         t.translate(c);
-        t.rotate(Eigen::AngleAxisd(jn(params["rotate"], 2) * k, Vec3d::UnitZ()) * Eigen::AngleAxisd(jn(params["rotate"], 1) * k, Vec3d::UnitY()) * Eigen::AngleAxisd(jn(params["rotate"], 0) * k, Vec3d::UnitX()));
+        rot = (Eigen::AngleAxisd(jn(params["rotate"], 2) * k, Vec3d::UnitZ()) * Eigen::AngleAxisd(jn(params["rotate"], 1) * k, Vec3d::UnitY()) * Eigen::AngleAxisd(jn(params["rotate"], 0) * k, Vec3d::UnitX())).toRotationMatrix();
+        t.rotate(rot);
         t.translate(-c);
         m.transform(t);
     }
@@ -3639,14 +3646,71 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
     for (auto& kv : levels) top.push_back(kv.second);
     std::sort(top.begin(), top.end(), [](const auto& x, const auto& y) { return x[0] > y[0]; });
     json lv = json::array();
-    for (size_t i = 0; i < top.size() && i < 6; ++i)
-        lv.push_back(json{{"z", top[i][5] - zmin}, {"area_mm2", top[i][0]}, {"min", {top[i][1], top[i][2]}}, {"max", {top[i][3], top[i][4]}}});
+    const double bridge_max = params.value("bridge_max", 20.0);   // sheet tip 12: printers bridge ~2 cm
+    json warnings = json::array();
+    json suggestions = json::array();   // sheet tips 12-14 and the bridging ones: what to add under a roof, with numbers; analysis only, nothing is built
+    const double layer_h = params.value("layer_h", 0.4);
+    auto num = [](double v) { std::ostringstream os; os.imbue(std::locale::classic()); os.precision(3); os << v; return os.str(); };
+    for (size_t i = 0; i < top.size() && i < 6; ++i) {
+        // ponytail: span = the shorter side of the level's bounding box (a strip bridges across its short side); a ring or an L
+        // over-reports. Exact spans need the face outline.
+        const double span = std::min(top[i][3] - top[i][1], top[i][4] - top[i][2]);
+        lv.push_back(json{{"z", top[i][5] - zmin}, {"area_mm2", top[i][0]}, {"min", {top[i][1], top[i][2]}}, {"max", {top[i][3], top[i][4]}},
+                          {"span_mm", span}, {"too_long_to_bridge", span > bridge_max}});
+        if (span > bridge_max)
+            warnings.push_back("flat roof at z=" + num(top[i][5] - zmin) + " spans " + num(span) + " mm, over " + num(bridge_max) + ": stagger triangles under it or add sacrificial ribs");
+        // ponytail: thresholds are the sheet's rule of thumb (a printer bridges ~2 cm easily); 5 mm below which nothing is worth adding.
+        const json at = json{{"level", int(i)}, {"z", top[i][5] - zmin}, {"min", {top[i][1], top[i][2]}}, {"max", {top[i][3], top[i][4]}}, {"span_mm", span}};
+        auto add = [&](const char* kind, json extra) { json j = at; j["kind"] = kind; for (auto it = extra.begin(); it != extra.end(); ++it) j[it.key()] = it.value(); suggestions.push_back(j); };
+        if (span > 5.0 && span <= bridge_max)
+            add("sacrificial_layer", json{{"layer_h", layer_h}, {"why", "thin one-layer membrane under the roof, cut away after printing"}});
+        if (span > bridge_max) {
+            const int n = int(std::ceil(span / bridge_max)) - 1;   // ribs so that every gap is within bridge_max
+            const double pitch = span / (n + 1);
+            add("sacrificial_ribs", json{{"count", n}, {"pitch_mm", pitch}, {"angle_deg", 0}, {"why", "perpendicular ribs under the roof; each gap bridges"}});
+            add("diagonal_ribs", json{{"count", n}, {"pitch_mm", pitch}, {"angle_deg", 45}, {"why", "diagonal ribs bridge between them; good inside a model"}});
+            add("staggered_triangles", json{{"rows", n + 1}, {"base_mm", pitch}, {"why", "triangles staggered under a large roof so each bridge stays short"}});
+            add("stepped_bridge_lip", json{{"step_mm", layer_h}, {"steps", 2}, {"why", "thin stepped ledge at both ends of the span; the first bridge layers have something to land on"}});
+        }
+    }
+    // Horizontal holes (sheet tip 3): a bore whose axis lies near the bed plane prints with a sagging roof unless teardrop-shaped.
+    // A bore is split into several cylinder faces (seams, a teardrop's cut-away): group the faces that share one axis line and radius,
+    // and compare their summed area to the full cylinder. About 3/4 left = a teardrop is already cut in, so no suggestion.
+    struct Bore { Vec3d base, ax; double r, lo, hi, area; };   // lo/hi: the bore's extent along its axis (faces may be split lengthwise)
+    std::vector<Bore> bores;
+    for (const TopoDS_Face& f : GeometryEngine::faces_of(doc.bodies[b].shape)) {
+        const GeometryEngine::CylinderFace cyl = GeometryEngine::cylinder_of_face(f);
+        if (!cyl.ok || !cyl.internal) continue;
+        const Vec3d ax = (rot * cyl.axis).normalized();
+        if (std::abs(ax.z()) > 0.5) continue;   // closer to vertical than horizontal: prints round
+        GProp_GProps sp; BRepGProp::SurfaceProperties(f, sp);
+        bool merged = false;
+        for (Bore& o : bores) {
+            const Vec3d d = cyl.base - o.base;
+            if (std::abs(o.ax.dot(ax)) > 0.999 && std::abs(o.r - cyl.radius) < 1e-6 && (d - o.ax * d.dot(o.ax)).norm() < 1e-4) { o.area += sp.Mass(); o.lo = std::min(o.lo, std::min(d.dot(o.ax), (d + ax * cyl.height).dot(o.ax))); o.hi = std::max(o.hi, std::max(d.dot(o.ax), (d + ax * cyl.height).dot(o.ax))); merged = true; break; }
+        }
+        if (!merged) bores.push_back({cyl.base, ax, cyl.radius, 0.0, cyl.height, sp.Mass()});
+    }
+    json holes = json::array();
+    for (const Bore& o : bores) {
+        const double full = 2 * M_PI * o.r * (o.hi - o.lo);
+        const bool teardrop_done = full > 0 && o.area < 0.9 * full;   // ponytail: assumes equal-length faces; a stepped bore may misread
+        holes.push_back(json{{"diameter_mm", 2 * o.r}, {"teardrop_suggested", !teardrop_done}, {"has_teardrop", teardrop_done}, {"bore_fraction", full > 0 ? o.area / full : 0.0}});
+        if (!teardrop_done) warnings.push_back("horizontal hole d=" + num(2 * o.r) + " mm: use a teardrop profile");
+    }
+
+    // Sacrificial geometry is marked in (kept in the part): list the features that added it, so a caller knows what to cut away after printing.
+    json sacrificial = json::array();
+    for (size_t i = 0; i < doc.features.size(); ++i)
+        if (doc.features[i].type == CadFeatureType::Hole && doc.features[i].hole_bridge_layer_h > 1e-6)
+            sacrificial.push_back(json{{"feature", int(i)}, {"kind", "hole bridge layers"}, {"layer_h", doc.features[i].hole_bridge_layer_h}, {"layers", 2}});
     int solids = 0;
     for (TopExp_Explorer ex(doc.bodies[b].shape, TopAbs_SOLID); ex.More(); ex.Next()) ++solids;
+    if (solids > 1) warnings.push_back("the body is " + std::to_string(solids) + " disconnected solids");
     return json{{"ok", true}, {"body", b}, {"height_mm", bb.size().z()}, {"footprint_mm", {bb.size().x(), bb.size().y()}},
                 {"bed_contact_mm2", bed}, {"overhang_mm2", over}, {"overhang_pct", area > 0 ? 100.0 * over / area : 0.0},
-                {"overhang_angle", ang}, {"overhang_levels", lv}, {"solids", solids},
-                {"warnings", solids > 1 ? json::array({"the body is " + std::to_string(solids) + " disconnected solids"}) : json::array()}};
+                {"overhang_angle", ang}, {"overhang_levels", lv}, {"horizontal_holes", holes}, {"solids", solids},
+                {"sacrificial", sacrificial}, {"suggestions", suggestions}, {"warnings", warnings}};
 }
 
 // {name, values:[expr...], expect?:{bodies, volume_min, volume_max, size_max:[x,y,z], size_min:[x,y,z], no_interference}}

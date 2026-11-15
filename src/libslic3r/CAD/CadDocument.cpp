@@ -34,6 +34,7 @@
 #include <BRepOffsetAPI_MakeOffset.hxx>
 #include <NCollection_List.hxx>
 #include <BRepAlgoAPI_Common.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepAlgoAPI_Defeaturing.hxx>
 #include <BRepAlgoAPI_BooleanOperation.hxx>
 #include <BRepOffsetAPI_MakePipe.hxx>
@@ -3569,6 +3570,25 @@ void CadDocument::apply_feature(TopoDS_Shape& result, bool& have_body,
         if (!cut.IsDone()) throw std::runtime_error(_u8L("hole cut failed"));
         result = cut.Shape();
 
+        // Teardrop (sheet tip 3): a bore lying on the bed sags at its roof, so add a 45 deg point on the +Z side (the print "up").
+        // Round when the axis is within ~60 deg of vertical (it already prints clean). The point is a kite: centre, two tangent points, apex at r*sqrt2.
+        if (f.hole_teardrop && std::abs(n.Z()) < 0.5) {
+            const Vec3d nn(n.X(), n.Y(), n.Z());
+            Vec3d up = Vec3d::UnitZ() - nn * nn.z();   // world +Z projected into the bore's plane
+            up.normalize();
+            const Vec3d side = nn.cross(up);
+            const double r = f.hole_diameter * 0.5, k = r / std::sqrt(2.0);
+            auto P = [&](const Vec3d& d) { return gp_Pnt(c.x() + d.x(), c.y() + d.y(), c.z() + d.z()); };
+            BRepBuilderAPI_MakePolygon kite;
+            kite.Add(P(Vec3d::Zero())); kite.Add(P(side * k + up * k)); kite.Add(P(up * (r * std::sqrt(2.0)))); kite.Add(P(-side * k + up * k)); kite.Close();
+            if (!kite.IsDone()) throw std::runtime_error(_u8L("teardrop wire failed"));
+            TopoDS_Shape pt = f.hole_through
+                ? SketchEngine::make_extrude(kite.Wire(), f.plane, 1.0e5, true, 0.0)
+                : SketchEngine::make_extrude(kite.Wire(), f.plane, f.hole_depth, false, 0.0);
+            BRepAlgoAPI_Cut kc(result, pt);
+            if (kc.IsDone() && !kc.Shape().IsNull()) result = kc.Shape();
+        }
+
         // Drill point: a cone continuing the blind bore past its shoulder (apex h = r / tan(tip / 2) further in)
         if (!f.hole_through && f.hole_tip_angle > 1.0 && f.hole_tip_angle < 179.0) {
             const double r = f.hole_diameter * 0.5;
@@ -3587,6 +3607,27 @@ void CadDocument::apply_feature(TopoDS_Shape& result, bool& have_body,
                                                        f.hole_cbore_depth).Shape();
             BRepAlgoAPI_Cut cbc(result, cb);
             if (cbc.IsDone() && !cbc.Shape().IsNull()) result = cbc.Shape();
+            // Stepped sacrificial layers (printed with the ledge facing the bed): two strips as wide as the small bore, crossed, each
+            // bridging the big bore's diameter, the lower along x, the upper along y. Clipped to the big bore. They block the small bore
+            // by 2 layers; the part is meant to be drilled through after printing.
+            const double lh = f.hole_bridge_layer_h;
+            if (lh > 1e-6 && 2 * lh < f.hole_cbore_depth) {
+                const double D = f.hole_cbore_diameter, w = f.hole_diameter;
+                auto vec = [](const Vec3d& v) { return gp_Dir(v.x(), v.y(), v.z()); };
+                const Vec3d ux = f.plane.x_axis.normalized(), uy = f.plane.y_axis.normalized();
+                TopoDS_Shape disc = BRepPrimAPI_MakeCylinder(gp_Ax2(o, n), D * 0.5, f.hole_cbore_depth).Shape();
+                for (int k = 0; k < 2; ++k) {
+                    const Vec3d lon = k == 0 ? ux : uy;   // strip runs along `lon`
+                    const Vec3d lat = Vec3d(n.X(), n.Y(), n.Z()).cross(lon);   // the box's own y axis
+                    const double z0 = f.hole_cbore_depth - (2 - k) * lh;           // k=0 lower layer, k=1 upper (against the ledge)
+                    const Vec3d corner = Vec3d(o.X(), o.Y(), o.Z()) - lon * (D * 0.5) - lat * (w * 0.5) + Vec3d(n.X(), n.Y(), n.Z()) * z0;
+                    TopoDS_Shape box = BRepPrimAPI_MakeBox(gp_Ax2(gp_Pnt(corner.x(), corner.y(), corner.z()), n, vec(lon)), D, w, lh).Shape();
+                    BRepAlgoAPI_Common clip(box, disc);
+                    if (!clip.IsDone() || clip.Shape().IsNull()) continue;
+                    BRepAlgoAPI_Fuse fz(result, clip.Shape());
+                    if (fz.IsDone() && !fz.Shape().IsNull()) result = fz.Shape();
+                }
+            }
         } else if (f.hole_style == 2 && f.hole_csink_diameter > f.hole_diameter) {
             const double Rmaj = f.hole_csink_diameter * 0.5;
             const double Rmin = f.hole_diameter * 0.5;

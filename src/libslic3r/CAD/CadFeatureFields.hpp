@@ -66,7 +66,7 @@ template<class V, class F> void cad_fields_hole_thread(V& v, F& f)
 {
     v(f.hole_diameter); v(f.hole_depth); v(f.hole_through); v(f.hole_x); v(f.hole_y);
     v(f.hole_style); v(f.hole_cbore_diameter); v(f.hole_cbore_depth);
-    v(f.hole_csink_diameter); v(f.hole_csink_angle); v(f.hole_standard); v(f.hole_tip_angle);
+    v(f.hole_csink_diameter); v(f.hole_csink_angle); v(f.hole_standard); v(f.hole_tip_angle); v(f.hole_teardrop); v(f.hole_bridge_layer_h);
     v(f.thread_radius); v(f.thread_pitch); v(f.thread_height); v(f.thread_depth);
     v(f.thread_internal); v(f.thread_x); v(f.thread_y); v(f.thread_major_nominal);
 }
