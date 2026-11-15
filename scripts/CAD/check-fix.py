@@ -217,8 +217,6 @@ r = safe_call("apply_print_fix", kind="horizontal_hole", body=0)
 check(isinstance(r, dict) and r.get("ok") is True, "ck8: apply_print_fix horizontal_hole ok")
 r = safe_call("analyze_printability", body=0)
 check(not [n for n in r.get("notes", []) if n.get("kind") == "horizontal_hole"], "ck8: no horizontal_hole note after the fix")
-print("note: text_indent fix skipped: no feature-edit verb reaches the text extrude's boolean mode to flip union -> subtract")
-print("note: orientation fix skipped: the suggestion's turn_up_to direction has no clean, verified mapping onto the transform verb (axis/angle/pivot) for ALL bodies; skipped rather than risk a wrong rotation")
 print("note: curve_axis has no 'drop back to bed' step: no place_on_bed/translate-to-bed verb exists, so the rotation is left as-is (reported unrotated by the harness)")
 
 # --- (9) long_bridge fix: ribs split a 60 mm roof ------------------------------
@@ -362,6 +360,72 @@ if ns:
 else:
     print("note: thin_wall fix skipped: a 0.4 mm plate produced no thin_wall note")
 print("note: mesh_integrity fix skipped: would need an open-edge / non-manifold mesh, not built by this harness")
+
+
+# --- (10) floating part, bed adhesion, orientation, text_indent ---------------------
+def zmax(body=0):
+    d = safe_call("describe_scene")
+    try:
+        return d["bodies"][body]["bbox"]["max"][2]
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# a second body hovering 30 mm up with nothing under it must be reported as floating (global note naming the body)
+safe_call("new_document")
+safe_call("extrude_rect", width=10, height=10, distance=10)
+safe_call("plane", type="offset", base=0, offset=30)
+safe_call("extrude_rect", width=10, height=10, distance=10, plane="datum:0", boolean="union", body=0)
+res = safe_call("analyze_printability", body=0)
+fl = kind_notes(res, "floating_part")
+check(len(fl) == 1 and fl[0].get("severity") == "warning" and fl[0].get("body") == 1 and fl[0].get("at") is None, "ck10: one global floating_part note naming body 1")
+check(isinstance(res, dict) and (res.get("extras") or {}).get("floating_bodies") == 1, "ck10: extras.floating_bodies == 1")
+check(all("fix" not in n for n in fl), "ck10: floating_part has no fix (by design)")
+# a body resting on another is not floating
+safe_call("new_document")
+safe_call("extrude_rect", width=20, height=20, distance=10)
+safe_call("plane", type="offset", base=0, offset=10)
+safe_call("extrude_rect", width=10, height=10, distance=10, plane="datum:0", boolean="new")
+check(not kind_notes(safe_call("analyze_printability", body=0), "floating_part"), "ck10: a body sitting on another is not floating")
+
+safe_call("new_document")
+safe_call("extrude_rect", width=40, height=40, distance=20)
+check(not kind_notes(safe_call("analyze_printability", body=0), "bed_adhesion"), "ck10: a 40x40 base has no bed_adhesion note")
+check(not kind_notes(safe_call("analyze_printability", body=0), "floating_part"), "ck10: a plain box has no floating_part")
+safe_call("new_document")
+safe_call("extrude_rect", width=8, height=8, distance=20)
+res = safe_call("analyze_printability", body=0)
+check(len(kind_notes(res, "bed_adhesion")) == 1, "ck10: an 8x8 base (64 mm2) gets bed_adhesion")
+safe_call("new_document")
+safe_call("extrude_rect", width=40, height=2, distance=20)
+check(len(kind_notes(safe_call("analyze_printability", body=0), "bed_adhesion")) == 1, "ck10: a 2 mm wide base gets bed_adhesion")
+
+# orientation: a flared plate prints better upside down; the fix turns the part, then no orientation note
+safe_call("new_document")
+safe_call("extrude_rect", width=20, height=20, distance=5, taper=60)
+res = safe_call("analyze_printability", body=0)
+on = kind_notes(res, "orientation")
+if on:
+    check(has_fix(on[0]), "ck10: orientation note carries a fix")
+    r = safe_call("apply_print_fix", kind="orientation", body=0)
+    check(isinstance(r, dict) and r.get("ok") is True, "ck10: apply_print_fix orientation ok")
+    check(not kind_notes(safe_call("analyze_printability", body=0), "orientation"), "ck10: no orientation note after the fix")
+else:
+    print("note: orientation scenario produced no orientation note; fix untested")
+
+# text_indent: raised text -> cut; the top face goes back to z=20
+safe_call("new_document")
+safe_call("extrude_rect", width=40, height=40, distance=20)
+safe_call("plane", type="offset", base=0, offset=20)
+r = safe_call("add_text", text="ORCA", height=6, plane="datum:0", extrude_distance=1, boolean="union")
+check(isinstance(r, dict) and r.get("ok") is True, "ck10: raised text built")
+check(zmax() is not None and abs(zmax() - 21) < 0.05, "ck10: raised text puts the top at z=21 (got %s)" % zmax())
+res = safe_call("analyze_printability", body=0)
+tn = kind_notes(res, "text_indent")
+check(len(tn) == 1 and has_fix(tn[0]), "ck10: text_indent note carries a fix for raised text")
+r = safe_call("apply_print_fix", kind="text_indent", body=0)
+check(isinstance(r, dict) and r.get("ok") is True, "ck10: apply_print_fix text_indent ok")
+check(zmax() is not None and abs(zmax() - 20) < 0.05, "ck10: after the fix the top is back at z=20 (got %s)" % zmax())
 
 print("CHECKS %d FAILED %d" % (_checks, len(fails)))
 sys.exit(1 if fails else 0)

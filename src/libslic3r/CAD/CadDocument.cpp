@@ -617,6 +617,8 @@ static void assign_field(CadFeature& f, const std::string& field, double value)
     // The Thread card shows a DIAMETER (the size a thread is named by: M6, 1/4"), so that is
     // the name it offers for binding; thread_radius stays for recipes that already use it.
     if (field == "thread_diameter")   { f.thread_radius = 0.5 * value; return; }
+    if (field == "extrude_mode")      { f.mode = value > 1.5 ? BooleanMode::Cut : value > 0.5 ? BooleanMode::Add : BooleanMode::New; return; }   // 0 new, 1 add, 2 cut
+    if (field == "extrude_flip")      { f.flip = value > 0.5; return; }
     if (field == "hole_teardrop")     { f.hole_teardrop = value > 0.5; return; }   // 0/1: a boolean driven by a number, used by the Print check fix
     const auto& im = bindable_int_fields();   // rounded
     if (auto it = im.find(field); it != im.end()) { f.*(it->second) = (int)std::lround(value); return; }
@@ -642,6 +644,8 @@ std::vector<std::string> CadDocument::bindable_fields()
     for (const auto& kv : bindable_int_fields()) v.push_back(kv.first);
     v.push_back("thread_diameter");
     v.push_back("hole_teardrop");
+    v.push_back("extrude_mode");
+    v.push_back("extrude_flip");
     std::sort(v.begin(), v.end());
     return v;
 }

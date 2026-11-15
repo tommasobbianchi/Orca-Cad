@@ -3971,6 +3971,80 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
         if (curve_count > 0) out["curve_axes"] = curve_count;
     }
 
+    // Floating parts and bed adhesion (print frame, bed = lowest z). Components = triangles joined by shared (welded) vertices.
+    {
+        double bed = 1e30;
+        for (const Vec3f& v : V) bed = std::min(bed, double(v.z()));
+        std::map<std::array<long, 3>, int> vid;
+        std::vector<int> id(V.size());
+        for (size_t i = 0; i < V.size(); ++i) {
+            const std::array<long, 3> k{std::lround(V[i].x() * 1000.0), std::lround(V[i].y() * 1000.0), std::lround(V[i].z() * 1000.0)};
+            id[i] = vid.emplace(k, int(vid.size())).first->second;
+        }
+        std::vector<int> par(vid.size());
+        for (size_t i = 0; i < par.size(); ++i) par[i] = int(i);
+        std::function<int(int)> fnd = [&](int a) { while (par[a] != a) a = par[a] = par[par[a]]; return a; };
+        for (const stl_triangle_vertex_indices& f : F) { par[fnd(id[f(0)])] = fnd(id[f(1)]); par[fnd(id[f(1)])] = fnd(id[f(2)]); }
+        struct Comp { double z0 = 1e30, z1 = -1e30, x0 = 1e30, x1 = -1e30, y0 = 1e30, y1 = -1e30; std::vector<int> tris; };
+        std::map<int, Comp> comps;
+        for (size_t i = 0; i < F.size(); ++i) {
+            Comp& c = comps[fnd(id[F[i](0)])];
+            c.tris.push_back(int(i));
+            for (int k = 0; k < 3; ++k) {
+                const Vec3f& v = V[F[i](k)];
+                c.z0 = std::min(c.z0, double(v.z())); c.z1 = std::max(c.z1, double(v.z()));
+                c.x0 = std::min(c.x0, double(v.x())); c.x1 = std::max(c.x1, double(v.x()));
+                c.y0 = std::min(c.y0, double(v.y())); c.y1 = std::max(c.y1, double(v.y()));
+            }
+        }
+        // A component floats when it is above the bed and no other component reaches up to its lowest point under its footprint.
+        // ponytail: bounding-box footprint test; a component hooked over another's corner can be missed.
+        int floating = 0;
+        for (const auto& kv : comps) {
+            const Comp& c = kv.second;
+            if (c.z0 - bed < 0.1) continue;
+            bool held = false;
+            for (const auto& ov : comps) {
+                if (ov.first == kv.first) continue;
+                const Comp& o = ov.second;
+                if (o.z1 >= c.z0 - 0.1 && o.z0 <= c.z0 && o.x0 <= c.x1 && o.x1 >= c.x0 && o.y0 <= c.y1 && o.y1 >= c.y0) { held = true; break; }
+            }
+            if (held || floating >= 6) continue;
+            ++floating;
+            std::vector<int> tr = c.tris;
+            if (tr.size() > 2000) tr.resize(2000);
+            add_note("floating_part", "warning",
+                     "A part floats " + num(c.z0 - bed) + " mm above the bed with nothing under it: it will not print; connect it to the model or add a support",
+                     Vec3d(0.5 * (c.x0 + c.x1), 0.5 * (c.y0 + c.y1), c.z0), to_model_dir(Vec3d(0, 0, -1)), tr);
+        }
+        if (floating > 0) out["floating_parts"] = floating;
+
+        // Bed adhesion: the area (and narrowest side) of what touches the bed.
+        double area = 0, x0 = 1e30, x1 = -1e30, y0 = 1e30, y1 = -1e30;
+        Vec3d ctr(0, 0, 0);
+        std::vector<int> btris;
+        for (size_t i = 0; i < F.size(); ++i) {
+            const Vec3d p0 = V[F[i](0)].cast<double>(), p1 = V[F[i](1)].cast<double>(), p2 = V[F[i](2)].cast<double>();
+            if (std::max(std::max(p0.z(), p1.z()), p2.z()) - bed > 0.05) continue;
+            const Vec3d nv = (p1 - p0).cross(p2 - p0);
+            const double nn = nv.norm();
+            if (nn < 1e-12 || nv.z() / nn > -0.99) continue;
+            const double a = 0.5 * nn;
+            area += a; ctr += a * ((p0 + p1 + p2) / 3.0);
+            for (const Vec3d& q : {p0, p1, p2}) { x0 = std::min(x0, q.x()); x1 = std::max(x1, q.x()); y0 = std::min(y0, q.y()); y1 = std::max(y1, q.y()); }
+            if (btris.size() < 2000) btris.push_back(int(i));
+        }
+        // ponytail: 100 mm2 / 3 mm are rule-of-thumb limits for PLA/PETG on a textured plate; the bbox side misjudges a ring.
+        if (!F.empty() && (area < 100.0 || std::min(x1 - x0, y1 - y0) < 3.0)) {
+            const Vec3d at = area > 1e-6 ? Vec3d(ctr.x() / area, ctr.y() / area, bed) : Vec3d(0.0, 0.0, bed);
+            add_note("bed_adhesion", "warning",
+                     area > 1e-6 ? "Only " + num(area) + " mm2 touches the bed (narrowest side " + num(std::min(x1 - x0, y1 - y0)) + " mm): it may peel off; use a brim, a wider base or a larger first-layer contact"
+                                 : std::string("Nothing flat touches the bed: use a brim or a flat base"),
+                     at, to_model_dir(Vec3d(0, 0, -1)), btris);
+            out["bed_adhesion_mm2"] = area;
+        }
+    }
+
     // Tip 8: a rounded surface facing the bed. Overhanging triangles joined by shared vertices; a component whose slope varies a lot is a curve.
     {
         std::map<std::array<long, 3>, int> vid;
@@ -4121,6 +4195,34 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
             }
         out["tight_pairs"] = pairs;
         out["clearance_mm"] = clearance;
+    }
+
+    // Floating bodies: a whole body above the lowest body with no other body under its footprint (global note: it names the body, no pin).
+    // ponytail: bounding boxes only, and only for an unrotated analysis; a body resting on a hooked or sloped neighbour can be missed.
+    if (rot.isIdentity(1e-9) && doc.bodies.size() >= 2) {
+        const size_t nb = std::min<size_t>(doc.bodies.size(), 12);
+        std::vector<std::array<double, 6>> bx(nb, std::array<double, 6>{0, 0, 0, 0, 0, 0});
+        std::vector<char> ok(nb, 0);
+        double lowest = 1e30;
+        for (size_t i = 0; i < nb; ++i) {
+            if (doc.bodies[i].shape.IsNull()) continue;
+            Bnd_Box bb; BRepBndLib::Add(doc.bodies[i].shape, bb);
+            if (bb.IsVoid()) continue;
+            bb.Get(bx[i][0], bx[i][1], bx[i][2], bx[i][3], bx[i][4], bx[i][5]);
+            ok[i] = 1; lowest = std::min(lowest, bx[i][2]);
+        }
+        int fb = 0;
+        for (size_t i = 0; i < nb; ++i) {
+            if (!ok[i] || bx[i][2] - lowest < 0.1) continue;
+            bool held = false;
+            for (size_t j = 0; j < nb && !held; ++j)
+                held = j != i && ok[j] && bx[j][5] >= bx[i][2] - 0.1 && bx[j][2] <= bx[i][2] && bx[j][0] <= bx[i][3] && bx[j][3] >= bx[i][0] && bx[j][1] <= bx[i][4] && bx[j][4] >= bx[i][1];
+            if (held) continue;
+            ++fb;
+            notes.push_back(json{{"kind", "floating_part"}, {"severity", "warning"}, {"at", nullptr}, {"body", int(i)},
+                                 {"text", "Body " + std::to_string(i) + " floats " + num(bx[i][2] - lowest) + " mm above the bed with nothing under it: it will not print; connect it to the model or add a support"}});
+        }
+        if (fb > 0) out["floating_bodies"] = fb;
     }
 
     // Tips 11 / 18 / 22 / 23 / 24: design-based global advice (from the document, no mesh).
@@ -4375,6 +4477,35 @@ static void attach_print_fixes(json& notes, const json& suggestions, const CadDo
             }
             if (steps.empty()) continue;
             label = "Make the hole a teardrop";
+        } else if (kind == "orientation" && rot_id) {
+            // Turn every body about the origin so the suggested model direction becomes +Z (the analysis is relative to the lowest point, so no drop-to-bed is needed).
+            Vec3d up(0, 0, 1);
+            for (const json& sg : suggestions)
+                if (sg.value("kind", std::string()) == "orientation" && sg.contains("turn_up_to") && sg["turn_up_to"].is_array() && sg["turn_up_to"].size() >= 3)
+                    up = Vec3d(jn(sg["turn_up_to"], 0), jn(sg["turn_up_to"], 1), jn(sg["turn_up_to"], 2));
+            if (up.norm() < 1e-9) continue;
+            up.normalize();
+            if (up.z() > 0.9999) continue;
+            Vec3d u = up.cross(Vec3d::UnitZ());
+            u = u.norm() < 1e-9 ? Vec3d::UnitX() : Vec3d(u.normalized());   // straight down: any horizontal axis turns it over
+            const double ang = std::acos(std::max(-1.0, std::min(1.0, up.dot(Vec3d::UnitZ())))) * 180.0 / M_PI;
+            label = "Rotate the part to the suggested orientation";
+            for (size_t i = 0; i < doc.bodies.size(); ++i)
+                steps.push_back(json{{"method", "transform"}, {"params", {{"body", int(i)},
+                    {"axis_x", u.x()}, {"axis_y", u.y()}, {"axis_z", u.z()}, {"angle", ang},
+                    {"pivot_x", 0.0}, {"pivot_y", 0.0}, {"pivot_z", 0.0}}}});
+        } else if (kind == "text_indent") {
+            // Raised text (an Add extrude of a text sketch) becomes a cut of the same depth into the face: mode -> Cut, direction flipped.
+            for (size_t i = 0; i < doc.features.size() && steps.size() < 12; ++i) {
+                const CadFeature& f = doc.features[i];
+                if (f.type != CadFeatureType::Extrude || !f.enabled || f.mode != BooleanMode::Add) continue;
+                if (f.sketch_ref < 0 || f.sketch_ref >= int(doc.features.size()) || !doc.features[size_t(f.sketch_ref)].is_text()) continue;
+                // flip first: a Cut that still points outward removes nothing and the recompute refuses it
+                steps.push_back(json{{"method", "set_feature_expr"}, {"params", {{"feature", int(i)}, {"field", "extrude_flip"}, {"expr", f.flip ? "0" : "1"}}}});
+                steps.push_back(json{{"method", "set_feature_expr"}, {"params", {{"feature", int(i)}, {"field", "extrude_mode"}, {"expr", "2"}}}});
+            }
+            if (steps.empty()) continue;   // the text is already cut (or has no extrude)
+            label = "Cut the text into the face instead of raising it";
         } else if (kind == "curve_axis" && rot_id) {
             // Rotate every body about the origin so the curve's (sign-flipped, up-pointing) axis maps to +Z.
             // A verb to drop the result back onto the bed does not exist; the transform is reported as-is.
