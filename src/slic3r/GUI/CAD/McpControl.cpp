@@ -70,6 +70,7 @@
 #include "slic3r/GUI/CAD/DesignCanvas.hpp"
 #include "slic3r/GUI/CAD/DesignSketchTool.hpp"
 #include "slic3r/GUI/CAD/DesignOffer.hpp"   // offer table — served whole by list_verbs, fired by run_verb
+#include "slic3r/GUI/CAD/DesignTextDialog.hpp"   // vectorise_text — the headless Text tool's shared vectorisation
 
 #include "libslic3r/CAD/CadDocument.hpp"
 #include "libslic3r/CAD/SketchEngine.hpp"
@@ -756,6 +757,13 @@ json describe_tools()
         compact_tool("extrude_rect", "A centred rectangle extruded in ONE command: constrained sketch + sizes bound to expressions + extrude (all editable features). Use bind {distance: expr} and as for the extrude.",
                      {{"plane", "string", "XY|XZ|YZ|datum:N, default XY"}, {"width", "number", "mm, X"}, {"height", "number", "mm, Y"}, {"distance", "number", "extrude depth, > 0"}, {"boolean", "string", "new|union|subtract|intersect"},
                       {"width_expr", "string", "expression bound to the width (and half of it to the centring)"}, {"height_expr", "string", "same for the height"}, {"sketch_as", "string", "name of the sketch feature"}}),
+        compact_tool("add_text", "The headless Text tool: create a Text sketch feature — the same thing the GUI Text dialog makes — with no dialog, optionally extruded. Stops at the Text feature when extrude_distance is absent.",
+                     {{"text", "string", "the text, <= 200 chars"}, {"height", "number", "cap height mm, default 6"},
+                      {"font", "string", "optional WxFontUtils descriptor; default = what the dialog uses"},
+                      {"plane", "string", "XY|XZ|YZ|datum:N, default XY"}, {"face", "integer", "instead of plane: planar face id (query_topology)"},
+                      {"body", "integer", "body of the face / target of a boolean"}, {"x", "number", "centre offset in the plane, default 0"}, {"y", "number", "centre offset, default 0"},
+                      {"extrude_distance", "number", "chained extrude depth, > 0"}, {"boolean", "string", "new|union|subtract, default union"},
+                      {"end", "string", "blind|two_sided, default blind"}, {"distance2", "number", "second-side depth when two_sided"}}),
         compact_tool("push_pull", "Move a planar face along its normal: + grows the body, - cuts into it.",
                      {{"face", "integer", "face id from query_topology"}, {"body", "integer", "owner body (default last)"}, {"distance", "number", "mm, signed"}}),
         compact_tool("sketch_op", "On the open sketch: trim / extend (at), fillet (a, b, radius) / chamfer (a, b, distance) a corner of two lines, linear_pattern (entities, count, step) / circular_pattern (entities, count, center, angle).",
@@ -4287,6 +4295,7 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
     json suggestions = json::array();   // sheet tips 12-14 and the bridging ones: what to add under a roof, with numbers; analysis only, nothing is built
     const double layer_h = params.value("layer_h", 0.4);
     bool layer_done = false;
+    int small_marked = 0;
     auto num = [](double v) { std::ostringstream os; os.imbue(std::locale::classic()); os.precision(3); os << v; return os.str(); };
     json notes = json::array();   // the issues that have a place on the part: the viewport pins each one there (model frame)
     auto to_model = [&](const Vec3d& p) { return Vec3d(rot_c + rot.transpose() * (p - rot_c)); };
@@ -4319,6 +4328,12 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
             note("sacrificial_layer", "suggestion", "A " + num(span) + " mm roof: a one-layer sacrificial membrane under it bridges cleanly",
                  to_model(Vec3d(top[i].d[7], top[i].d[8], top[i].d[9])), lvl_n, top[i].tris);
             add("sacrificial_layer", json{{"layer_h", layer_h}, {"why", "thin one-layer membrane under the roof, cut away after printing"}});
+        }
+        // Small flat roofs (span <= 5 mm) bridge with no help; mark them so the user sees where overhangs are, capped at 3 pins.
+        else if (span > 0.5 && span <= 5.0 && small_marked < 3) {
+            ++small_marked;
+            note("small_overhang", "suggestion", "A " + num(span) + " mm overhang: it bridges without support",
+                 to_model(Vec3d(top[i].d[7], top[i].d[8], top[i].d[9])), lvl_n, top[i].tris);
         }
         if (span > bridge_max) {
             const int n = int(std::ceil(span / bridge_max)) - 1;   // ribs so that every gap is within bridge_max
@@ -5993,6 +6008,100 @@ json action_extrude_circle(DesignPanel* panel, const json& params)
     } catch (...) { undo_all(); throw; }
 }
 
+// The headless Text tool: builds the Text sketch feature the GUI dialog makes (sketch -> imported
+// regions -> optional extrude) straight from the params, no dialog — typing into the dialog over the
+// socket never worked. One undo boundary around the whole verb. Shared vectorisation: vectorise_text.
+json action_add_text(DesignPanel* panel, const json& params)
+{
+    if (!params.contains("text") || !params["text"].is_string())
+        throw std::runtime_error("add_text needs 'text' (a string)");
+    const std::string text = params["text"].get<std::string>();
+    if (text.empty()) throw std::runtime_error("text must not be empty");
+    if (text.size() > 200) throw std::runtime_error("text is limited to 200 characters");
+
+    const double height = params.value("height", 6.0);
+    if (!(height > 0)) throw std::runtime_error("height must be > 0");
+    const std::string font = params.value("font", std::string());
+
+    CadDocument& doc = panel->mcp_doc();
+    DesignCanvas* vp = panel->mcp_viewport();
+    if (vp == nullptr || vp->is_sketching()) throw std::runtime_error("a sketch is already open: commit or cancel it first");
+
+    // Vectorise BEFORE touching the document, so a bad font / no outline throws clean.
+    const ImportRegions regions = vectorise_text(text, font, height);
+    if (regions.empty())
+        throw std::runtime_error(font.empty()
+            ? "could not vectorise the text: missing font or no outline for these glyphs"
+            : "could not vectorise the text with font '" + font + "': missing font or no outline for these glyphs");
+
+    // plane_from silently falls back to XY, so reject an unknown plane name up front.
+    if (params.contains("plane") && !params.contains("face")) {
+        const std::string ps = params["plane"].is_string() ? params["plane"].get<std::string>() : std::string();
+        if (ps != "XY" && ps != "XZ" && ps != "YZ" && ps.rfind("datum:", 0) != 0)
+            throw std::runtime_error("plane is XY, XZ, YZ or datum:N");
+    }
+    // Plane or picked face, resolved (read-only) before the checkpoint, like sketch_begin / the dialog.
+    SketchPlane pl;
+    Vec2d off(0, 0);
+    bool on_face = false; int face_body = -1;
+    int body_i = -1, face_i = -1; TopoDS_Face fc;
+    if (face_of_params(params, doc, body_i, face_i, fc)) {
+        pl = SketchPlane::from_face(fc);
+        off = pl.project(GeometryEngine::face_centroid_world(fc), pl.normal);
+        on_face = true; face_body = body_i;
+    } else {
+        pl = plane_from(params, doc);
+        off = Vec2d(params.value("x", 0.0), params.value("y", 0.0));
+    }
+
+    // Chained extrude params, validated before any mutation.
+    const bool has_extrude = params.contains("extrude_distance");
+    double d = 0, distance2 = 0;
+    BooleanMode mode = BooleanMode::Add;
+    ExtrudeEnd end = ExtrudeEnd::Blind;
+    if (has_extrude) {
+        d = params["extrude_distance"].get<double>();
+        if (!(d > 0)) throw std::runtime_error("extrude_distance must be > 0");
+        mode = bool_from(params.value("boolean", std::string("union")));
+        const std::string end_s = params.value("end", std::string("blind"));
+        if (end_s == "two_sided")      { end = ExtrudeEnd::TwoSided; distance2 = params.value("distance2", d); }
+        else if (end_s == "symmetric")   end = ExtrudeEnd::Symmetric;
+        else if (end_s == "through_all") end = ExtrudeEnd::ThroughAll;
+        else if (end_s == "up_to_face")  end = ExtrudeEnd::UpToFace;
+        else if (end_s != "blind") throw std::runtime_error("end is blind|two_sided|symmetric|through_all|up_to_face");
+    }
+
+    doc.checkpoint();   // one undo boundary around the whole verb
+    CadFeature f;
+    f.type             = CadFeatureType::Sketch;
+    f.name             = panel->mcp_new_feature_name(wxString("Text"));
+    f.plane            = pl;
+    f.import_offset    = off;
+    f.import_on_face   = on_face;
+    f.import_face_body = face_body;
+    f.imported_regions = regions;
+    f.text_string      = text;
+    f.text_font        = font;
+    f.text_height      = height;
+    const int si = doc.append_feature(f);
+
+    int ei = -1;
+    if (has_extrude) {
+        ei = doc.add_extrude(si, d, /*symmetric*/false, mode, "Extrude");
+        CadFeature& fe = doc.features[size_t(ei)];
+        fe.extrude_end = end;
+        fe.distance2 = distance2;
+        const int target = target_body_arg(params, doc);
+        if (target >= 0) fe.target_body = target;
+    }
+    bool ok = doc.recompute();
+    if (!ok) { const std::string why = doc.error; doc.undo(); doc.error = why; }
+    panel->mcp_after_change();
+    json r{{"ok", ok}, {"text_index", si}, {"bodies", int(doc.bodies.size())}, {"error", doc.error}};
+    if (ei >= 0) r["extrude_index"] = ei;
+    return r;
+}
+
 // Memory guard. A command that builds geometry can use hundreds of MB (a helical sweep keeps 100-300 MB of triangulation), and a loop of
 // them once took the app to 42 GB and an OOM kill. Past the limit, commands that add or rebuild geometry are refused with the reason;
 // reads, undo/redo, new_document, open, save and export keep working so the caller can recover. Limit: ORCA_CAD_MCP_MAX_RSS_MB (default 6144, 0 = off).
@@ -6168,6 +6277,7 @@ json call_method_core(DesignPanel* panel, const std::string& method, const json&
     if (method == "sketch_constrain") return action_sketch_constrain(panel, params);
     if (method == "extrude_rect")   return action_extrude_rect(panel, params);
     if (method == "extrude_circle") return action_extrude_circle(panel, params);
+    if (method == "add_text")       return action_add_text(panel, params);
     if (method == "export")         return action_export(panel, params);
     if (method == "list_commands")  return action_list_commands(panel, params);
     if (method == "execute")        return action_execute(panel, params);

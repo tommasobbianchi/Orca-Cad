@@ -156,6 +156,9 @@ public:
     bool mcp_card_open(const std::string& card);
     bool mcp_card_set(const std::string& key, double value);
     void mcp_reset_feature_counter() { m_feature_counter = 0; }   // a new document numbers its features from 1 again (names must not depend on the session's history)
+    // Name the next feature like the GUI would ("Text N"), incrementing the counter. Used by the
+    // headless MCP verbs so features they add carry the same names the GUI's would.
+    std::string mcp_new_feature_name(const wxString& kind) { ++m_feature_counter; return feature_name(kind); }
     void mcp_drop_selection() { drop_selection(); }   // a replaced document must not keep the old pick (a stale body index poisons the next feature)
     bool mcp_card_confirm_enabled() const { return confirm_enabled(); }
     std::vector<int> mcp_tree_selection() const { return tree_selected_rows(); }

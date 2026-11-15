@@ -138,5 +138,17 @@ if lv:
 check(any(n.get("kind") == "long_bridge" for n in notes_of(res)),
       "a long_bridge note exists for the 60x60 roof")
 
+# --- (e) a small overhang (4 mm) is marked; a 15 mm one is not "small" -----------------
+new_shell()
+pocket_rect(4, 4)
+res = safe_call("analyze_printability", body=0)
+sm = [n for n in notes_of(res) if n.get("kind") == "small_overhang"]
+check(len(sm) == 1, "a 4x4 pocket roof gets one small_overhang note (got %d)" % len(sm))
+check(bool(sm) and sm[0].get("tris") and sm[0].get("normal") is not None, "the small_overhang note has tris and a normal")
+new_shell()
+pocket_rect(15, 15)
+res = safe_call("analyze_printability", body=0)
+check(not any(n.get("kind") == "small_overhang" for n in notes_of(res)), "a 15x15 pocket roof is not a small_overhang")
+
 print("CHECKS %d FAILED %d" % (_checks, len(fails)))
 sys.exit(1 if fails else 0)

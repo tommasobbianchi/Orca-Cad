@@ -178,8 +178,15 @@ ta = extras_of(res).get("tips_advice")
 check(isinstance(ta, list) and "compliance" in ta,
       "extras.tips_advice lists the fired advice kinds (%s)" % (ta,))
 
-# text_indent (tip 24): no MCP verb builds a CAD text feature; skip (ui.text only types).
-print("note: text_indent (tip 24) not exercised - no text-feature verb exists")
+# text_indent (tip 24): a Text feature (add_text verb) fires the global advice note.
+call("new_document")
+call("extrude_rect", width=40, height=40, distance=20)
+call("add_text", text="Hi", height=6, plane="XY")
+time.sleep(0.4)
+res = call("analyze_printability", body=0)
+ti = kind_notes(res, "text_indent")
+check(len(ti) >= 1, "a document with a text feature fires text_indent")
+check(bool(ti) and ti[0].get("at") is None and "tris" not in ti[0], "the text_indent note is pin-less")
 
 print("CHECKS %d FAILED %d" % (_checks, len(fails)))
 sys.exit(1 if fails else 0)
