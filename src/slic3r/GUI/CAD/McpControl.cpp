@@ -4361,6 +4361,20 @@ static void attach_print_fixes(json& notes, const json& suggestions, const CadDo
             if (tap.size() != 1) continue;
             label = "Make the slope 45 deg";
             steps.push_back(json{{"method", "set_feature_expr"}, {"params", {{"feature", tap[0]}, {"field", "taper_deg"}, {"expr", "45"}}}});
+        } else if (kind == "horizontal_hole" && rot_id) {
+            // Every enabled plain Hole of the noted diameter (parsed from "d=<mm>") gets its teardrop flag on;
+            // a vertical hole of the same size ignores the flag, so the match needs no axis test.
+            double d = 0;
+            const std::string t = n.value("text", std::string());
+            if (const size_t k = t.find("d="); k != std::string::npos) d = std::atof(t.c_str() + k + 2);
+            if (!(d > 0)) continue;
+            for (size_t i = 0; i < doc.features.size() && steps.size() < 6; ++i) {
+                const CadFeature& f = doc.features[i];
+                if (f.type == CadFeatureType::Hole && f.enabled && !f.hole_teardrop && std::abs(f.hole_diameter - d) < 0.06)
+                    steps.push_back(json{{"method", "set_feature_expr"}, {"params", {{"feature", int(i)}, {"field", "hole_teardrop"}, {"expr", "1"}}}});
+            }
+            if (steps.empty()) continue;
+            label = "Make the hole a teardrop";
         } else if (kind == "curve_axis" && rot_id) {
             // Rotate every body about the origin so the curve's (sign-flipped, up-pointing) axis maps to +Z.
             // A verb to drop the result back onto the bed does not exist; the transform is reported as-is.

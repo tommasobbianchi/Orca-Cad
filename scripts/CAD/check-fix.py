@@ -207,7 +207,16 @@ check(isinstance(insp.get("print_notes"), list) and len(insp["print_notes"]) > 0
       "ck7: print_notes come back when turned on again")
 
 # --- (8) the skipped kinds: report why ------------------------------------------
-print("note: horizontal_hole fix skipped: the bore analysis derives holes from the mesh; no feature index is matched by axis/position/diameter, and the teardrop flag is not a bindable field reachable through set_feature_expr")
+# horizontal_hole: the fix turns the hole's teardrop flag on
+safe_call("new_document"); safe_call("extrude_rect", width=60, height=40, distance=20)
+safe_call("hole", diameter=12, through=True, plane="XZ", x=0, y=10)
+r = safe_call("analyze_printability", body=0)
+hn = [n for n in r.get("notes", []) if n.get("kind") == "horizontal_hole"]
+check(len(hn) == 1 and hn[0].get("fix"), "ck8: horizontal_hole note carries a fix")
+r = safe_call("apply_print_fix", kind="horizontal_hole", body=0)
+check(isinstance(r, dict) and r.get("ok") is True, "ck8: apply_print_fix horizontal_hole ok")
+r = safe_call("analyze_printability", body=0)
+check(not [n for n in r.get("notes", []) if n.get("kind") == "horizontal_hole"], "ck8: no horizontal_hole note after the fix")
 print("note: text_indent fix skipped: no feature-edit verb reaches the text extrude's boolean mode to flip union -> subtract")
 print("note: orientation fix skipped: the suggestion's turn_up_to direction has no clean, verified mapping onto the transform verb (axis/angle/pivot) for ALL bodies; skipped rather than risk a wrong rotation")
 print("note: curve_axis has no 'drop back to bed' step: no place_on_bed/translate-to-bed verb exists, so the rotation is left as-is (reported unrotated by the harness)")
