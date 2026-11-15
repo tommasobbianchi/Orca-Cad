@@ -3779,8 +3779,24 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
             c.z0 = std::min(c.z0, std::min({p0.z(), p1.z(), p2.z()})); c.z1 = std::max(c.z1, std::max({p0.z(), p1.z(), p2.z()}));
         }
         json cur = json::array();
+        json chamfers = json::array();
         for (const auto& kv : comps) {
             const Comp& c = kv.second;
+            // Tip 9/10: a planar sloped face (e.g. a chamfer) that is neither a flat roof
+            // (<=3 deg from straight down) nor at/above the overhang limit is still an
+            // overhang; a chamfer there must be 45 deg or steeper to print without support.
+            // ponytail: reuse the component fields already gathered for the rounded branch.
+            if (c.area >= 2.0 && c.a1 - c.a0 < 3.0 && c.a0 > 3.0 && c.a1 < 90.0 - ang) {
+                if (bore_r > 0 && c.z1 - c.z0 <= bore_r * 1.05) continue;   // the roof arc of a horizontal bore: under horizontal_holes
+                const double from_vert = 90.0 - 0.5 * (c.a0 + c.a1);
+                const std::string text = "Sloped face " + num(from_vert) + " deg from vertical overhangs (limit " + num(ang) + "): make this chamfer 45 deg or steeper so it prints without support";
+                add_note("steep_chamfer", "warning", text, c.p, to_model_dir(c.pn), c.tris);
+                warnings.push_back(text);
+                suggestions.push_back(json{{"kind", "steep_chamfer"}, {"area_mm2", c.area}, {"from_vertical_deg", from_vert},
+                                           {"z", {c.z0 - zmin, c.z1 - zmin}}, {"why", text}});
+                chamfers.push_back(json{{"area_mm2", c.area}, {"from_vertical_deg", from_vert}, {"z", {c.z0 - zmin, c.z1 - zmin}}});
+                continue;
+            }
             if (c.area < 4.0 || c.a1 - c.a0 < 12.0 || c.a1 < 90.0 - ang) continue;   // flat, tiny, or never steep enough to matter
             if (bore_r > 0 && c.z1 - c.z0 <= bore_r * 1.05) continue;                 // the roof arc of a horizontal bore: reported under horizontal_holes
             add_note("fillet_from_below", "suggestion", "A rounded surface faces the bed: an equal 45 deg chamfer prints cleaner", c.p, to_model_dir(c.pn), c.tris);
@@ -3789,6 +3805,7 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
                                        {"why", "a rounded surface faces the bed (slope " + num(c.a0) + "-" + num(c.a1) + " deg from straight down): an equal 45 deg chamfer prints cleaner (a horizontal bore's roof is under horizontal_holes)"}});
         }
         out["curved_overhangs"] = cur;
+        out["shallow_chamfers"] = chamfers;
     }
 
     // Tip 1: wall thickness against the extrusion line width. Rays from sampled side faces inward to the opposite surface,
