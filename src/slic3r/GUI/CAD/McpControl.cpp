@@ -4472,7 +4472,7 @@ static void attach_print_fixes(json& notes, const json& suggestions, const CadDo
             if (!(d > 0)) continue;
             for (size_t i = 0; i < doc.features.size() && steps.size() < 6; ++i) {
                 const CadFeature& f = doc.features[i];
-                if (f.type == CadFeatureType::Hole && f.enabled && !f.hole_teardrop && std::abs(f.hole_diameter - d) < 0.06)
+                if (f.type == CadFeatureType::Hole && f.enabled && !f.hole_teardrop && std::abs(f.hole_diameter - d) <= std::max(0.06, 0.02 * d))   // the note's d comes from the tessellated bore (49.9 for a 50 mm hole)
                     steps.push_back(json{{"method", "set_feature_expr"}, {"params", {{"feature", int(i)}, {"field", "hole_teardrop"}, {"expr", "1"}}}});
             }
             if (steps.empty()) continue;

@@ -219,6 +219,12 @@ r = safe_call("analyze_printability", body=0)
 check(not [n for n in r.get("notes", []) if n.get("kind") == "horizontal_hole"], "ck8: no horizontal_hole note after the fix")
 print("note: curve_axis has no 'drop back to bed' step: no place_on_bed/translate-to-bed verb exists, so the rotation is left as-is (reported unrotated by the harness)")
 
+# a big bore: the mesh-derived diameter (49.9) must still match the 50 mm Hole feature
+safe_call("new_document"); safe_call("extrude_rect", width=204, height=202, distance=80)
+safe_call("hole", diameter=50, through=True, plane="XZ", x=0, y=30)
+hn = [n for n in safe_call("analyze_printability", body=0).get("notes", []) if n.get("kind") == "horizontal_hole"]
+check(len(hn) == 1 and has_fix(hn[0]), "ck8b: a 50 mm bore note carries a fix")
+
 # --- (9) long_bridge fix: ribs split a 60 mm roof ------------------------------
 new_doc()
 box(100, 100, 20)
