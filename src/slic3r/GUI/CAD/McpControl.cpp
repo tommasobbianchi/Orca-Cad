@@ -3654,6 +3654,93 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
         notes.push_back(json{{"kind", "orientation"}, {"severity", "suggestion"}, {"text", why}, {"at", nullptr}});   // global: no pin, no normal
     }
 
+    // Tip 19/20: warping / mouse ears. A large flat first layer with sharp corners lifts at
+    // the corners; round them (R >= 3 mm) or add mouse ears (disc 10 mm, 0.3 mm thick).
+    // ponytail: hard thresholds for the heuristic; tune here if a real part mis-fires.
+    constexpr double kWarpSpanMM = 50.0;        // max footprint span below which corners won't lift
+    constexpr double kWarpAreaMM2 = 600.0;      // bed contact below which the risk is moot
+    constexpr double kWarpSharpDeg = 120.0;     // hull corner below this counts as sharp
+    {
+        const double zmin = m.bounding_box().min.z();
+        std::vector<Vec2d> pts;                 // bed footprint (x,y) in the print frame
+        std::vector<int> bed_tris;
+        double bed_area = 0.0;
+        for (size_t i = 0; i < F.size(); ++i) {
+            const stl_triangle_vertex_indices& f = F[i];
+            const Vec3d p0 = V[f(0)].cast<double>(), p1 = V[f(1)].cast<double>(), p2 = V[f(2)].cast<double>();
+            const Vec3d n = (p1 - p0).cross(p2 - p0);
+            const double nn = n.norm();
+            if (nn < 1e-12 || n.z() / nn > -0.99) continue;        // not facing the bed
+            const Vec3d c = (p0 + p1 + p2) / 3.0;                  // same bed test the orientation block uses
+            if (c.z() - zmin >= 0.05) continue;
+            bed_area += 0.5 * nn;
+            pts.emplace_back(p0.x(), p0.y()); pts.emplace_back(p1.x(), p1.y()); pts.emplace_back(p2.x(), p2.y());
+            if (bed_tris.size() < 2000) bed_tris.push_back(int(i));
+        }
+        if (!pts.empty()) {
+            double dx = 0, dy = 0;   // footprint bbox
+            {
+                double x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30;
+                for (const Vec2d& p : pts) {
+                    x0 = std::min(x0, p.x()); y0 = std::min(y0, p.y());
+                    x1 = std::max(x1, p.x()); y1 = std::max(y1, p.y());
+                }
+                dx = x1 - x0; dy = y1 - y0;
+            }
+            // Convex hull of the bed footprint (monotone chain).
+            std::vector<Vec2d> hull;
+            if (pts.size() >= 3) {
+                auto cross2 = [](const Vec2d& o, const Vec2d& a, const Vec2d& b) {
+                    return (a.x() - o.x()) * (b.y() - o.y()) - (a.y() - o.y()) * (b.x() - o.x()); };
+                std::sort(pts.begin(), pts.end(), [](const Vec2d& a, const Vec2d& b) {
+                    return a.x() < b.x() || (a.x() == b.x() && a.y() < b.y()); });
+                std::vector<Vec2d> h;
+                h.reserve(pts.size());
+                for (size_t j = 0; j < pts.size(); ++j) {
+                    while (h.size() >= 2 && cross2(h[h.size() - 2], h.back(), pts[j]) <= 0) h.pop_back();
+                    h.push_back(pts[j]);
+                }
+                const size_t lower = h.size() + 1;
+                for (size_t j = pts.size(); j-- > 0;) {
+                    while (h.size() >= lower && cross2(h[h.size() - 2], h.back(), pts[j]) <= 0) h.pop_back();
+                    h.push_back(pts[j]);
+                }
+                h.pop_back();
+                hull.swap(h);
+            }
+            // Interior angle at each hull vertex; a sharp corner can lift and warp.
+            std::vector<Vec3d> sharp_pts;                         // print-frame (x, y, zmin) of every sharp corner
+            size_t worst = 0; double worst_ang = 1e9;
+            if (hull.size() >= 3) {
+                for (size_t j = 0; j < hull.size(); ++j) {
+                    const Vec2d& pa = hull[(j + hull.size() - 1) % hull.size()];
+                    const Vec2d& pb = hull[j];
+                    const Vec2d& pc = hull[(j + 1) % hull.size()];
+                    const Vec2d u = pa - pb, v = pc - pb;
+                    const double dot = u.x() * v.x() + u.y() * v.y();
+                    const double corner_deg = std::acos(std::min(1.0, std::max(-1.0, dot / (u.norm() * v.norm())))) * 180.0 / M_PI;
+                    if (corner_deg < worst_ang) { worst_ang = corner_deg; worst = j; }
+                    if (corner_deg < kWarpSharpDeg) sharp_pts.emplace_back(pb.x(), pb.y(), zmin);
+                }
+            }
+            const bool risk = !sharp_pts.empty() && std::max(dx, dy) >= kWarpSpanMM && bed_area >= kWarpAreaMM2;
+            if (risk) {
+                const std::string text = "Flat first layer " + num(dx) + " x " + num(dy) +
+                    " mm with sharp corners: the corners may lift (warping). Round them (R >= 3 mm) or add mouse ears (disc 10 mm, 0.3 mm thick)";
+                const Vec3d sharpest(hull[worst].x(), hull[worst].y(), zmin);
+                add_note("warp_risk", "warning", text, sharpest, to_model_dir(Vec3d(0, 0, -1)), bed_tris);
+                warnings.push_back(text);
+                json corners = json::array();
+                for (const Vec3d& p : sharp_pts) {
+                    const Vec3d mp = rot_c + rot.transpose() * (p - rot_c);   // to the model frame, like add_note
+                    corners.push_back(json::array({mp.x(), mp.y(), mp.z()}));
+                }
+                suggestions.push_back(json{{"kind", "mouse_ears"}, {"corners", corners}, {"disc_d_mm", 10.0}, {"thickness_mm", 0.3}, {"why", text}});
+                out["warp"] = json{{"bed_mm", {dx, dy}}, {"bed_area_mm2", bed_area}, {"sharp_corners", int(sharp_pts.size())}};
+            }
+        }
+    }
+
     // Tip 8: a rounded surface facing the bed. Overhanging triangles joined by shared vertices; a component whose slope varies a lot is a curve.
     {
         std::map<std::array<long, 3>, int> vid;
