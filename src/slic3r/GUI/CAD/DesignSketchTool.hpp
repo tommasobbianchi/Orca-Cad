@@ -1087,6 +1087,7 @@ public:
     std::set<std::string> hover_variable_names(const std::set<std::string>& known) const;
 private:
     std::string dim_text(const DimAnnot& a) const;                          // rendered label string
+    double px_unit_at(const Camera& cam, const Vec3d& at) const;   // same, but at a world point (body edges: the camera target)
     double px_unit(const Camera& cam) const;   // world units per screen pixel on the sketch plane
     void render_dimensions(double unit_per_px);                            // quote lines + labels
     void render_dim_draft(double unit_per_px);

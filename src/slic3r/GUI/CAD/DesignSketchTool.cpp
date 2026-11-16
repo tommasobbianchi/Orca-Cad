@@ -113,6 +113,19 @@ static double ray_axis_proj(const Linef3& ray, const Vec3d& anchor, const Vec3d&
 // ribbons, labels, pick tolerances) is "N px" times this. It used to be 1 / camera.get_zoom(), which is only right for an orthographic camera
 // or a perspective one that zooms by its frustum: where zooming moves the camera, get_zoom() stays put, so those sizes stayed fixed in world
 // units and grew with every zoom-in. Measured over a 100-unit baseline so the pixel rounding does not matter.
+// World units per pixel across the view at depth `at`: right for body edges, whose depth is the body's, not the sketch plane's.
+double DesignSketchTool::px_unit_at(const Camera& cam, const Vec3d& at) const
+{
+    const Eigen::Matrix4d m = cam.get_projection_matrix().matrix() * cam.get_view_matrix().matrix();
+    const std::array<int, 4>& vp = cam.get_viewport();
+    constexpr double base = 100.0;
+    const Vec3d r = cam.get_dir_right();
+    const Eigen::Vector4d ca = m * at.homogeneous(), cb = m * (at + r * base).homogeneous();
+    if (ca.w() < 1e-9 || cb.w() < 1e-9) return px_unit(cam);
+    const double px = std::abs(cb.x() / cb.w() - ca.x() / ca.w()) * 0.5 * vp[2];
+    return px > 1e-6 ? base / px : px_unit(cam);
+}
+
 double DesignSketchTool::px_unit(const Camera& cam) const
 {
     const Eigen::Matrix4d m = cam.get_projection_matrix().matrix() * cam.get_view_matrix().matrix();
@@ -4514,9 +4527,9 @@ void DesignSketchTool::render_body_edges()
 {
     if (m_body_edges_hidden || m_solid_bodies == nullptr)
         return;
-    const Camera& cam = wxGetApp().plater()->get_camera();
+    Camera& cam = wxGetApp().plater()->get_camera();
     const Vec3d vd = cam.get_dir_forward();
-    const double px = px_unit(cam);
+    const double px = px_unit_at(cam, cam.get_target());   // the body's depth, not the sketch plane's
     const double hw = 1.0 * px;      // ~2 px wide: at 1.5 the lines read as hairlines
     const Vec3d pull = -vd * (3.0 * px);
     // Two passes: the edges of a body faded by body focus are fainter, like the body itself.
@@ -5422,7 +5435,7 @@ void DesignSketchTool::render_view_helpers()
             fill.add_vertex((Vec3f)c[3].cast<float>()); fill.add_triangle(fb, fb+1, fb+2); fb += 3;
         }
         if (fb > 0) { GLModel fm; fm.init_from(std::move(fill));
-            fm.set_color(ColorRGBA(0.61f, 0.74f, 0.82f, 0.30f)); fm.render(); }   // xShape plane: light blue, alpha 0.3
+            fm.set_color(ColorRGBA(0.61f, 0.74f, 0.82f, 0.12f)); fm.render(); }   // xShape plane: light blue, faint so the body shows through
     }
 
     if (m_show_axes) {
@@ -5536,7 +5549,7 @@ void DesignSketchTool::render_sketch_plane_frame()
     glsafe(::glEnable(GL_BLEND));
     glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
     GLModel fm; fm.init_from(std::move(fill));
-    fm.set_color(ColorRGBA(0.61f, 0.74f, 0.82f, 0.30f));   // xShape plane
+    fm.set_color(ColorRGBA(0.61f, 0.74f, 0.82f, 0.12f));   // xShape plane, faint
     fm.render();
     if (bb > 0) {
         GLModel bm; bm.init_from(std::move(border));
@@ -5593,7 +5606,7 @@ void DesignSketchTool::render_datum_planes()
     glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
     if (fb > 0) {
         GLModel fm; fm.init_from(std::move(fill));
-        fm.set_color(ColorRGBA(0.61f, 0.74f, 0.82f, 0.30f));   // xShape plane fill
+        fm.set_color(ColorRGBA(0.61f, 0.74f, 0.82f, 0.12f));   // xShape plane fill
         fm.render();
     }
     if (bb > 0) {
@@ -6879,7 +6892,7 @@ void DesignSketchTool::render_base_pick()
     // selection colour would match one of the three.
     auto fill = [&](size_t i) {
         ColorRGBA c = look(i) == Look::Hover ? ColorRGBA(0.80f, 0.80f, 0.80f, 1.0f) : hue(i);
-        c.a(look(i) == Look::Selected ? 0.85f : look(i) == Look::Hover ? 0.45f : 0.30f);   // xDesign plane alpha 0.3
+        c.a(look(i) == Look::Selected ? 0.45f : look(i) == Look::Hover ? 0.25f : 0.12f);   // faint: stacked planes must not hide the body
         return c;
     };
     auto ink = [&](size_t i) {
