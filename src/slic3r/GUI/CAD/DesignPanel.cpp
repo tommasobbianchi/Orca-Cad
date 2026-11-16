@@ -3078,6 +3078,18 @@ DesignPanel::DesignPanel(wxWindow* parent)
         // Sized to its rows, so a short history wastes no block, and scrolling past 9 features.
         m_tree = m_tree_box->make_rows(9);
         m_tree->filterable = true;
+        m_tree_box->on_header_menu = [this](const wxPoint& screen) {
+            wxMenu    menu;
+            const int id_paste = wxWindow::NewControlId(), id_fwd = wxWindow::NewControlId(), id_canvas = wxWindow::NewControlId();
+            menu.Append(id_paste, _L("Paste"))->Enable(!m_feature_clip.empty());
+            menu.Append(id_fwd, _L("Roll forward to the end"))->Enable(m_doc.rollback_index >= 0);
+            menu.AppendSeparator();
+            menu.Append(id_canvas, _L("Draw the tree on the canvas"));
+            menu.Bind(wxEVT_MENU, [this](wxCommandEvent& e) { paste_features(); }, id_paste);
+            menu.Bind(wxEVT_MENU, [this](wxCommandEvent& e) { TreeEvent t; t.kind = TreeEvent::SetRollback; t.row = -1; apply_tree_events({ t }); }, id_fwd);
+            menu.Bind(wxEVT_MENU, [this](wxCommandEvent& e) { set_imgui_tree(true); }, id_canvas);
+            PopupMenu(&menu, ScreenToClient(screen));
+        };
     }
 
     m_pinned->on_action = [this](int row, int) {
@@ -3249,6 +3261,22 @@ DesignPanel::DesignPanel(wxWindow* parent)
         // nothing here decides policy. Move, Show/hide and Delete act on one body, so they sit on its row.
         m_parts_box->header_button("design_boolean", _L("Boolean — join, subtract or intersect with another body"), [this] { on_boolean_tool(); });
         m_parts_box->header_button("color_palette",  _L("Color"), [this] { on_set_body_color(); });
+        // Right-click the header: what the bodies can do as a set. A body's own verbs are on its row.
+        m_parts_box->on_header_menu = [this](const wxPoint& screen) {
+            wxMenu    menu;
+            const int id_show = wxWindow::NewControlId(), id_hide = wxWindow::NewControlId(), id_bool = wxWindow::NewControlId(), id_col = wxWindow::NewControlId();
+            const bool any = !m_doc.bodies.empty();
+            menu.Append(id_show, _L("Show all bodies"))->Enable(any);
+            menu.Append(id_hide, _L("Hide all bodies"))->Enable(any);
+            menu.AppendSeparator();
+            menu.Append(id_bool, _L("Boolean…"))->Enable(m_doc.bodies.size() >= 2);
+            menu.Append(id_col,  _L("Color…"))->Enable(any);
+            menu.Bind(wxEVT_MENU, [this](wxCommandEvent& e) { for (int b = 0; b < int(m_doc.bodies.size()); ++b) mcp_body_visible(b, true);  refresh_tree(); }, id_show);
+            menu.Bind(wxEVT_MENU, [this](wxCommandEvent& e) { for (int b = 0; b < int(m_doc.bodies.size()); ++b) mcp_body_visible(b, false); refresh_tree(); }, id_hide);
+            menu.Bind(wxEVT_MENU, [this](wxCommandEvent& e) { on_boolean_tool(); }, id_bool);
+            menu.Bind(wxEVT_MENU, [this](wxCommandEvent& e) { on_set_body_color(); }, id_col);
+            PopupMenu(&menu, ScreenToClient(screen));
+        };
         m_parts = m_parts_box->make_rows(6);   // scrolls past 6
         m_parts->swatch = [this](int b) {   // the body's colour in the view, so a row and its body match
             if (m_viewport == nullptr) return wxColour();
@@ -3335,6 +3363,13 @@ DesignPanel::DesignPanel(wxWindow* parent)
         m_var_list->AppendColumn(_L("Name"));
         m_var_list->AppendColumn(_L("Expression"));
         m_var_list->on_activate = [this] { on_edit_variable(); };
+        m_var_box->on_header_menu = [this](const wxPoint& screen) {
+            wxMenu    menu;
+            const int id_add = wxWindow::NewControlId();
+            menu.Append(id_add, _L("Add variable…"));
+            menu.Bind(wxEVT_MENU, [this](wxCommandEvent& e) { on_add_variable(); }, id_add);
+            PopupMenu(&menu, ScreenToClient(screen));
+        };
         // What a variable can do: edit it, copy its name for an expression, make a sibling, remove it.
         m_var_list->on_menu = [this](int row, const wxPoint& screen) {
             if (row < 0 || row >= m_var_list->GetItemCount()) return;

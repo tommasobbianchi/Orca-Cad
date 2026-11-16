@@ -396,6 +396,7 @@ public:
     struct HeaderButton { std::string icon; wxString tip; std::function<void()> fn; };
     void header_button(const std::string& icon, const wxString& tip, std::function<void()> fn) { m_header_buttons.push_back({icon, tip, std::move(fn)}); }
     const std::vector<HeaderButton>& header_buttons() const { return m_header_buttons; }
+    std::function<void(const wxPoint& screen)> on_header_menu;   // a right click on the header: what the section as a whole can do
     CardText*    title() { return m_title.get(); }
     const std::string& icon() const { return m_icon; }
     const std::vector<CardRow>& rows() const { return m_rows; }
