@@ -340,6 +340,11 @@ public:
     int  GetSelection() const { return m_sel; }
 
     std::function<void()> on_activate;   // a double click on a row
+    std::function<void(int row, const wxPoint& screen)> on_menu;   // a right click on a row (already selected)
+    void user_menu(int i, const wxPoint& pos)
+    {
+        CallAfter([this, i, pos] { m_sel = i; if (on_menu) on_menu(i, pos); });
+    }
     std::set<std::string> highlight;     // names (column 0) of rows to light up, set by the owner every frame
     void user_select(int i, bool activate)
     {
@@ -391,6 +396,7 @@ public:
     struct HeaderButton { std::string icon; wxString tip; std::function<void()> fn; };
     void header_button(const std::string& icon, const wxString& tip, std::function<void()> fn) { m_header_buttons.push_back({icon, tip, std::move(fn)}); }
     const std::vector<HeaderButton>& header_buttons() const { return m_header_buttons; }
+    std::function<void(const wxPoint& screen)> on_header_menu;   // a right click on the header: what the section as a whole can do
     CardText*    title() { return m_title.get(); }
     const std::string& icon() const { return m_icon; }
     const std::vector<CardRow>& rows() const { return m_rows; }

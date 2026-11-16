@@ -2927,6 +2927,128 @@
       "action": "key:I",
       "icon": null,
       "hint": "Magnet: pull the points you draw onto the grid, or let them move freely"
+    },
+    {
+      "id": "hide_body",
+      "name": "Hide / Show body",
+      "slot": "top",
+      "key": null,
+      "feature": null,
+      "mcp": null,
+      "mode": "model",
+      "accepts": [
+        "body_solid",
+        "body_sheet"
+      ],
+      "needs": {
+        "bodies": 1
+      },
+      "refusal": "Select a body to hide or show it",
+      "gui": true,
+      "action": "btn:hide_body",
+      "icon": "design_eye",
+      "hint": "Hide the body in the view, or show it again; the solid stays in the document"
+    },
+    {
+      "id": "isolate_body",
+      "name": "Isolate body",
+      "slot": "top",
+      "key": null,
+      "feature": null,
+      "mcp": null,
+      "mode": "model",
+      "accepts": [
+        "body_solid",
+        "body_sheet"
+      ],
+      "needs": {
+        "bodies": 2
+      },
+      "refusal": "Select a body to isolate it",
+      "gui": true,
+      "action": "btn:isolate_body",
+      "icon": "design_eye_off",
+      "hint": "Hide every other body so this one stands alone"
+    },
+    {
+      "id": "show_all",
+      "name": "Show all bodies",
+      "slot": "top",
+      "key": null,
+      "feature": null,
+      "mcp": null,
+      "mode": "model",
+      "accepts": [
+        "none"
+      ],
+      "needs": {
+        "bodies": 1
+      },
+      "refusal": "Nothing to show yet",
+      "gui": true,
+      "action": "btn:show_all",
+      "icon": "design_eye",
+      "hint": "Show every body that is hidden"
+    },
+    {
+      "id": "fit_all",
+      "name": "Fit view",
+      "slot": "top",
+      "key": null,
+      "feature": null,
+      "mcp": null,
+      "mode": "model",
+      "accepts": [
+        "none"
+      ],
+      "needs": {
+        "bodies": 1
+      },
+      "refusal": "Nothing to frame yet",
+      "gui": true,
+      "action": "btn:fit_all",
+      "icon": "design_zoom",
+      "hint": "Frame every body, keeping the view direction"
+    },
+    {
+      "id": "paste",
+      "name": "Paste",
+      "slot": "top",
+      "key": "Ctrl+V",
+      "feature": null,
+      "mcp": null,
+      "mode": "model",
+      "accepts": [
+        "none"
+      ],
+      "needs": {},
+      "refusal": "Nothing copied yet",
+      "gui": true,
+      "action": "btn:paste",
+      "icon": "design_pattern",
+      "hint": "Paste the copied features after the current history position"
+    },
+    {
+      "id": "sk_finish",
+      "name": "Finish sketch",
+      "slot": "top",
+      "key": null,
+      "feature": null,
+      "mcp": null,
+      "mode": "sketch",
+      "accepts": [
+        "sk_none",
+        "sk_line",
+        "sk_arc",
+        "sk_point",
+        "sk_2ent"
+      ],
+      "needs": {},
+      "refusal": null,
+      "gui": true,
+      "action": "btn:sk_finish",
+      "icon": "design_check",
+      "hint": "Keep the sketch and leave sketch mode (the ribbon Confirm)"
     }
   ],
   "chrome_only": {
@@ -2944,5 +3066,6 @@
       "World axes"
     ]
   },
-  "_ratified": "Row order ratified 2026-07-31 by Tommaso. Changing an index is a breaking change (charter 4.1)."
+  "_ratified": "Row order ratified 2026-07-31 by Tommaso. Changing an index is a breaking change (charter 4.1).",
+  "_charter_exception": "2026-11-16 (user go: contextual menus): Hide/Show, Isolate, Show all, Fit view, Paste and Finish sketch were added to the offer although document actions normally stay in chrome (4.1). Appended after every ratified verb, so no existing index moved."
 }

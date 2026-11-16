@@ -278,6 +278,23 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
     st.chip_hot = ImGui::ColorConvertFloat4ToU32(ImVec4(bg.x * 0.7f + 0.3f, bg.y * 0.7f + 0.3f, bg.z * 0.7f + 0.3f, 0.97f));
     st.edge = IM_COL32(255, 255, 255, 120);
 
+    int fix_click = -1;   // the fix replaces the note vector: run it after the loops, never inside
+    // Right-click on a note, on its pin in the viewport or its row in the list (the last item drawn is the target). Fix only when the
+    // note has one; Focus pin only when it has a pin.
+    auto note_menu = [&](int i, PrintNote& n) {
+        const bool has_fix = !n.fix_json.empty();
+        if (!ImGui::BeginPopupContextItem("##notemenu")) return;
+        if (n.has_pin && ImGui::MenuItem("Focus pin")) { if (focus) focus(i); }
+        if (has_fix && ImGui::MenuItem(n.fix_label.empty() ? "Fix" : n.fix_label.c_str())) fix_click = i;
+        if (ImGui::MenuItem(n.resolved ? "Reopen" : "Resolve")) { if (resolve) resolve(i); }
+        if (ImGui::MenuItem("Dismiss")) { if (dismiss) dismiss(i); }
+        if (ImGui::MenuItem("Copy text")) ImGui::SetClipboardText(n.text.c_str());
+        ImGui::Separator();
+        if (ImGui::MenuItem("Dismiss all of this kind")) {
+            for (size_t j = 0; j < ns.size(); ++j) if (ns[j].open && ns[j].kind == n.kind && dismiss) dismiss(int(j));
+        }
+        ImGui::EndPopup();
+    };
     std::vector<Rect> taken;
     for (size_t i = 0; i < ns.size(); ++i) {
         PrintNote& n = ns[i];
@@ -330,6 +347,21 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
             dl->AddCircleFilled(badge, 10.f * em, col);
             const ImVec2 nts = ImGui::CalcTextSize(num.c_str());
             dl->AddText(badge - nts * 0.5f, IM_COL32(20, 20, 20, 220), num.c_str());
+            // a hidden pin still answers a right-click (not a left click: that dismisses only the visible ones)
+            const ImVec2 hlo(std::min(p.x, badge.x) - 10.f * em, std::min(p.y, badge.y) - 10.f * em), hhi(std::max(p.x, badge.x) + 10.f * em, std::max(p.y, badge.y) + 10.f * em);
+            ImGui::SetNextWindowPos(hlo, ImGuiCond_Always);
+            ImGui::SetNextWindowSize(hhi - hlo, ImGuiCond_Always);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.f, 0.f));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
+            if (ImGui::Begin(("##printnote" + std::to_string(i)).c_str(), nullptr,
+                             ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoSavedSettings |
+                             ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus)) {
+                ImGui::InvisibleButton("##hit", hhi - hlo);
+                if (ImGui::IsItemHovered()) m_hovered = true;
+                note_menu(int(i), n);
+            }
+            ImGui::End();
+            ImGui::PopStyleVar(2);
         } else {
             // visible (or resolved: grey, still labelled) — the full note
             std::string text = n.text.size() > 64 ? n.text.substr(0, 61) + "..." : n.text;
@@ -343,16 +375,20 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
             const ImVec2 nts = ImGui::CalcTextSize(num.c_str());
             dl->AddText(badge - nts * 0.5f, IM_COL32(20, 20, 20, 255), num.c_str());
 
-            ImGui::SetNextWindowPos(r.lo, ImGuiCond_Always);
-            ImGui::SetNextWindowSize(r.hi - r.lo, ImGuiCond_Always);
+            // the whole pin answers: the label, the badge and the dot it points at (a right-click on the number used to miss)
+            const ImVec2 hit_lo(std::min(r.lo.x - 10.f * em, p.x - 6.f * em), std::min(r.lo.y, std::min(badge.y - 10.f * em, p.y - 6.f * em)));
+            const ImVec2 hit_hi(r.hi.x, std::max(r.hi.y, std::max(badge.y + 10.f * em, p.y + 6.f * em)));
+            ImGui::SetNextWindowPos(hit_lo, ImGuiCond_Always);
+            ImGui::SetNextWindowSize(hit_hi - hit_lo, ImGuiCond_Always);
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.f, 0.f));
             ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
             if (ImGui::Begin(("##printnote" + std::to_string(i)).c_str(), nullptr,
                              ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoSavedSettings |
                              ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus)) {
-                ImGui::InvisibleButton("##hit", r.hi - r.lo);
-                if (ImGui::IsItemHovered()) { m_hovered = true; ImGui::SetTooltip("%s\n(click to dismiss)", n.text.c_str()); }
+                ImGui::InvisibleButton("##hit", hit_hi - hit_lo);
+                if (ImGui::IsItemHovered()) { m_hovered = true; ImGui::SetTooltip("%s\n(click to dismiss, right-click for more)", n.text.c_str()); }
                 if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && dismiss) dismiss(int(i));
+                note_menu(int(i), n);
             }
             ImGui::End();
             ImGui::PopStyleVar(2);
@@ -367,7 +403,7 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
 
     // The side list: a collapsible "Print check" panel, top-right of the viewport. The CardModel rows
     // cannot host a resolve + dismiss button pair, so this ImGui panel drives the same note vector.
-    int open_n = 0, fix_click = -1;   // the fix replaces the note vector: run it after the loop, never inside
+    int open_n = 0;
     for (const PrintNote& n : ns) if (n.open) ++open_n;
     if (open_n > 0) {
         const auto& vp = proj.vp;
@@ -425,6 +461,7 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
                     ImGui::TextUnformatted(n.text.c_str());
                     ImGui::PopTextWrapPos();
                     if (ImGui::IsItemClicked()) { if (focus) focus(i); }
+                    note_menu(i, n);
                     ImGui::PopID();
                 }
                 ImGui::PopStyleColor(3);

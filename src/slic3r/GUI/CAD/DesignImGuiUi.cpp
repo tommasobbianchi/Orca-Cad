@@ -229,7 +229,7 @@ void DesignTreeOverlay::render(ImGuiWrapper& imgui, float scale, float inset_lef
                     m_rename_row = i; m_rename_focus = true;
                     std::snprintf(m_rename_buf, sizeof(m_rename_buf), "%s", r.label.c_str());
                 }
-                if (ImGui::MenuItem(_u8L("Edit").c_str())) push(TreeEvent::Edit, i);
+                if (ImGui::MenuItem((r.is_sketch ? _u8L("Edit sketch") : _u8L("Edit feature")).c_str())) push(TreeEvent::Edit, i);
                 if (ImGui::MenuItem(_u8L("Copy").c_str())) push(TreeEvent::Copy, i);
                 if (!view.can_paste) { ImGui::PushItemFlag(ImGuiItemFlags_Disabled, true); ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f); }
                 if (ImGui::MenuItem(_u8L("Paste").c_str())) push(TreeEvent::Paste, i);
@@ -237,6 +237,12 @@ void DesignTreeOverlay::render(ImGuiWrapper& imgui, float scale, float inset_lef
                 if (ImGui::MenuItem(r.suppressed ? _u8L("Unsuppress").c_str() : _u8L("Suppress").c_str()))
                     push(TreeEvent::ToggleEnabled, i);
                 ImGui::Separator();
+                {   // history: the bar sits after this row; the last row IS the end, so rolling back to it is a no-op
+                    const bool here = view.rollback == i;
+                    if (!here && i >= int(view.rows.size()) - 1) { ImGui::PushItemFlag(ImGuiItemFlags_Disabled, true); ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f); }
+                    if (ImGui::MenuItem((here ? _u8L("Roll forward to the end") : _u8L("Roll back to here")).c_str())) push(TreeEvent::SetRollback, here ? -1 : i);
+                    if (!here && i >= int(view.rows.size()) - 1) { ImGui::PopStyleVar(); ImGui::PopItemFlag(); }
+                }
                 if (ImGui::MenuItem(_u8L("Move up").c_str()))   push(TreeEvent::MoveUp, i);
                 if (ImGui::MenuItem(_u8L("Move down").c_str())) push(TreeEvent::MoveDown, i);
                 const bool zoomable = can_zoom ? can_zoom(i) : false;
