@@ -425,6 +425,19 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
                     ImGui::TextUnformatted(n.text.c_str());
                     ImGui::PopTextWrapPos();
                     if (ImGui::IsItemClicked()) { if (focus) focus(i); }
+                    // Right-click: what this note can do, offered where the note is. Fix only when it has one; the pin entry only when it has a pin.
+                    if (ImGui::BeginPopupContextItem("##notemenu")) {
+                        if (n.has_pin && ImGui::MenuItem("Focus pin")) { if (focus) focus(i); }
+                        if (has_fix && ImGui::MenuItem(n.fix_label.empty() ? "Fix" : n.fix_label.c_str())) fix_click = i;
+                        if (ImGui::MenuItem(n.resolved ? "Reopen" : "Resolve")) { if (resolve) resolve(i); }
+                        if (ImGui::MenuItem("Dismiss")) { if (dismiss) dismiss(i); }
+                        if (ImGui::MenuItem("Copy text")) ImGui::SetClipboardText(n.text.c_str());
+                        ImGui::Separator();
+                        if (ImGui::MenuItem("Dismiss all of this kind")) {
+                            for (size_t j = 0; j < ns.size(); ++j) if (ns[j].open && ns[j].kind == n.kind && dismiss) dismiss(int(j));
+                        }
+                        ImGui::EndPopup();
+                    }
                     ImGui::PopID();
                 }
                 ImGui::PopStyleColor(3);

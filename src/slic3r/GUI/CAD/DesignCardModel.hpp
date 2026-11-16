@@ -340,6 +340,11 @@ public:
     int  GetSelection() const { return m_sel; }
 
     std::function<void()> on_activate;   // a double click on a row
+    std::function<void(int row, const wxPoint& screen)> on_menu;   // a right click on a row (already selected)
+    void user_menu(int i, const wxPoint& pos)
+    {
+        CallAfter([this, i, pos] { m_sel = i; if (on_menu) on_menu(i, pos); });
+    }
     std::set<std::string> highlight;     // names (column 0) of rows to light up, set by the owner every frame
     void user_select(int i, bool activate)
     {

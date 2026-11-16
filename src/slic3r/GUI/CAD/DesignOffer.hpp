@@ -141,7 +141,6 @@ static const OfferVerb kOfferVerbs[] = {
     {"project", L_CONTEXT("Project", "Design"), 6, nullptr, "fly:plane#4", L("Project needs a body or a sketch — add or import one first"), 0x00004482u, 0, 0, false, false, nullptr, "design_sketch", L("Project body edges, or a whole sketch (Use), onto a plane")},
     {"measure", L_CONTEXT("Measure", "Design"), 6, nullptr, nullptr, nullptr, 0x000b03feu, 0, 0, false, false, nullptr, nullptr, L("Measure between the picked points, edges or faces")},
     {"mass_props", L_CONTEXT("Volume and area", "Design"), 6, nullptr, "btn:mass", nullptr, 0x000000feu, 1, 0, false, false, nullptr, "info", L("Report the volume and surface area of the selected body")},
-    {"print_check", L_CONTEXT("Print check", "Design"), 6, nullptr, "btn:printcheck", nullptr, 0x000000ffu, 1, 0, false, false, nullptr, "design_check", L("Check the selected body for FDM printing: overhangs, bridges, horizontal holes, walls, orientation, clearance — reports, changes nothing")},
     {"quotes", L_CONTEXT("Dimensions", "Design"), 6, nullptr, "btn:quotes", nullptr, 0x00000081u, 1, 0, false, false, nullptr, nullptr, L("Show the dimensions of the body in drafting style: overall size, hole diameters and fillet radii; click one to edit it")},
     {"interference", L_CONTEXT("Interference", "Design"), 6, nullptr, "btn:interference", L("Interference needs at least two bodies"), 0x00000280u, 2, 0, false, false, nullptr, nullptr, L("Check whether two bodies overlap — reports, changes nothing")},
     {"edit_feature", L_CONTEXT("Edit", "Design"), 7, nullptr, "btn:edit", nullptr, 0x00007d8eu, 0, 0, false, false, nullptr, "design_edit", L("Reopen the selected feature to change what it was made from")},
@@ -175,7 +174,6 @@ static const OfferVerb kOfferVerbs[] = {
     {"sk_poly_8", L_CONTEXT("Octagon", "Design"), 0, nullptr, "btn:poly#8", nullptr, 0x000f8000u, 0, 0, false, true, L("Polygon"), "design_polygon", L("Octagon — click center, then a vertex")},
     {"sk_poly_12", L_CONTEXT("Dodecagon", "Design"), 0, nullptr, "btn:poly#12", nullptr, 0x000f8000u, 0, 0, false, true, L("Polygon"), "design_polygon", L("Dodecagon — click center, then a vertex")},
     {"sk_poly_inscribed", L_CONTEXT("Inscribed", "Design"), 0, nullptr, "btn:polyfit#0", nullptr, 0x000f8000u, 0, 0, false, true, L("Polygon"), "design_polygon", L("Measure the polygon to its corners (inscribed)")},
-    {"sk_poly_edge", L_CONTEXT("Edge", "Design"), 0, nullptr, "btn:polyfit#2", nullptr, 0x000f8000u, 0, 0, false, true, L("Polygon"), "design_polygon", L("Click the two ends of one side; the polygon is built on its left (click them the other way round to flip it)")},
     {"sk_poly_circumscribed", L_CONTEXT("Circumscribed", "Design"), 0, nullptr, "btn:polyfit#1", nullptr, 0x000f8000u, 0, 0, false, true, L("Polygon"), "design_polygon", L("Measure the polygon to its flats (circumscribed)")},
     {"sk_point_t", L_CONTEXT("Point", "Design"), 0, "P", "key:P", nullptr, 0x000f8000u, 0, 0, false, true, nullptr, "design_point", L("Point — click to place")},
     {"sk_text", L_CONTEXT("Text", "Design"), 0, nullptr, "btn:text", nullptr, 0x000f8000u, 0, 0, false, true, nullptr, "design_text", L("Type text; it becomes a Text feature on this sketch's plane, editable later")},
@@ -239,8 +237,14 @@ static const OfferVerb kOfferVerbs[] = {
     {"con_distancey", L_CONTEXT("Vertical distance", "Design"), 6, nullptr, "con:DistanceY", nullptr, 0x000f0000u, 0, 0, false, true, L("Constrain"), "design_c_dist_y", L("Fix the vertical distance between two points")},
     {"sk_dim_names", L_CONTEXT("Dimension names", "Design"), 6, "J", "key:J", nullptr, 0x000f8000u, 0, 0, false, true, L("Constrain"), nullptr, L("Show the variable behind each dimension instead of its value, and back")},
     {"sk_grid_magnet", L_CONTEXT("Snap to grid", "Design"), 6, "I", "key:I", nullptr, 0x000f8000u, 0, 0, false, true, nullptr, nullptr, L("Magnet: pull the points you draw onto the grid, or let them move freely")},
+    {"hide_body", L_CONTEXT("Hide / Show body", "Design"), 8, nullptr, "btn:hide_body", L("Select a body to hide or show it"), 0x00000180u, 1, 0, false, false, nullptr, "design_eye", L("Hide the body in the view, or show it again; the solid stays in the document")},
+    {"isolate_body", L_CONTEXT("Isolate body", "Design"), 8, nullptr, "btn:isolate_body", L("Select a body to isolate it"), 0x00000180u, 2, 0, false, false, nullptr, "design_eye_off", L("Hide every other body so this one stands alone")},
+    {"show_all", L_CONTEXT("Show all bodies", "Design"), 8, nullptr, "btn:show_all", L("Nothing to show yet"), 0x00000001u, 1, 0, false, false, nullptr, "design_eye", L("Show every body that is hidden")},
+    {"fit_all", L_CONTEXT("Fit view", "Design"), 8, nullptr, "btn:fit_all", L("Nothing to frame yet"), 0x00000001u, 1, 0, false, false, nullptr, "design_zoom", L("Frame every body, keeping the view direction")},
+    {"paste", L_CONTEXT("Paste", "Design"), 8, "Ctrl+V", "btn:paste", L("Nothing copied yet"), 0x00000001u, 0, 0, false, false, nullptr, "design_pattern", L("Paste the copied features after the current history position")},
+    {"sk_finish", L_CONTEXT("Finish sketch", "Design"), 8, nullptr, "btn:sk_finish", nullptr, 0x000f8000u, 0, 0, false, true, nullptr, "design_check", L("Keep the sketch and leave sketch mode (the ribbon Confirm)")},
 };
-static const int kOfferVerbCount = 126;
+static const int kOfferVerbCount = 132;
 
 }} // namespace Slic3r::GUI
 

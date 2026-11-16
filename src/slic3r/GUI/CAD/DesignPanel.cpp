@@ -38,6 +38,7 @@
 #include <boost/filesystem/operations.hpp>
 #include <libslic3r/Utils.hpp>
 #include <boost/log/trivial.hpp>          // the offer/atlas join check reports on the log
+#include <wx/clipbrd.h>
 #include <wx/aui/framemanager.h>
 #include <wx/longlong.h>
 #include <wx/stopwatch.h>
@@ -1091,6 +1092,29 @@ DesignPanel::DesignPanel(wxWindow* parent)
         m_verb_actions["btn:sketch3d"] = [this] { start_sketch3d(); };
         m_verb_actions["btn:colour"] = [this] { on_set_body_color(); };
         m_verb_actions["btn:zoom_to"] = [this] { zoom_to_selection(); };
+        // Document verbs the offer carries since the contextual-menu work (atlas _charter_exception).
+        m_verb_actions["btn:hide_body"] = [this] {
+            sync_body_visible();
+            const int b = m_sel_solid_body;
+            if (b >= 0 && b < int(m_body_visible.size())) mcp_body_visible(b, !m_body_visible[b]);
+            refresh_tree();
+        };
+        m_verb_actions["btn:isolate_body"] = [this] {
+            const int keep = m_sel_solid_body;
+            for (int b = 0; b < int(m_doc.bodies.size()); ++b) mcp_body_visible(b, b == keep);
+            refresh_tree();
+        };
+        m_verb_actions["btn:show_all"] = [this] {
+            for (int b = 0; b < int(m_doc.bodies.size()); ++b) mcp_body_visible(b, true);
+            refresh_tree();
+        };
+        m_verb_actions["btn:fit_all"] = [this] {
+            BoundingBoxf3 box;
+            for (const TriangleMesh& m : m_disp_body_meshes) if (!m.empty()) box.merge(m.bounding_box());
+            if (m_viewport == nullptr || !m_viewport->zoom_to_box(box)) set_status(StatusKind::Info, _L("Nothing to frame yet"));
+        };
+        m_verb_actions["btn:paste"]     = [this] { paste_features(); };
+        m_verb_actions["btn:sk_finish"] = [this] { tool_confirm(); };
         m_verb_actions["btn:delete"] = [this] { on_delete_feature(); };
         // A row's double-click is Edit, so renaming needs a door of its own. The offer is this
         // tab's only tool vocabulary and the row IS the object, so rename sits in the offer, in
@@ -3146,8 +3170,9 @@ DesignPanel::DesignPanel(wxWindow* parent)
         const int id_zoom   = wxWindow::NewControlId();
         const int id_art    = wxWindow::NewControlId();
         const int id_del    = wxWindow::NewControlId();
+        const bool is_sketch = row >= 0 && row < int(m_doc.features.size()) && m_doc.features[row].type == CadFeatureType::Sketch;
         menu.Append(id_rename, _L("Rename\tF2"));
-        menu.Append(id_edit,   _L("Edit"));
+        menu.Append(id_edit,   is_sketch ? _L("Edit sketch") : _L("Edit feature"));
         // Scale artwork acts on THIS feature's imported outline, so it belongs to the row and
         // is offered only where it means something. It used to hide inside the header's Move
         // button, which otherwise moved a body — two different subjects on one icon.
@@ -3158,6 +3183,15 @@ DesignPanel::DesignPanel(wxWindow* parent)
         menu.Append(id_up,     _L("Move up"));
         menu.Append(id_down,   _L("Move down"));
         menu.Append(id_vis,    _L("Show / hide"));
+        const int id_copy = wxWindow::NewControlId(), id_paste = wxWindow::NewControlId(), id_roll = wxWindow::NewControlId();
+        menu.Append(id_copy, _L("Copy"));
+        menu.Append(id_paste, _L("Paste"))->Enable(!m_feature_clip.empty());
+        const bool rolled_here = m_doc.rollback_index == row;
+        const bool can_roll = rolled_here || row < int(m_doc.features.size()) - 1;   // the last row is the end of history already
+        menu.Append(id_roll, rolled_here ? _L("Roll forward to the end") : _L("Roll back to here"))->Enable(can_roll);
+        menu.Bind(wxEVT_MENU, [this, row](wxCommandEvent&) { TreeEvent e; e.kind = TreeEvent::Copy; e.row = row; apply_tree_events({ e }); }, id_copy);
+        menu.Bind(wxEVT_MENU, [this, row](wxCommandEvent&) { TreeEvent e; e.kind = TreeEvent::Paste; e.row = row; apply_tree_events({ e }); }, id_paste);
+        menu.Bind(wxEVT_MENU, [this, row, rolled_here](wxCommandEvent&) { TreeEvent e; e.kind = TreeEvent::SetRollback; e.row = rolled_here ? -1 : row; apply_tree_events({ e }); }, id_roll);
         // Offered where the row's own icon is: on a row with something to frame.
         const bool zoom = can_zoom_to_feature(row);
         if (zoom) menu.Append(id_zoom, _L("Zoom to selection"));
@@ -3301,6 +3335,35 @@ DesignPanel::DesignPanel(wxWindow* parent)
         m_var_list->AppendColumn(_L("Name"));
         m_var_list->AppendColumn(_L("Expression"));
         m_var_list->on_activate = [this] { on_edit_variable(); };
+        // What a variable can do: edit it, copy its name for an expression, make a sibling, remove it.
+        m_var_list->on_menu = [this](int row, const wxPoint& screen) {
+            if (row < 0 || row >= m_var_list->GetItemCount()) return;
+            const std::string name = m_var_list->GetItemText(row, 0).ToUTF8().data();
+            const std::string expr = m_var_list->GetItemText(row, 1).ToUTF8().data();
+            wxMenu    menu;
+            const int id_edit = wxWindow::NewControlId(), id_copy = wxWindow::NewControlId(), id_dup = wxWindow::NewControlId(), id_del = wxWindow::NewControlId();
+            menu.Append(id_edit, _L("Edit"));
+            menu.Append(id_copy, _L("Copy name"));
+            menu.Append(id_dup,  _L("Duplicate"));
+            menu.AppendSeparator();
+            menu.Append(id_del,  _L("Delete"));
+            menu.Bind(wxEVT_MENU, [this](wxCommandEvent&) { on_edit_variable(); }, id_edit);
+            menu.Bind(wxEVT_MENU, [name](wxCommandEvent&) {
+                if (wxTheClipboard->Open()) { wxTheClipboard->SetData(new wxTextDataObject(wxString::FromUTF8(name))); wxTheClipboard->Close(); }
+            }, id_copy);
+            menu.Bind(wxEVT_MENU, [this, name, expr](wxCommandEvent&) {
+                std::string n = name + "_copy";
+                for (int k = 2; m_doc.variables.count(n); ++k) n = name + "_copy" + std::to_string(k);
+                m_doc.checkpoint();
+                m_doc.variables[n] = expr;
+                const bool ok = m_doc.recompute();
+                if (!ok) { const std::string why = m_doc.error; m_doc.undo(); m_doc.error = why; }
+                after_tree_edit(ok);
+                refresh_variables();
+            }, id_dup);
+            menu.Bind(wxEVT_MENU, [this](wxCommandEvent&) { on_remove_variable(); }, id_del);
+            PopupMenu(&menu, ScreenToClient(screen));
+        };
     }
 
     // Orca-styled full-width buttons (ButtonType::Expanded), so the Design sidebar reads like
@@ -8014,7 +8077,8 @@ void DesignPanel::on_tab_shown()
         if (top != m_imgui_topbar) set_imgui_topbar(top);
         if (!m_imgui_sidebar) set_imgui_sidebar(true);   // the left panel is always the ImGui one: there is no wx form behind it to fall back to
     }
-    m_imgui_menu = wxGetApp().app_config->get_bool("design_imgui_menu");
+    // On unless a profile chose the wx menu: the on-canvas menu is the one the other new surfaces (tree, notes) match.
+    m_imgui_menu = wxGetApp().app_config->get("design_imgui_menu").empty() ? true : wxGetApp().app_config->get_bool("design_imgui_menu");
     if (show_clock.Time() > 100)   // a slow first show is what users report; the usual one is not news
         BOOST_LOG_TRIVIAL(info) << "Design tab shown: bed, project recipe and planes in " << show_clock.Time() << " ms";
     m_laid_out = true;
@@ -12846,6 +12910,7 @@ TreeView DesignPanel::build_tree_view() const
         TreeRowView r;
         r.label      = f.name;
         r.suppressed = !f.enabled;
+        r.is_sketch  = f.type == CadFeatureType::Sketch;
         r.failed     = (m_doc.error_feature == int(fi));
         if (r.failed) r.note = m_doc.error;
         else if (const std::string* why = mate_conflict_reason(int(fi))) { r.conflict = true; r.note = *why; }

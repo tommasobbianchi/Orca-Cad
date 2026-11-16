@@ -556,6 +556,10 @@ void draw_table_field(TableField* t, float em, std::function<void()> refocus)
                 t->user_select(i, ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left));
                 if (refocus) t->CallAfter(refocus);
             }
+            if (t->on_menu && ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+                t->user_menu(i, wxGetMousePosition());
+                if (refocus) t->CallAfter(refocus);
+            }
             for (int c = 1; c < cols; ++c) {
                 ImGui::TableSetColumnIndex(c);
                 ImGui::TextUnformatted(u8(t->GetItemText(i, c)).c_str());
