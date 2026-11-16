@@ -283,7 +283,13 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
     // note has one; Focus pin only when it has a pin.
     auto note_menu = [&](int i, PrintNote& n) {
         const bool has_fix = !n.fix_json.empty();
-        if (!ImGui::BeginPopupContextItem("##notemenu")) return;
+        // ImGui keeps a popup inside the canvas but flush against its edge; a wider safe area keeps the last row off the window's bottom edge.
+        ImGuiStyle&  sty = ImGui::GetStyle();
+        const ImVec2 safe0 = sty.DisplaySafeAreaPadding;
+        sty.DisplaySafeAreaPadding = ImVec2(8.f * em, 40.f * em);
+        const bool open = ImGui::BeginPopupContextItem("##notemenu");
+        sty.DisplaySafeAreaPadding = safe0;
+        if (!open) return;
         if (n.has_pin && ImGui::MenuItem("Focus pin")) { if (focus) focus(i); }
         if (has_fix && ImGui::MenuItem(n.fix_label.empty() ? "Fix" : n.fix_label.c_str())) fix_click = i;
         if (ImGui::MenuItem(n.resolved ? "Reopen" : "Resolve")) { if (resolve) resolve(i); }
