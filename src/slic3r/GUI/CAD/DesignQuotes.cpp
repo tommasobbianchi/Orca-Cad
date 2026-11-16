@@ -347,6 +347,21 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
             dl->AddCircleFilled(badge, 10.f * em, col);
             const ImVec2 nts = ImGui::CalcTextSize(num.c_str());
             dl->AddText(badge - nts * 0.5f, IM_COL32(20, 20, 20, 220), num.c_str());
+            // a hidden pin still answers a right-click (not a left click: that dismisses only the visible ones)
+            const ImVec2 hlo(std::min(p.x, badge.x) - 10.f * em, std::min(p.y, badge.y) - 10.f * em), hhi(std::max(p.x, badge.x) + 10.f * em, std::max(p.y, badge.y) + 10.f * em);
+            ImGui::SetNextWindowPos(hlo, ImGuiCond_Always);
+            ImGui::SetNextWindowSize(hhi - hlo, ImGuiCond_Always);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.f, 0.f));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
+            if (ImGui::Begin(("##printnote" + std::to_string(i)).c_str(), nullptr,
+                             ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoSavedSettings |
+                             ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus)) {
+                ImGui::InvisibleButton("##hit", hhi - hlo);
+                if (ImGui::IsItemHovered()) m_hovered = true;
+                note_menu(int(i), n);
+            }
+            ImGui::End();
+            ImGui::PopStyleVar(2);
         } else {
             // visible (or resolved: grey, still labelled) — the full note
             std::string text = n.text.size() > 64 ? n.text.substr(0, 61) + "..." : n.text;
@@ -360,14 +375,17 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
             const ImVec2 nts = ImGui::CalcTextSize(num.c_str());
             dl->AddText(badge - nts * 0.5f, IM_COL32(20, 20, 20, 255), num.c_str());
 
-            ImGui::SetNextWindowPos(r.lo, ImGuiCond_Always);
-            ImGui::SetNextWindowSize(r.hi - r.lo, ImGuiCond_Always);
+            // the whole pin answers: the label, the badge and the dot it points at (a right-click on the number used to miss)
+            const ImVec2 hit_lo(std::min(r.lo.x - 10.f * em, p.x - 6.f * em), std::min(r.lo.y, std::min(badge.y - 10.f * em, p.y - 6.f * em)));
+            const ImVec2 hit_hi(r.hi.x, std::max(r.hi.y, std::max(badge.y + 10.f * em, p.y + 6.f * em)));
+            ImGui::SetNextWindowPos(hit_lo, ImGuiCond_Always);
+            ImGui::SetNextWindowSize(hit_hi - hit_lo, ImGuiCond_Always);
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.f, 0.f));
             ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
             if (ImGui::Begin(("##printnote" + std::to_string(i)).c_str(), nullptr,
                              ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoSavedSettings |
                              ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus)) {
-                ImGui::InvisibleButton("##hit", r.hi - r.lo);
+                ImGui::InvisibleButton("##hit", hit_hi - hit_lo);
                 if (ImGui::IsItemHovered()) { m_hovered = true; ImGui::SetTooltip("%s\n(click to dismiss, right-click for more)", n.text.c_str()); }
                 if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && dismiss) dismiss(int(i));
                 note_menu(int(i), n);
