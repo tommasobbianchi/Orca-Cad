@@ -278,6 +278,23 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
     st.chip_hot = ImGui::ColorConvertFloat4ToU32(ImVec4(bg.x * 0.7f + 0.3f, bg.y * 0.7f + 0.3f, bg.z * 0.7f + 0.3f, 0.97f));
     st.edge = IM_COL32(255, 255, 255, 120);
 
+    int fix_click = -1;   // the fix replaces the note vector: run it after the loops, never inside
+    // Right-click on a note, on its pin in the viewport or its row in the list (the last item drawn is the target). Fix only when the
+    // note has one; Focus pin only when it has a pin.
+    auto note_menu = [&](int i, PrintNote& n) {
+        const bool has_fix = !n.fix_json.empty();
+        if (!ImGui::BeginPopupContextItem("##notemenu")) return;
+        if (n.has_pin && ImGui::MenuItem("Focus pin")) { if (focus) focus(i); }
+        if (has_fix && ImGui::MenuItem(n.fix_label.empty() ? "Fix" : n.fix_label.c_str())) fix_click = i;
+        if (ImGui::MenuItem(n.resolved ? "Reopen" : "Resolve")) { if (resolve) resolve(i); }
+        if (ImGui::MenuItem("Dismiss")) { if (dismiss) dismiss(i); }
+        if (ImGui::MenuItem("Copy text")) ImGui::SetClipboardText(n.text.c_str());
+        ImGui::Separator();
+        if (ImGui::MenuItem("Dismiss all of this kind")) {
+            for (size_t j = 0; j < ns.size(); ++j) if (ns[j].open && ns[j].kind == n.kind && dismiss) dismiss(int(j));
+        }
+        ImGui::EndPopup();
+    };
     std::vector<Rect> taken;
     for (size_t i = 0; i < ns.size(); ++i) {
         PrintNote& n = ns[i];
@@ -351,8 +368,9 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
                              ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoSavedSettings |
                              ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus)) {
                 ImGui::InvisibleButton("##hit", r.hi - r.lo);
-                if (ImGui::IsItemHovered()) { m_hovered = true; ImGui::SetTooltip("%s\n(click to dismiss)", n.text.c_str()); }
+                if (ImGui::IsItemHovered()) { m_hovered = true; ImGui::SetTooltip("%s\n(click to dismiss, right-click for more)", n.text.c_str()); }
                 if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && dismiss) dismiss(int(i));
+                note_menu(int(i), n);
             }
             ImGui::End();
             ImGui::PopStyleVar(2);
@@ -367,7 +385,7 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
 
     // The side list: a collapsible "Print check" panel, top-right of the viewport. The CardModel rows
     // cannot host a resolve + dismiss button pair, so this ImGui panel drives the same note vector.
-    int open_n = 0, fix_click = -1;   // the fix replaces the note vector: run it after the loop, never inside
+    int open_n = 0;
     for (const PrintNote& n : ns) if (n.open) ++open_n;
     if (open_n > 0) {
         const auto& vp = proj.vp;
@@ -425,19 +443,7 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
                     ImGui::TextUnformatted(n.text.c_str());
                     ImGui::PopTextWrapPos();
                     if (ImGui::IsItemClicked()) { if (focus) focus(i); }
-                    // Right-click: what this note can do, offered where the note is. Fix only when it has one; the pin entry only when it has a pin.
-                    if (ImGui::BeginPopupContextItem("##notemenu")) {
-                        if (n.has_pin && ImGui::MenuItem("Focus pin")) { if (focus) focus(i); }
-                        if (has_fix && ImGui::MenuItem(n.fix_label.empty() ? "Fix" : n.fix_label.c_str())) fix_click = i;
-                        if (ImGui::MenuItem(n.resolved ? "Reopen" : "Resolve")) { if (resolve) resolve(i); }
-                        if (ImGui::MenuItem("Dismiss")) { if (dismiss) dismiss(i); }
-                        if (ImGui::MenuItem("Copy text")) ImGui::SetClipboardText(n.text.c_str());
-                        ImGui::Separator();
-                        if (ImGui::MenuItem("Dismiss all of this kind")) {
-                            for (size_t j = 0; j < ns.size(); ++j) if (ns[j].open && ns[j].kind == n.kind && dismiss) dismiss(int(j));
-                        }
-                        ImGui::EndPopup();
-                    }
+                    note_menu(i, n);
                     ImGui::PopID();
                 }
                 ImGui::PopStyleColor(3);
