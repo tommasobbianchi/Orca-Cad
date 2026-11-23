@@ -551,8 +551,10 @@ static const std::map<std::string, double CadFeature::*>& bindable_double_fields
         {"hole_cbore_diameter", &CadFeature::hole_cbore_diameter},
         {"hole_csink_angle", &CadFeature::hole_csink_angle},
         {"hole_csink_diameter", &CadFeature::hole_csink_diameter},
+        {"hole_bridge_layer_h", &CadFeature::hole_bridge_layer_h},
         {"hole_depth", &CadFeature::hole_depth},
         {"hole_diameter", &CadFeature::hole_diameter},
+        {"hole_layer_h", &CadFeature::hole_layer_h},
         {"hole_x", &CadFeature::hole_x},
         {"hole_y", &CadFeature::hole_y},
         {"import_scale_x", &CadFeature::import_scale_x},
@@ -5028,6 +5030,13 @@ static std::string csv_quote(const std::string& s)
     std::string q = "\"";
     for (char ch : s) { if (ch == '"') q += '"'; q += ch; }
     return q + "\"";
+}
+
+double CadDocument::variable_value(const std::string& name, double fallback) const
+{
+    if (!variables.count(name)) return fallback;
+    try { const auto v = evaluate_variables(variables); const auto it = v.find(name); return it == v.end() ? fallback : it->second; }
+    catch (const std::exception&) { return fallback; }
 }
 
 std::string CadDocument::variables_csv() const

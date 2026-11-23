@@ -11591,3 +11591,24 @@ TEST_CASE("a surface loft skins two 3D sketches: a cylinder rim extended along i
     REQUIRE(doc.bodies.size() == 1);
     CHECK_THAT(GeometryEngine::mass_properties(doc.bodies[0].shape).surface_area, Catch::Matchers::WithinRel(2.0 * M_PI * 10.0 * 5.0, 0.01));
 }
+
+TEST_CASE("print profile: a hole's layer fields follow the print_layer_h variable", "[CadDocument][hole][dfam]")
+{
+    CadDocument doc;
+    int sk = doc.add_sketch(SketchShape::Rectangle, SketchPlane::XY(), 30, 30, 0, "Box");
+    doc.add_extrude(sk, 15.0, false, BooleanMode::New, "Extrude");
+    int h = doc.add_hole(6.0, 10.0, false, 0.0, 0.0, SketchPlane::XY(), "Hole");
+    doc.variables["print_layer_h"] = "0.2";
+    doc.features[size_t(h)].expr["hole_layer_h"]        = "print_layer_h";
+    doc.features[size_t(h)].expr["hole_bridge_layer_h"] = "2*print_layer_h";
+    REQUIRE(CadDocument::is_bindable_field("hole_layer_h"));
+    REQUIRE(CadDocument::is_bindable_field("hole_bridge_layer_h"));
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.error.empty());
+    REQUIRE(doc.features[size_t(h)].hole_layer_h == Catch::Approx(0.2));
+    REQUIRE(doc.features[size_t(h)].hole_bridge_layer_h == Catch::Approx(0.4));
+    doc.variables["print_layer_h"] = "0.3";
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.features[size_t(h)].hole_layer_h == Catch::Approx(0.3));
+    REQUIRE(doc.features[size_t(h)].hole_bridge_layer_h == Catch::Approx(0.6));
+}

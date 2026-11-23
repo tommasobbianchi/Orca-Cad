@@ -670,6 +670,9 @@ public:
     // Variable housekeeping. rename_variable rewrites every expression that names `from` (token-wise: `w` does not touch
     // `width`) and refuses a name that is taken, malformed or built in. The CSV is "name,expression" per line, quotes as
     // usual; from_csv adds or replaces and returns how many rows it took, naming the first bad row in `err`.
+    // Value of a document variable (evaluated), or `fallback` when it is not defined or does not evaluate. The print profile
+    // is three reserved variables: print_layer_h, print_line_w, print_nozzle (mm); the Print check reads them when a call omits the value.
+    double      variable_value(const std::string& name, double fallback) const;
     bool        rename_variable(const std::string& from, const std::string& to, std::string& err);
     std::string variables_csv() const;
     int         variables_from_csv(const std::string& csv, std::string& err);

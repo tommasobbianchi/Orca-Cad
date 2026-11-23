@@ -725,7 +725,7 @@ json describe_tools()
         compact_tool("job_status", "Any tool call with async:true in its params answers at once with a job id and runs in the background; this returns {state: running|done, elapsed_s, reply}. Answered even while the app is busy with the job.", {{"job", "string", "job id from the async call"}}),
         compact_tool("name_dimension", "Name a sketch dimension (index from sketch_dimensions); set_feature_expr then takes field \"dim:<name>\". name \"\" removes it. Names are positions: deleting a constraint from the sketch shifts the ones after it.", {{"sketch", "integer", "Sketch feature index"}, {"index", "integer", "dimension index"}, {"name", "string", "letters, digits, _"}}),
         compact_tool("min_distance", "Shortest distance between two bodies and the closest points; b can be tried at a hypothetical offset (move_b) without changing anything.", {{"a", "integer", "body index or name"}, {"b", "integer", "body index or name"}, {"move_b", "array", "[dx,dy,dz] mm"}}),
-        compact_tool("analyze_printability", "Overhang area and levels (a flat pocket ceiling shows as one level), bed contact, height and disconnected solids of a body in a print orientation. rotate [rx,ry,rz] deg; the body rests on its lowest point.", {{"body", "integer", "body index or name"}, {"rotate", "array", "[rx,ry,rz] deg"}, {"overhang_angle", "number", "deg from vertical, default 45"}, {"bridge_max", "number", "mm a flat roof may span before a warning, default 20"}, {"layer_h", "number", "mm, layer height used in the suggestions, default 0.4"}, {"line_width", "number", "mm, extrusion line width for the wall check, default 0.4"}, {"clearance", "number", "mm, minimum gap between fitted bodies, default 0.3"}}),
+        compact_tool("analyze_printability", "Overhang area and levels (a flat pocket ceiling shows as one level), bed contact, height and disconnected solids of a body in a print orientation. rotate [rx,ry,rz] deg; the body rests on its lowest point.", {{"body", "integer", "body index or name"}, {"rotate", "array", "[rx,ry,rz] deg"}, {"overhang_angle", "number", "deg from vertical, default 45"}, {"bridge_max", "number", "mm a flat roof may span before a warning, default 20"}, {"layer_h", "number", "mm, layer height used in the suggestions; default: document variable print_layer_h, else 0.4"}, {"line_width", "number", "mm, extrusion line width for the wall check; default: document variable print_line_w, else 0.4"}, {"clearance", "number", "mm, minimum gap between fitted bodies, default 0.3"}}),
         compact_tool("apply_print_fix", "Apply the automatic fix of a Print check note: analyse `body` (rotate identity), pick the first note of `kind` (or `index`) that has a fix, run it through the verb dispatcher and return {ok, applied_label, steps, remaining}. Refuses when the note has no fix.", {{"body", "integer", "body index or name"}, {"kind", "string", "note kind (vertical_edge, base_corner, warp_risk, tight_pair, ...)"}, {"index", "integer", "note index in the analysis' notes instead of kind"}}),
         compact_tool("rename_body", "Give a body a name. Verbs that take `body` then accept the name as well as the index (extrude, hole, pattern, fillet, boolean...).", {{"body", "integer", "body index"}, {"name", "string", "unique name"}}),
         compact_tool("set_body_visible", "Show or hide a body in the viewport (the eye in the Bodies list). Display only.", {{"body", "integer", "body id"}, {"visible", "boolean", "default true"}}),
@@ -855,6 +855,14 @@ SketchPlane plane_from(const json& params, const CadDocument& doc)
 // A hole or thread given a `face` (an id from query_topology, on `body`, default the last) sits ON that face and follows it
 // through upstream edits, as a sketch drawn on a face does: the hole's x,y are then from the face centre, the plane faces
 // into the body. A thread's face is the cylinder it is cut on, its plane the cylinder's axis.
+// Print profile (DfAM R1): when the document defines print_layer_h, a hole's layer fields follow it instead of a frozen number.
+static void bind_print_layers(CadDocument& doc, CadFeature& f, const json& params, bool bridge)
+{
+    if (!doc.variables.count("print_layer_h")) return;
+    if (!params.contains("layer_h")) f.expr["hole_layer_h"] = "print_layer_h";
+    if (bridge && f.hole_bridge_layer_h > 1e-6) f.expr["hole_bridge_layer_h"] = "2*print_layer_h";
+}
+
 static bool face_of_params(const json& params, const CadDocument& doc, int& body, int& face, TopoDS_Face& fc)
 {
     if (!params.contains("face")) return false;
@@ -1599,7 +1607,7 @@ json action_hole(DesignPanel* panel, const json& params)
     int h = -1;
     const double tip = params.value("tip_angle", 0.0);
     if (tip < 0 || tip >= 180) throw std::runtime_error("tip_angle must be in [0, 180)");
-    for (const auto& p : pts) { h = doc.add_hole(dia, depth, thru, p.first, p.second, pl, "Hole"); doc.features[size_t(h)].hole_tip_angle = tip; doc.features[size_t(h)].hole_teardrop = params.value("teardrop", false); doc.features[size_t(h)].hole_teardrop_flat = params.value("teardrop_flat", 0.0); doc.features[size_t(h)].hole_layer_h = params.value("layer_h", 0.2); attach_to_face(doc.features[size_t(h)], params, doc); if (target >= 0) doc.features[size_t(h)].target_body = target; }
+    for (const auto& p : pts) { h = doc.add_hole(dia, depth, thru, p.first, p.second, pl, "Hole"); doc.features[size_t(h)].hole_tip_angle = tip; doc.features[size_t(h)].hole_teardrop = params.value("teardrop", false); doc.features[size_t(h)].hole_teardrop_flat = params.value("teardrop_flat", 0.0); doc.features[size_t(h)].hole_layer_h = params.value("layer_h", 0.2); attach_to_face(doc.features[size_t(h)], params, doc); bind_print_layers(doc, doc.features[size_t(h)], params, false); if (target >= 0) doc.features[size_t(h)].target_body = target; }
     bool ok = doc.recompute();
     if (!ok) { const std::string why = doc.error; doc.undo(); doc.error = why; }
     panel->mcp_after_change();
@@ -1643,6 +1651,7 @@ json action_hole_styled(DesignPanel* panel, const json& params)
         doc.features[size_t(h)].hole_bridge_layer_h = params.value("bridge_layer_h", 0.0);
         doc.features[size_t(h)].hole_teardrop = params.value("teardrop", false);
         attach_to_face(doc.features[size_t(h)], params, doc);
+        bind_print_layers(doc, doc.features[size_t(h)], params, true);
     }
     bool ok = doc.recompute();
     if (!ok) { const std::string why = doc.error; doc.undo(); doc.error = why; }
@@ -4621,7 +4630,7 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
     const double bridge_max = params.value("bridge_max", 20.0);   // sheet tip 12: printers bridge ~2 cm
     json warnings = json::array();
     json suggestions = json::array();   // sheet tips 12-14 and the bridging ones: what to add under a roof, with numbers; analysis only, nothing is built
-    const double layer_h = params.value("layer_h", 0.4);
+    const double layer_h = params.value("layer_h", doc.variable_value("print_layer_h", 0.4));   // print profile (R1) when the call omits it
     bool layer_done = false;
     int small_marked = 0;
     auto num = [](double v) { std::ostringstream os; os.imbue(std::locale::classic()); os.precision(3); os << v; return os.str(); };
@@ -4718,7 +4727,7 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
     for (size_t i = 0; i < doc.features.size(); ++i)
         if (doc.features[i].type == CadFeatureType::Hole && doc.features[i].hole_bridge_layer_h > 1e-6)
             sacrificial.push_back(json{{"feature", int(i)}, {"kind", "hole bridge layers"}, {"layer_h", doc.features[i].hole_bridge_layer_h}, {"layers", 2}});
-    const json extras = dfam_extras(m, doc, ang, params.value("line_width", 0.4), params.value("clearance", 0.3), bore_r_max, suggestions, warnings, notes, rot, rot_c);
+    const json extras = dfam_extras(m, doc, ang, params.value("line_width", doc.variable_value("print_line_w", 0.4)), params.value("clearance", 0.3), bore_r_max, suggestions, warnings, notes, rot, rot_c);
     const bool rot_id = !params.contains("rotate")
         || (jn(params["rotate"], 0) == 0.0 && jn(params["rotate"], 1) == 0.0 && jn(params["rotate"], 2) == 0.0);
     attach_print_fixes(notes, suggestions, doc, b, rot_id, params.value("clearance", 0.3), m.bounding_box().min.z());
