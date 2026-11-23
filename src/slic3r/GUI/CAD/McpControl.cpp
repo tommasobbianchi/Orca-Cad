@@ -3867,6 +3867,9 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
         double vert_longest = -1.0, base_longest = -1.0;
         Vec3d vert_mid, vert_norm = Vec3d::Zero(), base_mid, base_floor = Vec3d::Zero();
         std::vector<int> vert_tris, base_tris;
+        int foot_n = 0; Vec3d foot_mid = Vec3d::Zero(); std::vector<int> foot_tris;   // R9: sharp convex edges on the bed face
+        const double zmin_b = m.bounding_box().min.z();
+        int shelf_n = 0; Vec3d shelf_mid = Vec3d::Zero(); std::vector<int> shelf_tris;   // R7: wall-to-shelf-underside inside corners above the bed
         int knife_n = 0; double knife_min_wedge = 180.0; Vec3d knife_mid, knife_norm = Vec3d::Zero(); std::vector<int> knife_tris;   // R5
         int in_n = 0; double in_longest = -1.0; Vec3d in_mid, in_norm = Vec3d::Zero(); std::vector<int> in_tris;   // R8: concave vertical edges
         for (const auto& kv : edges) {
@@ -3885,6 +3888,16 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
             // R5: a knife edge. Wedge = 180 - theta between the faces; under 30 deg the material at one line width from the tip is
             // under 2*tan(15 deg) = 0.54 line widths, i.e. less than one extrusion line, so the tip is not printed. Smooth seams
             // (fillets, curved faces) have theta near 0 and a wedge near 180, so they never reach this branch.
+            if (convex && theta >= 60.0 && L >= 5.0 && mid.z() - zmin_b < 0.05 && std::abs(e.z()) < 0.1
+                && ((n1.z() < -0.95 && std::abs(n2.z()) < 0.1) || (n2.z() < -0.95 && std::abs(n1.z()) < 0.1))) {   // bed face meets a wall: the first layers squash out
+                if (foot_n++ == 0) foot_mid = mid;
+                if (foot_tris.size() < 2000) foot_tris.push_back(n1.z() < -0.95 ? ed.t2 : ed.t1);
+            }
+            if (!convex && theta >= 80.0 && theta <= 100.0 && L >= 5.0 && std::abs(e.z()) < 0.1 && mid.z() - zmin_b > 0.5
+                && ((n1.z() < -0.95 && std::abs(n2.z()) < 0.1) || (n2.z() < -0.95 && std::abs(n1.z()) < 0.1))) {
+                if (shelf_n++ == 0) shelf_mid = mid;
+                if (shelf_tris.size() < 2000) shelf_tris.push_back(n1.z() < -0.95 ? ed.t1 : ed.t2);
+            }
             if (convex && theta > 150.0 && L >= 3.0) {
                 ++knife_n;
                 if (knife_tris.size() < 2000) knife_tris.push_back(ed.t1);
@@ -3914,6 +3927,16 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
                     if (L > base_longest) { base_longest = L; base_mid = mid; base_floor = z1 > 0.95 ? n1 : n2; }
                 }
             }
+        }
+        if (foot_n > 0 && doc.variable_value("print_elefant_comp", 0.0) <= 0.0) {
+            const std::string text = "The part meets the bed with " + num(double(foot_n)) + " sharp edge(s): the first layers squash outward (elephant foot). Set the slicer's elephant foot compensation, or chamfer the bottom edge 0.2-0.4 mm. Variable print_elefant_comp > 0 silences this";
+            add_note("elephant_foot", "suggestion", text, foot_mid, Vec3d(0, 0, -1), foot_tris);
+            suggestions.push_back(json{{"kind", "elephant_foot"}, {"edges", foot_n}, {"why", text}});
+        }
+        if (shelf_n > 0) {   // detection only: the chamfer/gusset needs the edge as a B-rep edge id, which the mesh edge does not give
+            const std::string text = num(double(shelf_n)) + " shelf underside(s) meet a wall: a flat underside prints with sagging. Add a 45 deg chamfer along the join (small shelf) or a triangular gusset (deep shelf)";
+            add_note("shelf_underside", "suggestion", text, shelf_mid, Vec3d(0, 0, -1), shelf_tris);
+            suggestions.push_back(json{{"kind", "shelf_underside"}, {"edges", shelf_n}, {"why", text}});
         }
         if (knife_n > 0) {
             const std::string text = num(double(knife_n)) + " knife edge(s), sharpest " + num(knife_min_wedge) + " deg: the tip is thinner than one " + num(line_width)
@@ -3999,6 +4022,18 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
             const double l0n = ev(0) / tr, l1n = ev(1) / tr;
             if (l0n > 0.02 || l1n < 0.15) continue;   // not cylinder-like
             const Eigen::Vector3d axis = solver.eigenvectors().col(0);
+            if (std::abs(axis.z()) >= 0.9) {   // R11: a vertical cylinder that is long for its width is weakest across layers; advice only (the load direction is unknown)
+                double zlo = 1e30, zhi = -1e30;
+                for (int ti : cc.tris) for (int k = 0; k < 3; ++k) { const double z = V[F[size_t(ti)](k)].z(); zlo = std::min(zlo, z); zhi = std::max(zhi, z); }
+                const double Lp = zhi - zlo, dia = Lp > 1e-6 ? cc.area / (M_PI * Lp) : 0.0;   // lateral area = pi * d * L
+                if (Lp >= 15.0 && dia > 0.5 && Lp / dia >= 4.0) {
+                    const auto& pf = F[size_t(cc.biggest_tri)];
+                    const Vec3d ppin = (V[pf(0)].cast<double>() + V[pf(1)].cast<double>() + V[pf(2)].cast<double>()) / 3.0;
+                    add_note("slender_peg", "suggestion", "Vertical peg " + num(dia) + " x " + num(Lp) + " mm: layers split across its width, so it snaps easily. If it carries load, print it lying down (or give it a flat so it can)",
+                             ppin, to_model_dir(tri_normal(cc.biggest_tri)), cc.tris);
+                }
+                continue;
+            }
             if (std::abs(axis.z()) >= 0.7) continue;   // axis near-vertical: stair-stepping is not an issue
             const double ang_from_z = std::acos(std::max(0.0, std::min(1.0, std::abs(axis.z())))) * 180.0 / M_PI;
             const Vec3d t_n = tri_normal(cc.biggest_tri);
@@ -4216,6 +4251,11 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
                 warnings.push_back("walls thinner than 2 line widths (" + num(2 * line_width) + " mm); the thinnest is " + num(tmin) + " mm");
                 add_note("thin_wall", "warning", "Wall " + num(tmin) + " mm thick: under 2 line widths (" + num(2 * line_width) + " mm), it will not print solid", tat, to_model_dir(tat_n), thin_tris);
             }
+            if (tmin >= 2.0 * line_width * 0.95 && tmin < 10.0 * line_width && std::abs(tmin / line_width - std::round(tmin / line_width)) > 0.1) {   // thinnest wall more than 0.1 line off a whole number   // R6: name the nearest whole-line walls; a fix only exists when ONE feature owns the wall, so none here
+                const double lo = std::max(2.0, std::floor(tmin / line_width)), hi = lo + 1.0;
+                add_note("wall_multiple", "suggestion", "Wall " + num(tmin) + " mm is not a whole number of " + num(line_width) + " mm lines: " + num(lo * line_width) + " or "
+                         + num(hi * line_width) + " mm slice without gaps or over-fill", tat, to_model_dir(tat_n), {});
+            }
             if (100.0 * off / used > 20.0)
                 suggestions.push_back(json{{"kind", "wall_thickness"}, {"line_width_mm", line_width}, {"off_multiple_pct", 100.0 * off / used},
                                            {"why", "most walls are not a whole number of lines: make them " + num(2 * line_width) + ", " + num(3 * line_width) + ", " + num(4 * line_width) + " mm ... for a clean slice"}});
@@ -4350,6 +4390,25 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
                << " mm line: " << std::setprecision(0) << lost << " % of the glyph area will not print. Use a bolder font or a larger text height";
             tips_advice.push_back("thin_text");
             notes.push_back(json{{"kind", "thin_text"}, {"severity", "warning"}, {"text", os.str()}, {"at", nullptr}, {"feature", int(i)}, {"lost_pct", lost}});
+        }
+    }
+    // R13 step 1: does the part fit the bed? Bed from variables print_bed_x/y/z (defaults: a 256 x 256 x 256 printer), either way round in XY.
+    {
+        const Vec3d sz = m.bounding_box().size();
+        const double bx = doc.variable_value("print_bed_x", 256.0), by = doc.variable_value("print_bed_y", 256.0), bz = doc.variable_value("print_bed_z", 256.0);
+        const bool fits = ((sz.x() <= bx && sz.y() <= by) || (sz.x() <= by && sz.y() <= bx)) && sz.z() <= bz;
+        if (!fits) {
+            const std::string text = "The part (" + num(sz.x()) + " x " + num(sz.y()) + " x " + num(sz.z()) + " mm) does not fit the " + num(bx) + " x " + num(by) + " x " + num(bz)
+                + " mm bed: split it (split verb) or lay it diagonal. Set print_bed_x/y/z variables for your printer";
+            tips_advice.push_back("exceeds_bed");
+            notes.push_back(json{{"kind", "exceeds_bed"}, {"severity", "warning"}, {"text", text}, {"at", nullptr}});
+            warnings.push_back(text);
+        }
+        // R12: a long flat base on a warp-prone material (variable print_warp_prone = 1 for ABS/ASA/PC; R1 has no material field yet). Hypothesis, not measured.
+        if (doc.variable_value("print_warp_prone", 0.0) > 0.5 && std::max(sz.x(), sz.y()) > 150.0 && fits) {
+            const std::string text = "Long flat base (" + num(std::max(sz.x(), sz.y())) + " mm) in a warp-prone material: slots 1 mm wide, part-way through the base, may relieve the stress (hypothesis, not verified)";
+            tips_advice.push_back("stress_relief_slots");
+            notes.push_back(json{{"kind", "stress_relief_slots"}, {"severity", "suggestion"}, {"text", text}, {"at", nullptr}});
         }
     }
     if (!tips_advice.empty()) out["tips_advice"] = tips_advice;
@@ -4630,11 +4689,6 @@ static void attach_print_fixes(json& notes, const json& suggestions, const CadDo
                 // flip first: a Cut that still points outward removes nothing and the recompute refuses it
                 steps.push_back(json{{"method", "set_feature_expr"}, {"params", {{"feature", int(i)}, {"field", "extrude_flip"}, {"expr", f.flip ? "0" : "1"}}}});
                 steps.push_back(json{{"method", "set_feature_expr"}, {"params", {{"feature", int(i)}, {"field", "extrude_mode"}, {"expr", "2"}}}});
-                // Depth by face: on a horizontal face (bed side) 2 layers resolve the glyphs; into a wall 0.4-0.8 mm is enough and
-                // anything deeper only weakens it.
-                const bool horizontal = std::abs(doc.features[size_t(f.sketch_ref)].plane.normal.z()) > 0.95;
-                const double cut_depth = horizontal ? 2.0 * doc.variable_value("print_layer_h", 0.2) : std::min(0.8, std::max(0.4, f.distance));
-                steps.push_back(json{{"method", "set_feature_expr"}, {"params", {{"feature", int(i)}, {"field", "distance"}, {"expr", [&]{ std::ostringstream o; o.imbue(std::locale::classic()); o << cut_depth; return o.str(); }()}}}});
             }
             if (steps.empty()) continue;   // the text is already cut (or has no extrude)
             label = "Cut the text into the face instead of raising it (cut_depth set by the face: 0.4-0.8 mm on walls, 2 layers on the bed)";
