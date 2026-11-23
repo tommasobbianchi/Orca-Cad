@@ -11635,3 +11635,17 @@ TEST_CASE("hole: heat-set insert pocket from the table", "[CadDocument][hole][df
     REQUIRE(doc.features[size_t(h5)].hole_depth == Approx(9.0));
     REQUIRE_THROWS(doc.add_hole_standard("M7 insert", 0, false, 0.0, 0.0, 0.0, SketchPlane::XY(), "Insert"));
 }
+
+TEST_CASE("insert pocket lookup by thread major diameter", "[CadDocument][hole][dfam]")
+{
+    std::string d; double hole = 0;
+    REQUIRE(CadDocument::insert_pocket_for_thread(3.0, d, hole));
+    REQUIRE(d == "M3");
+    REQUIRE(hole == Approx(4.0));
+    REQUIRE(CadDocument::insert_pocket_for_thread(2.5, d, hole));
+    REQUIRE(d == "M2.5");
+    REQUIRE(CadDocument::insert_pocket_for_thread(5.0, d, hole));
+    REQUIRE(hole == Approx(6.4));
+    REQUIRE_FALSE(CadDocument::insert_pocket_for_thread(6.0, d, hole));   // M6 and up hold a printed thread: no note
+    REQUIRE_FALSE(CadDocument::insert_pocket_for_thread(3.4, d, hole));   // not a nominal size
+}

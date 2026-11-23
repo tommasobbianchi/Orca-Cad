@@ -673,6 +673,9 @@ public:
     // Value of a document variable (evaluated), or `fallback` when it is not defined or does not evaluate. The print profile
     // is three reserved variables: print_layer_h, print_line_w, print_nozzle (mm); the Print check reads them when a call omits the value.
     double      variable_value(const std::string& name, double fallback) const;
+    // Heat-set insert that replaces an internal thread of this nominal (major) diameter: designation and pocket diameter.
+    // Only sizes below M6 (a printed thread that small strips); false for any other diameter.
+    static bool insert_pocket_for_thread(double major_d, std::string& designation, double& hole_d);
     bool        rename_variable(const std::string& from, const std::string& to, std::string& err);
     std::string variables_csv() const;
     int         variables_from_csv(const std::string& csv, std::string& err);

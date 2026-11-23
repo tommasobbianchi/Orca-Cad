@@ -1258,6 +1258,15 @@ static const InsertEntry kInsertTable[] = {
     {"M2", 3.2, 5}, {"M2.5", 3.7, 6}, {"M3", 4.0, 6}, {"M4", 5.3, 8}, {"M5", 6.4, 10}, {"M6", 7.6, 12}, {"M8", 10.2, 16},
 };
 
+bool CadDocument::insert_pocket_for_thread(double major_d, std::string& designation, double& hole_d)
+{
+    for (const auto& ie : kInsertTable) {
+        const double nominal = std::atof(ie.desig + 1);   // "M2.5" -> 2.5
+        if (nominal < 6.0 && std::abs(nominal - major_d) < 0.05) { designation = ie.desig; hole_d = ie.hole_d; return true; }
+    }
+    return false;
+}
+
 static const HoleStdEntry* hole_std_lookup(const std::string& desig)
 {
     for (const auto& e : kHoleStdTable) {

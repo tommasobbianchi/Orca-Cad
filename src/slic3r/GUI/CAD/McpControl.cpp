@@ -52,6 +52,7 @@
 #include <wx/base64.h>
 #include <wx/mstream.h>
 #include <tuple>
+#include <iomanip>
 #include <sstream>
 #include <wx/dcscreen.h>
 #include <wx/evtloop.h>
@@ -4248,6 +4249,20 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
     for (const CadFeature& f : doc.features) {
         if (f.type == CadFeatureType::Hole || f.type == CadFeatureType::Thread) has_hole = true;   // hole, hole_styled and thread all bore into the body
         if (f.is_text()) has_text = true;
+    }
+    // An internal thread under M6 in plastic strips after a few turns: a heat-set insert holds. Advice only (a fix would
+    // have to swap the thread for a hole on its plane); the note names the pocket so hole_standard "<size> insert" is one call.
+    for (size_t i = 0; i < doc.features.size(); ++i) {
+        const CadFeature& f = doc.features[i];
+        std::string desig; double pocket = 0;
+        if (f.type == CadFeatureType::Thread && f.thread_internal && f.enabled && f.thread_major_nominal
+            && CadDocument::insert_pocket_for_thread(2.0 * f.thread_radius, desig, pocket)) {
+            std::ostringstream os;
+            os << "Internal " << desig << " thread in plastic wears out: use a heat-set insert (pocket " << std::fixed << std::setprecision(1) << pocket
+               << " mm; hole_standard \"" << desig << " insert\")";
+            tips_advice.push_back("thread_insert");
+            notes.push_back(json{{"kind", "thread_insert"}, {"severity", "suggestion"}, {"text", os.str()}, {"at", nullptr}, {"feature", int(i)}, {"insert", desig}, {"pocket_mm", pocket}});
+        }
     }
     if (doc.variables.empty() && doc.features.size() >= 3)
         advise("use_parameters", "No named variables: drive the key dimensions from variables so the design is easy to edit and iterate");
