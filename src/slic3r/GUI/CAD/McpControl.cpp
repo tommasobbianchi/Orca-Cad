@@ -726,7 +726,7 @@ json describe_tools()
         compact_tool("job_status", "Any tool call with async:true in its params answers at once with a job id and runs in the background; this returns {state: running|done, elapsed_s, reply}. Answered even while the app is busy with the job.", {{"job", "string", "job id from the async call"}}),
         compact_tool("name_dimension", "Name a sketch dimension (index from sketch_dimensions); set_feature_expr then takes field \"dim:<name>\". name \"\" removes it. Names are positions: deleting a constraint from the sketch shifts the ones after it.", {{"sketch", "integer", "Sketch feature index"}, {"index", "integer", "dimension index"}, {"name", "string", "letters, digits, _"}}),
         compact_tool("min_distance", "Shortest distance between two bodies and the closest points; b can be tried at a hypothetical offset (move_b) without changing anything.", {{"a", "integer", "body index or name"}, {"b", "integer", "body index or name"}, {"move_b", "array", "[dx,dy,dz] mm"}}),
-        compact_tool("analyze_printability", "Overhang area and levels (a flat pocket ceiling shows as one level), bed contact, height and disconnected solids of a body in a print orientation. rotate [rx,ry,rz] deg; the body rests on its lowest point.", {{"body", "integer", "body index or name"}, {"rotate", "array", "[rx,ry,rz] deg"}, {"overhang_angle", "number", "deg from vertical, default 45"}, {"bridge_max", "number", "mm a flat roof may span before a warning, default 20"}, {"layer_h", "number", "mm, layer height used in the suggestions; default: document variable print_layer_h, else 0.4"}, {"line_width", "number", "mm, extrusion line width for the wall check; default: document variable print_line_w, else 0.4"}, {"clearance", "number", "mm, minimum gap between fitted bodies, default 0.3"}}),
+        compact_tool("analyze_printability", "Overhang area and levels (a flat pocket ceiling shows as one level), bed contact, height and disconnected solids of a body in a print orientation. rotate [rx,ry,rz] deg; the body rests on its lowest point.", {{"body", "integer", "body index or name"}, {"rotate", "array", "[rx,ry,rz] deg"}, {"overhang_angle", "number", "deg from vertical, default 45"}, {"bridge_max", "number", "mm a flat roof may span before a warning, default 20"}, {"layer_h", "number", "mm, layer height used in the suggestions; default: document variable print_layer_h, else 0.4"}, {"line_width", "number", "mm, extrusion line width for the wall check; default: document variable print_line_w, else 0.4"}, {"clearance", "number", "mm, minimum gap between fitted bodies on every axis (also the default of the two below when given); default 0.3 for the fix and rotated analyses"}, {"clearance_xy", "number", "mm, horizontal gap needed, default 0.2"}, {"clearance_z", "number", "mm, vertical gap needed (layers), default 0.25"}}),
         compact_tool("apply_print_fix", "Apply the automatic fix of a Print check note: analyse `body` (rotate identity), pick the first note of `kind` (or `index`) that has a fix, run it through the verb dispatcher and return {ok, applied_label, steps, remaining}. Refuses when the note has no fix.", {{"body", "integer", "body index or name"}, {"kind", "string", "note kind (vertical_edge, base_corner, warp_risk, tight_pair, ...)"}, {"index", "integer", "note index in the analysis' notes instead of kind"}}),
         compact_tool("rename_body", "Give a body a name. Verbs that take `body` then accept the name as well as the index (extrude, hole, pattern, fillet, boolean...).", {{"body", "integer", "body index"}, {"name", "string", "unique name"}}),
         compact_tool("set_body_visible", "Show or hide a body in the viewport (the eye in the Bodies list). Display only.", {{"body", "integer", "body id"}, {"visible", "boolean", "default true"}}),
@@ -1666,7 +1666,7 @@ json action_hole_standard(DesignPanel* panel, const json& params)
     if (desig.empty()) throw std::runtime_error("designation is required");
     const int    style  = params.value("style", 0);
     const bool   thru   = params.value("through", true);
-    const double depth  = params.value("depth", 10.0);
+    const double depth  = params.value("depth", (desig.size() > 7 && desig.compare(desig.size() - 7, 7, " insert") == 0) ? 0.0 : 10.0);   // an insert pocket defaults to the insert length
     const double x = params.value("x", 0.0), y = params.value("y", 0.0);
     CadDocument& doc = panel->mcp_doc();
     if (doc.bodies.empty()) throw std::runtime_error("no body to drill");
@@ -3628,7 +3628,7 @@ json action_check_interference(DesignPanel* panel, const json& params)
 // its lowest point. Down-facing triangles steeper than the angle from vertical are overhangs; they are grouped by height so a
 // flat pocket ceiling shows as one level with its area. Thin walls are not measured here.
 // The extra DfAM checks on the print-oriented mesh `m` (sheet tips 1, 6, 8, 25). They append to suggestions / warnings and return the numbers.
-json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double line_width, double clearance, double bore_r, json& suggestions, json& warnings, json& notes, const Matrix3d& rot, const Vec3d& rot_c)
+json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double line_width, double clearance, double clear_xy, double clear_z, double bore_r, json& suggestions, json& warnings, json& notes, const Matrix3d& rot, const Vec3d& rot_c)
 {
     json out = json::object();
     const auto& V = m.its.vertices;
@@ -3865,6 +3865,7 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
         double vert_longest = -1.0, base_longest = -1.0;
         Vec3d vert_mid, vert_norm = Vec3d::Zero(), base_mid, base_floor = Vec3d::Zero();
         std::vector<int> vert_tris, base_tris;
+        int in_n = 0; double in_longest = -1.0; Vec3d in_mid, in_norm = Vec3d::Zero(); std::vector<int> in_tris;   // R8: concave vertical edges
         for (const auto& kv : edges) {
             const EdgeD& ed = kv.second;
             if (ed.n != 2) continue;                  // needs exactly two triangles
@@ -3884,6 +3885,12 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
                 if (vert_tris.size() < 2000 && ed.t2 != ed.t1) vert_tris.push_back(ed.t2);
                 if (L > vert_longest) { vert_longest = L; vert_mid = mid; vert_norm = (n1 + n2).normalized(); }
             }
+            else if (!convex && std::abs(e.z()) > 0.95 && theta >= 45.0 && L >= 3.0 && part_h >= 10.0) {   // R8: a square inside vertical corner (pocket, slot) is a stress riser; thresholds are guesses
+                ++in_n;
+                if (in_tris.size() < 2000) in_tris.push_back(ed.t1);
+                if (in_tris.size() < 2000 && ed.t2 != ed.t1) in_tris.push_back(ed.t2);
+                if (L > in_longest) { in_longest = L; in_mid = mid; in_norm = -(n1 + n2).normalized(); }   // the corner opens into the air: point away from the material
+            }
             else if (!convex && theta >= 60.0 && L >= 8.0 && std::abs(e.z()) < 0.1) {
                 const double z1 = n1.z(), z2 = n2.z();
                 if ((z1 > 0.95 && std::abs(z2) < 0.1) || (z2 > 0.95 && std::abs(z1) < 0.1)) {   // one up-facing floor, one wall
@@ -3899,6 +3906,12 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
             add_note("vertical_edge", "suggestion", text, vert_mid, to_model_dir(vert_norm), vert_tris);
             suggestions.push_back(json{{"kind", "vertical_edge_fillet"}, {"edges", vert_n}, {"why", text}});
             out["vertical_edges"] = vert_n;
+        }
+        if (in_n > 0) {
+            const std::string text = num(double(in_n)) + " sharp inside vertical corner(s) (pocket or slot): round them (R >= 1 mm) so the corner does not start a crack under load";
+            add_note("inside_vertical_edge", "suggestion", text, in_mid, to_model_dir(in_norm), in_tris);
+            suggestions.push_back(json{{"kind", "inside_vertical_edge_fillet"}, {"edges", in_n}, {"why", text}});
+            out["inside_vertical_edges"] = in_n;
         }
         if (base_n > 0) {
             const std::string text = num(double(base_n)) + " sharp inside corner(s) between a wall and a base: a fillet or 45 deg chamfer adds interface and strengthens the join";
@@ -4199,11 +4212,24 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
                 const json r = distance_report(doc.bodies[i].shape, doc.bodies[j].shape);
                 if (!r["distance"].is_number()) continue;
                 const double d = r["distance"].get<double>();
-                if (d > 1e-6 && d < clearance - 1e-9) {
+                // R3: the gap is horizontal or vertical in the print frame. A horizontal gap needs clear_xy, a vertical one clear_z (layers are
+                // thicker than the XY resolution). Only for an unrotated analysis; a rotated one keeps the single clearance. The nearest point
+                // pair is one of possibly many (two parallel faces), which is fine for a face-to-face gap and a guess for a diagonal one.
+                double need = clearance;
+                const char* axis = nullptr;
+                if (rot.isIdentity(1e-9) && r.contains("point_a") && r.contains("point_b")) {
+                    const json& pa = r["point_a"]; const json& pb = r["point_b"];
+                    const double dx = jn(pb, 0) - jn(pa, 0), dy = jn(pb, 1) - jn(pa, 1), dz = jn(pb, 2) - jn(pa, 2);
+                    if (std::abs(dz) > std::hypot(dx, dy)) { need = clear_z; axis = "z"; } else { need = clear_xy; axis = "xy"; }
+                }
+                if (d > 1e-6 && d < need - 1e-9) {
                     pairs.push_back(json{{"a", int(i)}, {"b", int(j)}, {"gap_mm", d}});
-                    const std::string w = "bodies " + std::to_string(i) + " and " + std::to_string(j) + " are " + num(d) + " mm apart: fitted parts need about " + num(clearance) + " mm of clearance";
+                    const std::string w = "bodies " + std::to_string(i) + " and " + std::to_string(j) + " are " + num(d) + " mm apart"
+                        + (axis ? std::string(axis[0] == 'z' ? " in Z" : " in XY") : std::string()) + ": fitted parts need about " + num(need) + " mm of clearance";
                     warnings.push_back(w);
-                    notes.push_back(json{{"kind", "tight_pair"}, {"severity", "warning"}, {"text", w}, {"at", nullptr}, {"a", int(i)}, {"b", int(j)}, {"gap_mm", d}});   // global: no pin, no normal
+                    json tp{{"kind", "tight_pair"}, {"severity", "warning"}, {"text", w}, {"at", nullptr}, {"a", int(i)}, {"b", int(j)}, {"gap_mm", d}, {"need_mm", need}};   // global: no pin, no normal
+                    if (axis) tp["axis"] = axis;
+                    notes.push_back(std::move(tp));
                 }
             }
         out["tight_pairs"] = pairs;
@@ -4407,7 +4433,7 @@ static void attach_print_fixes(json& notes, const json& suggestions, const CadDo
         const std::string kind = n.value("kind", std::string());
         std::string label;
         json steps = json::array();
-        if (kind == "vertical_edge" && rot_id) {
+        if ((kind == "vertical_edge" || kind == "inside_vertical_edge") && rot_id) {
             label = "Fillet the vertical edges (R 2 mm)";
             steps.push_back(json{{"method", "fillet"}, {"params", {{"where", json{{"kind", "line"}, {"parallel", "z"}}}, {"radius", 2.0}, {"body", body}}}});
         } else if (kind == "base_corner" && rot_id) {
@@ -4426,7 +4452,7 @@ static void attach_print_fixes(json& notes, const json& suggestions, const CadDo
         } else if (kind == "tight_pair") {
             if (!n.contains("a") || !n.contains("b") || !n.contains("gap_mm")) continue;
             const int a = n["a"].get<int>(), b = n["b"].get<int>();
-            const double dist = clearance - n["gap_mm"].get<double>();
+            const double dist = n.value("need_mm", clearance) - n["gap_mm"].get<double>();
             if (dist <= 0) continue;
             Vec3d dir = body_bbox_center(doc, b) - body_bbox_center(doc, a);
             const double L = dir.norm();
@@ -4742,7 +4768,7 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
     for (size_t i = 0; i < doc.features.size(); ++i)
         if (doc.features[i].type == CadFeatureType::Hole && doc.features[i].hole_bridge_layer_h > 1e-6)
             sacrificial.push_back(json{{"feature", int(i)}, {"kind", "hole bridge layers"}, {"layer_h", doc.features[i].hole_bridge_layer_h}, {"layers", 2}});
-    const json extras = dfam_extras(m, doc, ang, params.value("line_width", doc.variable_value("print_line_w", 0.4)), params.value("clearance", 0.3), bore_r_max, suggestions, warnings, notes, rot, rot_c);
+    const json extras = dfam_extras(m, doc, ang, params.value("line_width", doc.variable_value("print_line_w", 0.4)), params.value("clearance", 0.3), params.value("clearance_xy", params.value("clearance", 0.2)), params.value("clearance_z", params.value("clearance", 0.25)), bore_r_max, suggestions, warnings, notes, rot, rot_c);
     const bool rot_id = !params.contains("rotate")
         || (jn(params["rotate"], 0) == 0.0 && jn(params["rotate"], 1) == 0.0 && jn(params["rotate"], 2) == 0.0);
     attach_print_fixes(notes, suggestions, doc, b, rot_id, params.value("clearance", 0.3), m.bounding_box().min.z());
