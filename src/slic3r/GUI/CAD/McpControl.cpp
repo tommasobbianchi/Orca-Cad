@@ -350,7 +350,7 @@ json describe_tools_core()
                  })}},
             json{{"name", "hole_standard"}, {"summary", "Drill a standard clearance hole (ISO 273 / ANSI) at (x,y) on a plane. style: 0=simple, 1=counterbore, 2=countersink."},
                  {"params", json::array({
-                     json{{"name", "designation"},  {"type", "string"}, {"description", "e.g. M6, 1/4-20"}},
+                     json{{"name", "designation"},  {"type", "string"}, {"description", "e.g. M6, 1/4-20; or \"M3 insert\" (M2..M8) for a blind heat-set insert pocket (hole diameter and default depth from the insert table; give depth to override; style ignored)"}},
                      json{{"name", "style"},        {"type", "integer"}, {"default", 0}},
                      json{{"name", "through"},      {"type", "boolean"}, {"default", true}},
                      json{{"name", "depth"},        {"type", "number"}, {"unit", "mm"}, {"default", 10}, {"min", 0.01}},

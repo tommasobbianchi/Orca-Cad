@@ -1248,6 +1248,16 @@ static const HoleStdEntry kHoleStdTable[] = {
     {"5/16-18 UNC",  8.4, 13.5,  8.6, 16.1, 82},
     {"3/8-16 UNC",  10.1, 15.9, 10.2, 19.4, 82},
 };
+// Heat-set insert pockets: hole diameter and insert length (max of the listed range) per metric size.
+// Source: Albany County Fasteners, "Heat-Set Insert Specifications" (metric table, (c) 2025,
+// www.albanycountyfasteners.com/media/64/3d/5a/1764619189/heat-set-insert-specs.pdf), a distributor sheet, not an insert
+// maker's drawing: confirm against the maker's datasheet for the insert in hand. It states no melt chamber or lead-in,
+// so none is built; `depth` on the call overrides the default of the longest listed insert.
+struct InsertEntry { const char* desig; double hole_d; double length_max; };
+static const InsertEntry kInsertTable[] = {
+    {"M2", 3.2, 5}, {"M2.5", 3.7, 6}, {"M3", 4.0, 6}, {"M4", 5.3, 8}, {"M5", 6.4, 10}, {"M6", 7.6, 12}, {"M8", 10.2, 16},
+};
+
 static const HoleStdEntry* hole_std_lookup(const std::string& desig)
 {
     for (const auto& e : kHoleStdTable) {
@@ -1287,6 +1297,14 @@ int CadDocument::add_hole_standard(const std::string& designation, int style, bo
                                    double depth, double x, double y,
                                    const SketchPlane& plane, const std::string& name)
 {
+    static const std::string kIns = " insert";
+    if (designation.size() > kIns.size() && designation.compare(designation.size() - kIns.size(), kIns.size(), kIns) == 0) {
+        const std::string base = designation.substr(0, designation.size() - kIns.size());
+        for (const auto& ie : kInsertTable)
+            if (base == ie.desig)
+                return add_hole_styled(ie.hole_d, depth > 0 ? depth : ie.length_max, false, x, y, plane, 0, 0, 0, 0, 0, designation, name);
+        throw std::runtime_error(format(_u8L("unknown heat-set insert size \"%1%\""), base));
+    }
     const HoleStdEntry* e = hole_std_lookup(designation);
     if (e == nullptr)
         throw std::runtime_error(format(_u8L("unknown hole standard \"%1%\""), designation));
