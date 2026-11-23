@@ -177,5 +177,28 @@ print("distances:", vals)
 check(any(0.39 <= v <= 0.81 for v in vals), "R4b: wall text depth clamped to 0.4-0.8 mm after the fix")
 
 
+# --- R5: knife edge ---
+import math
+
+
+def wedge(deg):
+    fresh()
+    h = 30 * math.tan(math.radians(deg / 2))
+    safe("sketch_begin", plane="XY")
+    safe("sketch_add", entities=[{"type": "line", "p0": [0, 0], "p1": [30, h]}, {"type": "line", "p0": [30, h], "p1": [30, -h]},
+                                 {"type": "line", "p0": [30, -h], "p1": [0, 0]}], infer=False)
+    sk = safe("sketch_commit")
+    safe("extrude", sketch=sk.get("sketch_index", 0), distance=10)
+    time.sleep(0.5)
+    return safe("analyze_printability", body=0)
+
+
+check(len(kind_notes(wedge(15), "knife_edge")) == 1, "R5: a 15 deg wedge fires knife_edge")
+check(len(kind_notes(wedge(60), "knife_edge")) == 0, "R5 near-miss: a 60 deg wedge does not")
+fresh()
+box(30, 30, 20)
+safe("fillet", radius=3, edges=[0])
+check(len(kind_notes(safe("analyze_printability", body=0), "knife_edge")) == 0, "R5 near-miss: a filleted box edge (smooth seam) does not")
+
 print("%d failed" % len(fails))
 sys.exit(1 if fails else 0)

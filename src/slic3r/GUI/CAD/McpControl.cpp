@@ -3867,6 +3867,7 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
         double vert_longest = -1.0, base_longest = -1.0;
         Vec3d vert_mid, vert_norm = Vec3d::Zero(), base_mid, base_floor = Vec3d::Zero();
         std::vector<int> vert_tris, base_tris;
+        int knife_n = 0; double knife_min_wedge = 180.0; Vec3d knife_mid, knife_norm = Vec3d::Zero(); std::vector<int> knife_tris;   // R5
         int in_n = 0; double in_longest = -1.0; Vec3d in_mid, in_norm = Vec3d::Zero(); std::vector<int> in_tris;   // R8: concave vertical edges
         for (const auto& kv : edges) {
             const EdgeD& ed = kv.second;
@@ -3881,6 +3882,17 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
             const bool convex = (n1.cross(n2)).dot(d) > 0.0;   // convex -> + (see the sign note above)
             const Vec3d mid = (pos[size_t(ed.a)] + pos[size_t(ed.b)]) * 0.5;
 
+            // R5: a knife edge. Wedge = 180 - theta between the faces; under 30 deg the material at one line width from the tip is
+            // under 2*tan(15 deg) = 0.54 line widths, i.e. less than one extrusion line, so the tip is not printed. Smooth seams
+            // (fillets, curved faces) have theta near 0 and a wedge near 180, so they never reach this branch.
+            if (convex && theta > 150.0 && L >= 3.0) {
+                ++knife_n;
+                if (knife_tris.size() < 2000) knife_tris.push_back(ed.t1);
+                if (knife_tris.size() < 2000 && ed.t2 != ed.t1) knife_tris.push_back(ed.t2);
+                const double wedge = 180.0 - theta;
+                if (wedge < knife_min_wedge) { knife_min_wedge = wedge; knife_mid = mid; knife_norm = (n1 + n2).normalized(); }
+                continue;
+            }
             if (convex && std::abs(e.z()) > 0.95 && theta >= 45.0 && L >= 8.0 && part_h >= 10.0) {
                 ++vert_n;
                 if (vert_tris.size() < 2000) vert_tris.push_back(ed.t1);
@@ -3902,6 +3914,14 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
                     if (L > base_longest) { base_longest = L; base_mid = mid; base_floor = z1 > 0.95 ? n1 : n2; }
                 }
             }
+        }
+        if (knife_n > 0) {
+            const std::string text = num(double(knife_n)) + " knife edge(s), sharpest " + num(knife_min_wedge) + " deg: the tip is thinner than one " + num(line_width)
+                + " mm line and will not print. Truncate it to a flat of at least " + num(1.5 * line_width) + " mm";
+            add_note("knife_edge", "warning", text, knife_mid, to_model_dir(knife_norm), knife_tris);
+            warnings.push_back(text);
+            suggestions.push_back(json{{"kind", "knife_edge_truncate"}, {"edges", knife_n}, {"min_tip_mm", 1.5 * line_width}, {"why", text}});
+            out["knife_edges"] = knife_n;
         }
         if (vert_n > 0) {
             const std::string text = num(double(vert_n)) + " sharp vertical edge(s): fillet them (R >= 2 mm) to reduce ringing where the head changes direction";
