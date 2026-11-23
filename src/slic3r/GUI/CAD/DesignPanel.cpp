@@ -8936,6 +8936,9 @@ void DesignPanel::after_tree_edit(bool ok)
         if (m_viewport != nullptr) { PhaseLog t("feed_bodies"); feed_bodies(); }
         { PhaseLog t("set_status_ok"); set_status_ok(); }
     }
+    // The notes belong to the body as it is now: undo, redo, delete, reorder and every socket edit land here, and none of them
+    // used to re-run the check, so an undo left the pins of the state before it (or none at all).
+    { PhaseLog t("print_check"); auto_print_check(); }
     // Force a frame: under software GL (llvmpipe on the :10 test box) reload()'s scheduled
     // Refresh() is dropped, so a deleted solid stayed on screen until the next orbit.
     { PhaseLog t("repaint"); if (m_viewport != nullptr) m_viewport->request_repaint(); m_status->Refresh(); }

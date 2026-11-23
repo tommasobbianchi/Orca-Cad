@@ -115,5 +115,36 @@ check("print_layer_h" in json.dumps(lf), "R1: the hole's layer height is bound t
 res = safe("analyze_printability", body=0)
 check("__error__" not in res, "R1: analyze_printability runs with a print profile")
 
+# --- Print check after undo / redo (reported 2026-11-23: undo did not bring the notes back) ---
+def n_pins():
+    ins = safe("ui.inspect")
+    pn = ins.get("print_notes") if isinstance(ins, dict) else None
+    return len(pn) if isinstance(pn, list) else -1
+
+
+fresh()
+box(100, 100, 20)
+box(60, 40, 8)
+safe("transform", body=1, dz=12)
+safe("boolean", op="subtract", target=0, tool=1)
+time.sleep(0.6)
+n0 = n_pins()
+check(n0 > 0, "undo: the pocket part shows Print check notes after the edits (%d)" % n0)
+safe("apply_print_fix", kind="inside_vertical_edge", body=0)
+time.sleep(0.6)
+safe("undo")
+time.sleep(0.6)
+n2 = n_pins()
+check(n2 == n0, "undo: one undo of the fix brings the notes back (%d, was %d)" % (n2, n0))
+safe("redo")
+time.sleep(0.6)
+safe("undo")
+time.sleep(0.6)
+check(n_pins() == n0, "undo: redo then undo again shows the same notes (%d, was %d)" % (n_pins(), n0))
+safe("undo")
+time.sleep(0.6)
+n3 = n_pins()
+check(n3 >= 0, "undo: a second undo (removes the boolean) keeps a valid Print check (%d notes)" % n3)
+
 print("%d failed" % len(fails))
 sys.exit(1 if fails else 0)
