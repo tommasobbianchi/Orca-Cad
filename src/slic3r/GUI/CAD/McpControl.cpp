@@ -4599,12 +4599,25 @@ static void attach_print_fixes(json& notes, const json& suggestions, const CadDo
                 const CadFeature& f = doc.features[i];
                 if (f.type != CadFeatureType::Extrude || !f.enabled || f.mode != BooleanMode::Add) continue;
                 if (f.sketch_ref < 0 || f.sketch_ref >= int(doc.features.size()) || !doc.features[size_t(f.sketch_ref)].is_text()) continue;
+                // Face-aware depth: a vertical wall takes 0.4-0.8 mm (a cut deeper than that weakens the wall); a text on the bed
+                // plane is a first-layers engraving, 2 layers deep. Other faces keep their depth.
+                const SketchPlane& pl = doc.features[size_t(f.sketch_ref)].plane;
+                double depth = f.distance;
+                if (std::abs(pl.normal.z()) < 0.3)                      depth = std::max(0.4, std::min(0.8, f.distance));
+                else if (std::abs(pl.normal.z()) > 0.95 && pl.origin.z() < 0.01) depth = 2.0 * doc.variable_value("print_layer_h", 0.2);
+                if (std::abs(depth - f.distance) > 1e-6)
+                    steps.push_back(json{{"method", "set_feature_expr"}, {"params", {{"feature", int(i)}, {"field", "distance"}, {"expr", [&]{ std::ostringstream o; o.imbue(std::locale::classic()); o << depth; return o.str(); }()}}}});
                 // flip first: a Cut that still points outward removes nothing and the recompute refuses it
                 steps.push_back(json{{"method", "set_feature_expr"}, {"params", {{"feature", int(i)}, {"field", "extrude_flip"}, {"expr", f.flip ? "0" : "1"}}}});
                 steps.push_back(json{{"method", "set_feature_expr"}, {"params", {{"feature", int(i)}, {"field", "extrude_mode"}, {"expr", "2"}}}});
+                // Depth by face: on a horizontal face (bed side) 2 layers resolve the glyphs; into a wall 0.4-0.8 mm is enough and
+                // anything deeper only weakens it.
+                const bool horizontal = std::abs(doc.features[size_t(f.sketch_ref)].plane.normal.z()) > 0.95;
+                const double cut_depth = horizontal ? 2.0 * doc.variable_value("print_layer_h", 0.2) : std::min(0.8, std::max(0.4, f.distance));
+                steps.push_back(json{{"method", "set_feature_expr"}, {"params", {{"feature", int(i)}, {"field", "distance"}, {"expr", [&]{ std::ostringstream o; o.imbue(std::locale::classic()); o << cut_depth; return o.str(); }()}}}});
             }
             if (steps.empty()) continue;   // the text is already cut (or has no extrude)
-            label = "Cut the text into the face instead of raising it";
+            label = "Cut the text into the face instead of raising it (cut_depth set by the face: 0.4-0.8 mm on walls, 2 layers on the bed)";
         } else if (kind == "curve_axis" && rot_id) {
             // Rotate every body about the origin so the curve's (sign-flipped, up-pointing) axis maps to +Z.
             // A verb to drop the result back onto the bed does not exist; the transform is reported as-is.

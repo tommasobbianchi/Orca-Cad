@@ -162,5 +162,20 @@ n = text_note(8)
 print("probe 8 mm:", [x.get("lost_pct") for x in n])
 check(len(n) == 0, "R4 near-miss: 8 mm text has strokes wider than the line -> no note")
 
+# --- R4b: face-aware text_indent fix ---
+fresh()
+box(40, 40, 20)
+r = safe("add_text", text="ORCA", height=8, plane="XZ", body=0, extrude_distance=1.5, boolean="union")
+idx = max(0, int(safe("list_commands").get("feature_count", 0)) - 1) if False else None
+safe("analyze_printability", body=0)
+fx = safe("apply_print_fix", kind="text_indent", body=0)
+check(fx.get("ok") is not False and "__error__" not in fx, "R4b: apply_print_fix text_indent runs (%s)" % (fx.get("__error__") or "ok"))
+dist = [json.dumps(safe("list_fields", feature=i)) for i in range(1, 6)]
+import re
+vals = [float(m) for d in dist for m in re.findall(r'"distance"[^0-9-]*([0-9.]+)', d)]
+print("distances:", vals)
+check(any(0.39 <= v <= 0.81 for v in vals), "R4b: wall text depth clamped to 0.4-0.8 mm after the fix")
+
+
 print("%d failed" % len(fails))
 sys.exit(1 if fails else 0)
