@@ -146,5 +146,21 @@ time.sleep(0.6)
 n3 = n_pins()
 check(n3 >= 0, "undo: a second undo (removes the boolean) keeps a valid Print check (%d notes)" % n3)
 
+# --- R4a: strokes thinner than the nozzle line ---
+def text_note(h):
+    fresh()
+    box(60, 30, 5)
+    safe("add_text", text="Orca 8", height=h, plane="XY", body=0, extrude_distance=0.6, boolean="union")
+    time.sleep(0.5)
+    return kind_notes(safe("analyze_printability", body=0), "thin_text")
+
+
+n = text_note(1.2)
+print("probe 1.2 mm:", [x.get("lost_pct") for x in n])
+check(len(n) == 1, "R4: 1.2 mm text (strokes under the 0.4 mm line) fires thin_text")
+n = text_note(8)
+print("probe 8 mm:", [x.get("lost_pct") for x in n])
+check(len(n) == 0, "R4 near-miss: 8 mm text has strokes wider than the line -> no note")
+
 print("%d failed" % len(fails))
 sys.exit(1 if fails else 0)

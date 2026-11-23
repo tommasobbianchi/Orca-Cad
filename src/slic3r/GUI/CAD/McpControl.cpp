@@ -1,5 +1,7 @@
 #include "slic3r/GUI/CAD/McpControl.hpp"
 #include "libslic3r/Point.hpp"
+#include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/ExPolygon.hpp"
 #include <Eigen/Eigenvalues>   // SelfAdjointEigenSolver for the curve_axis (tip 16) normal covariance
 #include <functional>
 #include <stdexcept>
@@ -4300,6 +4302,36 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
         advise("compliance", "Parts that press together can use thin flexible tabs (compliance) for a push fit");
     if (has_text)
         advise("text_indent", "Text reads best indented into a vertical face (cut, not raised): less overhang and better resolution");
+    // R4a: strokes thinner than one extrusion line vanish in the slice. Open each glyph region by line_width (erode then dilate
+    // by half of it): what the opening drops is what the nozzle cannot print. Fires when >=10 % of the glyph area is lost.
+    for (size_t i = 0; i < doc.features.size(); ++i) {
+        const CadFeature& f = doc.features[i];
+        if (!f.is_text() || !f.enabled || f.imported_regions.empty() || line_width <= 0) continue;
+        ExPolygons glyphs;
+        for (const auto& region : f.imported_regions) {
+            ExPolygon ex;
+            for (size_t k = 0; k < region.size(); ++k) {
+                Polygon pl;
+                for (const Vec2d& v : region[k])
+                    pl.points.emplace_back(coord_t(scale_(v.x() * f.import_scale_x + f.import_offset.x())), coord_t(scale_(v.y() * f.import_scale_y + f.import_offset.y())));
+                if (pl.points.size() < 3) continue;
+                if (k == 0) { ex.contour = pl; ex.contour.make_counter_clockwise(); }
+                else        { ex.holes.push_back(pl); ex.holes.back().make_clockwise(); }
+            }
+            if (ex.contour.points.size() >= 3) glyphs.push_back(std::move(ex));
+        }
+        double a0 = 0; for (const ExPolygon& e : glyphs) a0 += e.area();
+        if (a0 <= 0) continue;
+        double a1 = 0; for (const ExPolygon& e : offset2_ex(glyphs, -float(scale_(line_width * 0.5)), float(scale_(line_width * 0.5)))) a1 += e.area();
+        const double lost = 100.0 * (1.0 - a1 / a0);
+        if (lost >= 10.0) {
+            std::ostringstream os;
+            os << "Text \"" << f.text_string << "\" has strokes thinner than the " << std::fixed << std::setprecision(2) << line_width
+               << " mm line: " << std::setprecision(0) << lost << " % of the glyph area will not print. Use a bolder font or a larger text height";
+            tips_advice.push_back("thin_text");
+            notes.push_back(json{{"kind", "thin_text"}, {"severity", "warning"}, {"text", os.str()}, {"at", nullptr}, {"feature", int(i)}, {"lost_pct", lost}});
+        }
+    }
     if (!tips_advice.empty()) out["tips_advice"] = tips_advice;
 
     return out;
