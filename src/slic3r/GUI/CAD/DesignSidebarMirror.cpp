@@ -556,6 +556,10 @@ void draw_table_field(TableField* t, float em, std::function<void()> refocus)
                 t->user_select(i, ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left));
                 if (refocus) t->CallAfter(refocus);
             }
+            if (t->on_menu && ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+                t->user_menu(i, wxGetMousePosition());
+                if (refocus) t->CallAfter(refocus);
+            }
             for (int c = 1; c < cols; ++c) {
                 ImGui::TableSetColumnIndex(c);
                 ImGui::TextUnformatted(u8(t->GetItemText(i, c)).c_str());
@@ -580,6 +584,7 @@ void DesignPanel::mirror_card(CardModel& card, SidebarCtx& cx)
 {
     const float em = cx.em;
     const bool folded = !card.fold_key().empty() && is_folded(card.fold_key().c_str());
+    const ImVec2 hdr0 = ImGui::GetCursorScreenPos();   // the header row's top, for the right-click test below
     if (!card.fold_key().empty()) {
         const std::string key = card.fold_key();
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.f, 0.f, 0.f, 0.f));
@@ -612,6 +617,11 @@ void DesignPanel::mirror_card(CardModel& card, SidebarCtx& cx)
             ImGui::PopID();
         }
         ImGui::PopStyleColor();
+    }
+    if (card.on_header_menu && ImGui::IsWindowHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+        const ImVec2 wp = ImGui::GetWindowPos();
+        if (ImGui::IsMouseHoveringRect(ImVec2(wp.x, hdr0.y), ImVec2(wp.x + ImGui::GetWindowWidth(), hdr0.y + ImGui::GetFrameHeight() * 1.1f)))
+            CallAfter([f = card.on_header_menu, pos = wxGetMousePosition()] { f(pos); });
     }
     ImGui::Separator();
     if (folded) return;

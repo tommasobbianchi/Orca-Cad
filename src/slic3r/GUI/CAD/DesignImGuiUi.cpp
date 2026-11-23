@@ -229,7 +229,7 @@ void DesignTreeOverlay::render(ImGuiWrapper& imgui, float scale, float inset_lef
                     m_rename_row = i; m_rename_focus = true;
                     std::snprintf(m_rename_buf, sizeof(m_rename_buf), "%s", r.label.c_str());
                 }
-                if (ImGui::MenuItem(_u8L("Edit").c_str())) push(TreeEvent::Edit, i);
+                if (ImGui::MenuItem((r.is_sketch ? _u8L("Edit sketch") : _u8L("Edit feature")).c_str())) push(TreeEvent::Edit, i);
                 if (ImGui::MenuItem(_u8L("Copy").c_str())) push(TreeEvent::Copy, i);
                 if (!view.can_paste) { ImGui::PushItemFlag(ImGuiItemFlags_Disabled, true); ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f); }
                 if (ImGui::MenuItem(_u8L("Paste").c_str())) push(TreeEvent::Paste, i);
@@ -237,6 +237,12 @@ void DesignTreeOverlay::render(ImGuiWrapper& imgui, float scale, float inset_lef
                 if (ImGui::MenuItem(r.suppressed ? _u8L("Unsuppress").c_str() : _u8L("Suppress").c_str()))
                     push(TreeEvent::ToggleEnabled, i);
                 ImGui::Separator();
+                {   // history: the bar sits after this row; the last row IS the end, so rolling back to it is a no-op
+                    const bool here = view.rollback == i;
+                    if (!here && i >= int(view.rows.size()) - 1) { ImGui::PushItemFlag(ImGuiItemFlags_Disabled, true); ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f); }
+                    if (ImGui::MenuItem((here ? _u8L("Roll forward to the end") : _u8L("Roll back to here")).c_str())) push(TreeEvent::SetRollback, here ? -1 : i);
+                    if (!here && i >= int(view.rows.size()) - 1) { ImGui::PopStyleVar(); ImGui::PopItemFlag(); }
+                }
                 if (ImGui::MenuItem(_u8L("Move up").c_str()))   push(TreeEvent::MoveUp, i);
                 if (ImGui::MenuItem(_u8L("Move down").c_str())) push(TreeEvent::MoveDown, i);
                 const bool zoomable = can_zoom ? can_zoom(i) : false;
@@ -763,7 +769,16 @@ void DesignOfferPopup::render(ImGuiWrapper& imgui, float scale)
     if (!m_open) return;
     ImGuiWrapper::push_common_window_style(scale);
     auto theme = std::make_unique<ThemeScope>();
-    ImGui::SetNextWindowPos(ImVec2(m_x, m_y), ImGuiCond_Always);
+    // An explicit position is never clamped by ImGui, so keep the menu inside the canvas with a margin: the bottom edge of the canvas is the
+    // bottom of the window and a row sitting on it reads as cut off. ponytail: the size is last frame's (the popup is auto-sized).
+    static ImVec2 last_sz(0.f, 0.f);
+    {
+        const ImVec2 ds = ImGui::GetIO().DisplaySize;
+        const float  mx = 8.f * scale, my = 40.f * scale;
+        // last_sz is 0 on the first drawn frame, so floor it with a row-count estimate (header + rows; submenus open beside, not below).
+        const float est_h = std::max(last_sz.y, float(m_nodes.size() + 2) * ImGui::GetFrameHeightWithSpacing());
+        ImGui::SetNextWindowPos(ImVec2(std::max(mx, std::min(m_x, ds.x - last_sz.x - mx)), std::max(my, std::min(m_y, ds.y - est_h - my))), ImGuiCond_Always);
+    }
     if (m_opened_now) { ImGui::OpenPopup("##design_offer"); m_opened_now = false; }
 
     std::function<void(const std::vector<OfferNode>&)> draw = [&](const std::vector<OfferNode>& nodes) {
@@ -792,6 +807,7 @@ void DesignOfferPopup::render(ImGuiWrapper& imgui, float scale)
         ImGui::TextDisabled("%s", m_header.empty() ? "" : m_header.c_str());
         ImGui::Separator();
         draw(m_nodes);
+        last_sz = ImGui::GetWindowSize();
         ImGui::EndPopup();
     } else {
         m_open = false;

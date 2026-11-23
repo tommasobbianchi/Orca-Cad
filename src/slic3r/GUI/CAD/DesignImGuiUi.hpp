@@ -23,6 +23,7 @@ struct TreeRowView {
     bool        suppressed{false};   // disabled: grey + struck through
     bool        failed{false};       // replay threw here: red + `note` in a tooltip
     bool        conflict{false};     // mate conflict: orange-red + `note`
+    bool        is_sketch{false};    // the row is a Sketch: its menu says "Edit sketch"
     std::string note;
 };
 
