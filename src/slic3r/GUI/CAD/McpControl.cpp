@@ -4358,6 +4358,14 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
     }
     if (doc.variables.empty() && doc.features.size() >= 3)
         advise("use_parameters", "No named variables: drive the key dimensions from variables so the design is easy to edit and iterate");
+    if (has_hole && !doc.variables.count("print_hole_allow")) {
+        // R9: the slicer may already compensate holes (xy_hole_compensation); this is the document-side alternative, one or the other, never both
+        bool unbound = false;
+        for (const CadFeature& f : doc.features)
+            if (f.type == CadFeatureType::Hole && f.enabled && !f.expr.count("hole_diameter")) unbound = true;
+        if (unbound)
+            advise("hole_allowance", "Printed holes come out a little small. Define print_hole_allow (about 0.2 mm) and bind each hole diameter to its size + print_hole_allow; or set the slicer's XY hole compensation instead, not both");
+    }
     if (has_hole)
         advise("slit_nut_trap", "A bore can take a slit with a bolt and a trapped nut so it clamps around another part");
     if (doc.bodies.size() >= 2)
@@ -4576,6 +4584,16 @@ static void attach_print_fixes(json& notes, const json& suggestions, const CadDo
             std::ostringstream os; os.imbue(std::locale::classic()); os.precision(6); os << target;
             label = std::string(wall ? "Set the wall to " : "Set the height to ") + os.str() + " mm";
             steps.push_back(json{{"method", "set_feature_expr"}, {"params", {{"feature", owner}, {"field", "distance"}, {"expr", os.str()}}}});
+        } else if (kind == "hole_allowance") {
+            label = "Define print_hole_allow (0.2 mm) and bind the hole diameters to it";
+            steps.push_back(json{{"method", "set_variable"}, {"params", {{"name", "print_hole_allow"}, {"expr", "0.2"}}}});
+            for (size_t i = 0; i < doc.features.size() && steps.size() < 12; ++i) {
+                const CadFeature& f = doc.features[i];
+                if (f.type != CadFeatureType::Hole || !f.enabled || f.expr.count("hole_diameter")) continue;
+                std::ostringstream os; os.imbue(std::locale::classic()); os.precision(6); os << f.hole_diameter << " + print_hole_allow";
+                steps.push_back(json{{"method", "set_feature_expr"}, {"params", {{"feature", int(i)}, {"field", "hole_diameter"}, {"expr", os.str()}}}});
+            }
+            if (steps.size() < 2) continue;
         } else if (kind == "elephant_foot" && rot_id) {
             // R9: a 0.3 mm chamfer on the edges that meet the bed, so the squashed first layers have room
             label = "Chamfer the bed edges (0.3 mm)";

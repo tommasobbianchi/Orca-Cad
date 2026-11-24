@@ -427,5 +427,55 @@ box(20, 20, 10.07)
 safe("set_variable", name="print_multiples", expr="1")
 check(len(kind_notes(safe("analyze_printability", body=0), "z_height_multiple")) == 0, "R6 near-miss: no layer height set, no judgement")
 
+
+# --- R9: hole allowance ---
+fresh()
+box(30, 30, 15)
+safe("hole", diameter=5, depth=10, x=0, y=0, plane="XY")
+time.sleep(0.4)
+hn = kind_notes(safe("analyze_printability", body=0), "hole_allowance")
+check(len(hn) == 1 and (hn[0].get("fix") or {}).get("steps"), "R9: a hole with no allowance variable gets a hole_allowance note with a fix (%s)" % len(hn))
+v0 = safe("mass_properties", body=0).get("volume")
+r = safe("apply_print_fix", kind="hole_allowance", body=0)
+time.sleep(0.5)
+v1 = safe("mass_properties", body=0).get("volume")
+want = math.pi * ((5.2 / 2) ** 2 - (5.0 / 2) ** 2) * 10
+check("__error__" not in r and abs((v0 - v1) - want) < 2.0, "R9 fix: the bore grows from d5 to d5.2: %.1f mm3 more removed (got %.1f)" % (want, v0 - v1))
+check(len(kind_notes(safe("analyze_printability", body=0), "hole_allowance")) == 0, "R9: the note is gone once print_hole_allow exists")
+fresh()
+box(30, 30, 15)
+check(len(kind_notes(safe("analyze_printability", body=0), "hole_allowance")) == 0, "R9 near-miss: a part with no hole gets none")
+
+# --- R4: thin font and bed-face text ---
+def thin_font(font, h):
+    fresh()
+    box(60, 30, 3)
+    safe("add_text", text="Orca 8", height=h, plane="XY", body=0, extrude_distance=0.6, boolean="union", font=font)
+    return kind_notes(safe("analyze_printability", body=0), "thin_text")
+
+
+check(len(thin_font("DejaVu Sans Light", 3)) == 1, "R4: 3 mm text in a light font fires thin_text")
+check(len(thin_font("DejaVu Sans Bold", 6)) == 0, "R4 near-miss: 6 mm text in a bold font does not")
+
+
+def bed_text_loss(layer_h):
+    fresh()
+    box(60, 30, 3)
+    safe("set_variable", name="print_layer_h", expr=str(layer_h))
+    r0 = safe("add_text", text="ORCA", height=8, plane="XY", body=0, extrude_distance=0.6, boolean="union")
+    # raised text on the bed face sticks out below z=0: flip the extrude so it is an Add that leaves the part
+    safe("set_feature_expr", feature=r0.get("extrude_index"), field="extrude_flip", expr="1")
+    time.sleep(0.4)
+    v0 = safe("mass_properties", body=0).get("volume")
+    r = safe("apply_print_fix", kind="text_indent", body=0)
+    time.sleep(0.5)
+    return 60 * 30 * 3 - safe("mass_properties", body=0).get("volume"), r   # engraved volume against the plain box
+
+
+l1, r1 = bed_text_loss(0.2)
+l2, r2 = bed_text_loss(0.4)
+check("__error__" not in r1 and l1 > 1.0, "R4: bed-face text becomes an engraving (%.1f mm3 at 0.2 mm layers)" % l1)
+check(l1 > 0 and abs(l2 / l1 - 2.0) < 0.15, "R4: the engraving is 2 layers deep: doubling the layer height doubles it (%.1f -> %.1f)" % (l1, l2))
+
 print("%d failed" % len(fails))
 sys.exit(1 if fails else 0)
