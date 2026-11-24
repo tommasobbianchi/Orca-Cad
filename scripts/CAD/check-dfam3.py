@@ -494,5 +494,19 @@ l2, r2 = bed_text_loss(0.4)
 check("__error__" not in r1 and l1 > 1.0, "R4: bed-face text becomes an engraving (%.1f mm3 at 0.2 mm layers)" % l1)
 check(l1 > 0 and abs(l2 / l1 - 2.0) < 0.15, "R4: the engraving is 2 layers deep: doubling the layer height doubles it (%.1f -> %.1f)" % (l1, l2))
 
+# the warp note offers two fixes: mouse ears (fix) and rounding the vertical edges (fix2, alt=1)
+fresh()
+safe("extrude_rect", width=60, height=60, distance=20)
+time.sleep(0.4)
+an = safe("analyze_printability", body=0)
+wn = [n for n in an.get("notes", []) if n.get("kind") == "warp_risk"]
+check(bool(wn) and wn[0].get("fix", {}).get("short") == "Ears" and wn[0].get("fix2", {}).get("short") == "Round",
+      "warp_risk offers two fixes: Ears and Round (%s)" % (an.get("__error__") or "ok"))
+v_box = safe("mass_properties", body=0).get("volume", 0)
+r = safe("apply_print_fix", kind="warp_risk", body=0, alt=1)
+time.sleep(0.5)
+v_round = safe("mass_properties", body=0).get("volume", 0)
+check("__error__" not in r and 100 < v_box - v_round < 1500, "warp_risk alt fix rounds the 4 vertical edges (R3): volume %.0f -> %.0f" % (v_box, v_round))
+
 print("%d failed" % len(fails))
 sys.exit(1 if fails else 0)

@@ -25,6 +25,8 @@ struct PrintNote
     std::string text;
     std::string fix_label;   // label of the auto-fix button ("" = no automatic fix)
     std::string fix_json;    // JSON {"steps":[...]} for the fix; empty = none
+    std::string fix_short;   // one word on the button ("Ears"); "" = "Fix"
+    std::string fix2_label, fix2_json, fix2_short;   // an alternative fix (the second of two offered options); empty = none
     int         n{0};
     bool        warning{false};      // a warning (amber) or a suggestion (blue)
     bool        open{true};          // false once the user dismissed it
@@ -62,7 +64,7 @@ public:
     std::function<void(int)>                 dismiss;
     std::function<void(int)>                 resolve;   // toggle the grey resolved state
     std::function<void(int)>                 focus;     // focus a pin (a ring around it); the camera does not move
-    std::function<void(int)>                 apply_fix; // run the note's automatic fix (Fix button)
+    std::function<void(int, int)>            apply_fix; // run the note's automatic fix (index, 0 = first fix, 1 = the alternative)
     // The print profile: document variables the checks read (print_nozzle, print_line_w, print_layer_h, print_bed_x/y/z, print_warp_prone,
     // print_multiples). get returns the value or the fallback when the variable is not defined; set takes an expression, "" removes the variable.
     std::function<double(const char*, double)>           profile_get;

@@ -742,7 +742,7 @@ void DesignCanvas::set_print_notes(std::vector<PrintNote> n, const TriangleMesh*
     m_print_notes.dismiss = [this](int i) { if (i >= 0 && i < int(m_print_note_list.size())) m_print_note_list[size_t(i)].open = false; request_repaint(); };
     m_print_notes.resolve  = [this](int i) { if (i >= 0 && i < int(m_print_note_list.size())) { m_print_note_list[size_t(i)].resolved = !m_print_note_list[size_t(i)].resolved; request_repaint(); } };
     m_print_notes.focus    = [this](int i) { set_print_focus(i); };
-    m_print_notes.apply_fix = [this](int i) { if (on_print_fix_requested) on_print_fix_requested(i); };
+    m_print_notes.apply_fix = [this](int i, int alt) { if (on_print_fix_requested) on_print_fix_requested(i, alt); };
     m_print_focus = -1;
     request_repaint();
     if (on_print_notes_changed) on_print_notes_changed();

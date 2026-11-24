@@ -3495,7 +3495,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
 
     // The Print check toggle and its Fix buttons drive through the panel: the canvas only draws.
     m_viewport->on_print_check_toggle = [this]() { auto_print_check(); };
-    m_viewport->on_print_fix_requested = [this](int i) { on_apply_print_fix(i); };
+    m_viewport->on_print_fix_requested = [this](int i, int alt) { on_apply_print_fix(i, alt); };
     m_viewport->print_profile_get = [this](const char* n, double d) { return m_doc.variable_value(n, d); };
     m_viewport->print_profile_set = [this](const char* n, const std::string& expr) {
         const std::string name = n;
@@ -6432,23 +6432,25 @@ void DesignPanel::auto_print_check()
     if (!clean) set_status(StatusKind::Warning, wxString::Format(_L("Print check: %s"), wxString::FromUTF8(text)));
 }
 
-void DesignPanel::on_apply_print_fix(int note_index)
+void DesignPanel::on_apply_print_fix(int note_index, int alt)
 {
     using json = nlohmann::json;
     if (!m_viewport) return;
     const std::vector<PrintNote>& notes = m_viewport->print_notes();
     if (note_index < 0 || note_index >= int(notes.size())) return;
     const PrintNote n = notes[size_t(note_index)];   // copy: auto_print_check() below replaces the viewport's notes
-    if (n.fix_json.empty()) return;
+    const std::string& fix_json  = alt == 1 ? n.fix2_json : n.fix_json;
+    const std::string& fix_label = alt == 1 ? n.fix2_label : n.fix_label;
+    if (fix_json.empty()) return;
     json fix;
-    try { fix = json::parse(n.fix_json); }
+    try { fix = json::parse(fix_json); }
     catch (...) { set_status(StatusKind::Error, _L("The fix data is invalid")); return; }
-    if (fix.is_array()) fix = json{{"steps", fix}, {"label", n.fix_label}};   // PrintNote keeps only the steps array
+    if (fix.is_array()) fix = json{{"steps", fix}, {"label", fix_label}};   // PrintNote keeps only the steps array
     try {
         const json r = run_print_fix(this, fix);
         refresh_tree();
         auto_print_check();
-        set_status(StatusKind::Info, wxString::Format(_L("Fixed: %s"), wxString::FromUTF8(r.value("applied_label", n.fix_label))));
+        set_status(StatusKind::Info, wxString::Format(_L("Fixed: %s"), wxString::FromUTF8(r.value("applied_label", fix_label))));
     } catch (const std::exception& e) {
         set_status(StatusKind::Error, wxString::FromUTF8(e.what()));
     }

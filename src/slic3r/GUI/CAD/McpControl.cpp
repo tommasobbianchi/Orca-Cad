@@ -730,7 +730,7 @@ json describe_tools()
         compact_tool("name_dimension", "Name a sketch dimension (index from sketch_dimensions); set_feature_expr then takes field \"dim:<name>\". name \"\" removes it. Names are positions: deleting a constraint from the sketch shifts the ones after it.", {{"sketch", "integer", "Sketch feature index"}, {"index", "integer", "dimension index"}, {"name", "string", "letters, digits, _"}}),
         compact_tool("min_distance", "Shortest distance between two bodies and the closest points; b can be tried at a hypothetical offset (move_b) without changing anything.", {{"a", "integer", "body index or name"}, {"b", "integer", "body index or name"}, {"move_b", "array", "[dx,dy,dz] mm"}}),
         compact_tool("analyze_printability", "Overhang area and levels (a flat pocket ceiling shows as one level), bed contact, height and disconnected solids of a body in a print orientation. rotate [rx,ry,rz] deg; the body rests on its lowest point.", {{"body", "integer", "body index or name"}, {"rotate", "array", "[rx,ry,rz] deg"}, {"overhang_angle", "number", "deg from vertical, default 45"}, {"bridge_max", "number", "mm a flat roof may span before a warning, default 20"}, {"layer_h", "number", "mm, layer height used in the suggestions; default: document variable print_layer_h, else 0.4"}, {"line_width", "number", "mm, extrusion line width for the wall check; default: document variable print_line_w, else 1.05 x print_nozzle, else 0.4"}, {"clearance", "number", "mm, minimum gap between fitted bodies on every axis (also the default of the two below when given); default 0.3 for the fix and rotated analyses"}, {"clearance_xy", "number", "mm, horizontal gap needed, default 0.2"}, {"clearance_z", "number", "mm, vertical gap needed (layers), default 0.25"}}),
-        compact_tool("apply_print_fix", "Apply the automatic fix of a Print check note: analyse `body` (rotate identity), pick the first note of `kind` (or `index`) that has a fix, run it through the verb dispatcher and return {ok, applied_label, steps, remaining}. Refuses when the note has no fix.", {{"body", "integer", "body index or name"}, {"kind", "string", "note kind (vertical_edge, base_corner, warp_risk, tight_pair, ...)"}, {"index", "integer", "note index in the analysis' notes instead of kind"}}),
+        compact_tool("apply_print_fix", "Apply the automatic fix of a Print check note: analyse `body` (rotate identity), pick the first note of `kind` (or `index`) that has a fix, run it through the verb dispatcher and return {ok, applied_label, steps, remaining}. Refuses when the note has no fix.", {{"body", "integer", "body index or name"}, {"kind", "string", "note kind (vertical_edge, base_corner, warp_risk, tight_pair, ...)"}, {"index", "integer", "note index in the analysis' notes instead of kind"}, {"alt", "integer", "1 = the note's alternative fix (fix2, e.g. warp_risk: round the corners instead of mouse ears); default 0"}}),
         compact_tool("rename_body", "Give a body a name. Verbs that take `body` then accept the name as well as the index (extrude, hole, pattern, fillet, boolean...).", {{"body", "integer", "body index"}, {"name", "string", "unique name"}}),
         compact_tool("set_body_visible", "Show or hide a body in the viewport (the eye in the Bodies list). Display only.", {{"body", "integer", "body id"}, {"visible", "boolean", "default true"}}),
         compact_tool("isolate_body", "Hide every body but this one; with no body (or show_all:true) show them all again.", {{"body", "integer", "body id"}, {"show_all", "boolean", ""}}),
@@ -4450,7 +4450,13 @@ static void build_print_pins(const json& notes, bool warnings_only, std::vector<
         p.warning = warn;
         if (j.contains("fix") && j["fix"].is_object()) {
             p.fix_label = j["fix"].value("label", std::string());
+            p.fix_short = j["fix"].value("short", std::string());
             if (j["fix"].contains("steps")) p.fix_json = j["fix"]["steps"].dump();   // {"method","params"} steps for run_print_fix
+        }
+        if (j.contains("fix2") && j["fix2"].is_object()) {
+            p.fix2_label = j["fix2"].value("label", std::string());
+            p.fix2_short = j["fix2"].value("short", std::string());
+            if (j["fix2"].contains("steps")) p.fix2_json = j["fix2"]["steps"].dump();
         }
         if (j.contains("normal")) { p.normal = Vec3d(j["normal"][0].get<double>(), j["normal"][1].get<double>(), j["normal"][2].get<double>()); p.has_normal = true; }
         if (j.contains("tris")) for (const json& t : j["tris"]) p.tris.push_back(t.get<int>());
@@ -4555,8 +4561,8 @@ static void attach_print_fixes(json& notes, const json& suggestions, const CadDo
                         ear_corners.emplace_back(jn(c, 0), jn(c, 1), jn(c, 2));
     for (json& n : notes) {
         const std::string kind = n.value("kind", std::string());
-        std::string label;
-        json steps = json::array();
+        std::string label, short_label, alt_label;
+        json steps = json::array(), alt_steps = json::array();
         if ((kind == "vertical_edge" || kind == "inside_vertical_edge") && rot_id) {
             label = "Fillet the vertical edges (R 2 mm)";
             steps.push_back(json{{"method", "fillet"}, {"params", {{"where", json{{"kind", "line"}, {"parallel", "z"}}}, {"radius", 2.0}, {"body", body}}}});
@@ -4604,12 +4610,16 @@ static void attach_print_fixes(json& notes, const json& suggestions, const CadDo
             steps.push_back(json{{"method", "chamfer"}, {"params", {{"where", json{{"kind", "line"}, {"near", n["at"]}, {"limit", 1}}}, {"distance", 1.5}, {"body", body}}}});
         } else if (kind == "warp_risk" && rot_id) {
             label = "Add mouse ears (disc 10 mm, 0.3 mm)";
+            short_label = "Ears";
+            // the note's other option: round the vertical edges (R 3 mm) so the corners are no longer sharp
+            alt_label = "Round the vertical edges (R 3 mm)";
+            alt_steps.push_back(json{{"method", "fillet"}, {"params", {{"where", json{{"kind", "line"}, {"parallel", "z"}}}, {"radius", 3.0}, {"body", body}}}});
             for (const Vec3d& c : ear_corners) {
                 if (std::abs(c.z() - bed_z) >= 0.1) continue;   // only ears on the bed help
                 steps.push_back(json{{"method", "extrude_circle"}, {"params", {{"plane", "XY"}, {"diameter", 10.0},
                                      {"x", c.x() - mo.x()}, {"y", c.y() - mo.y()}, {"distance", 0.3}, {"boolean", "union"}, {"body", body}}}});
             }
-            if (steps.empty()) continue;   // no corner on the bed: nothing to add
+            if (steps.empty()) { steps = std::move(alt_steps); label = alt_label; short_label.clear(); alt_steps = json::array(); }   // no corner on the bed: only the rounding is left
         } else if (kind == "tight_pair") {
             if (!n.contains("a") || !n.contains("b") || !n.contains("gap_mm")) continue;
             const int a = n["a"].get<int>(), b = n["b"].get<int>();
@@ -4853,6 +4863,8 @@ static void attach_print_fixes(json& notes, const json& suggestions, const CadDo
             continue;   // no automatic fix for this kind
         }
         n["fix"] = json{{"label", label}, {"steps", std::move(steps)}};
+        if (!short_label.empty()) n["fix"]["short"] = short_label;
+        if (!alt_steps.empty()) n["fix2"] = json{{"label", alt_label}, {"short", "Round"}, {"steps", std::move(alt_steps)}};
     }
 }
 
@@ -7146,9 +7158,11 @@ json action_apply_print_fix(DesignPanel* panel, const json& params)
     else { for (size_t i = 0; i < notes.size(); ++i) if (notes[i].value("kind", std::string()) == kind) { target = int(i); break; } }
     if (target < 0) throw std::runtime_error(index >= 0 ? "no note at that index" : "no note of kind '" + kind + "'");
     const json& n = notes[size_t(target)];
-    if (!n.contains("fix") || !n["fix"].is_object())
-        throw std::runtime_error("note '" + n.value("kind", std::string()) + "' has no automatic fix");
-    const json r = run_print_fix_impl(panel, n["fix"]);
+    const bool alt = params.value("alt", 0) == 1;
+    const char* fkey = alt ? "fix2" : "fix";
+    if (!n.contains(fkey) || !n[fkey].is_object())
+        throw std::runtime_error("note '" + n.value("kind", std::string()) + "' has no automatic " + (alt ? "alternative " : "") + "fix");
+    const json r = run_print_fix_impl(panel, n[fkey]);
     const json an2 = action_analyze_printability(panel, json{{"body", b}});
     json remaining = json::array();
     std::set<std::string> seen;

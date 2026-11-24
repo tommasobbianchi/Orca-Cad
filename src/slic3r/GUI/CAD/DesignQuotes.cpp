@@ -382,7 +382,7 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
 
     // The side list: a collapsible "Print check" panel, top-right of the viewport. The CardModel rows
     // cannot host a resolve + dismiss button pair, so this ImGui panel drives the same note vector.
-    int open_n = 0, fix_click = -1;   // the fix replaces the note vector: run it after the loop, never inside
+    int open_n = 0, fix_click = -1, fix_alt = 0;   // the fix replaces the note vector: run it after the loop, never inside
     for (const PrintNote& n : ns) if (n.open) ++open_n;
     const bool show_profile = its && profile_get && profile_set;   // a body has been checked: the profile section is offered, even when it is clean
     if (open_n > 0 || show_profile) {
@@ -419,17 +419,30 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
                     if (n.has_pin) { wdl->AddCircleFilled(cc, 9.f * em, bc); wdl->AddText(cc - nts * 0.5f, IM_COL32(20, 20, 20, 255), num.c_str()); }
                     else              { wdl->AddCircle(cc, 9.f * em, bc, 0, 1.5f * em); wdl->AddText(cc - nts * 0.5f, bc, num.c_str()); }
                     const bool has_fix = !n.fix_json.empty();
-                    // three equal-width button slots (Fix | OK | X) so the columns line up whether or not a row has a Fix
+                    // equal-width button slots (Fix [Fix 2] | OK | X) so the columns line up whether or not a row has a Fix
                     const float bw = ImGui::CalcTextSize("Fix").x + 2.f * ImGui::GetStyle().FramePadding.x + 4.f * em;
-                    const float text_w = std::max(40.f * em, pw - badge_w - 3.f * (bw + ImGui::GetStyle().ItemSpacing.x) - 36.f * em);
+                    const bool any2 = std::any_of(ns.begin(), ns.end(), [](const PrintNote& p) { return p.open && !p.fix2_json.empty(); });
+                    const float fw = any2 ? ImGui::CalcTextSize("Round").x + 2.f * ImGui::GetStyle().FramePadding.x + 4.f * em : bw;
+                    const int fixslots = any2 ? 2 : 1;
+                    const float text_w = std::max(40.f * em, pw - badge_w - 2.f * (bw + ImGui::GetStyle().ItemSpacing.x) - fixslots * (fw + ImGui::GetStyle().ItemSpacing.x) - 36.f * em);
                     ImGui::Dummy(ImVec2(badge_w, row_h));
                     ImGui::SameLine();
                     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(ImGui::GetStyle().FramePadding.x, 0.f));
                     if (has_fix) {
-                        if (ImGui::Button("Fix", ImVec2(bw, 0.f))) fix_click = i;
+                        const std::string b1 = n.fix2_json.empty() || n.fix_short.empty() ? "Fix" : n.fix_short;
+                        if (ImGui::Button((b1 + "##f1").c_str(), ImVec2(fw, 0.f))) { fix_click = i; fix_alt = 0; }
                         if (ImGui::IsItemHovered() && !n.fix_label.empty()) ImGui::SetTooltip("%s", n.fix_label.c_str());
                     } else
-                        ImGui::Dummy(ImVec2(bw, ImGui::GetFrameHeight()));
+                        ImGui::Dummy(ImVec2(fw, ImGui::GetFrameHeight()));
+                    if (any2) {
+                        ImGui::SameLine();
+                        if (!n.fix2_json.empty()) {
+                            const std::string b2 = (n.fix2_short.empty() ? std::string("Fix 2") : n.fix2_short) + "##f2";
+                            if (ImGui::Button(b2.c_str(), ImVec2(fw, 0.f))) { fix_click = i; fix_alt = 1; }
+                            if (ImGui::IsItemHovered() && !n.fix2_label.empty()) ImGui::SetTooltip("%s", n.fix2_label.c_str());
+                        } else
+                            ImGui::Dummy(ImVec2(fw, ImGui::GetFrameHeight()));
+                    }
                     ImGui::SameLine();
                     if (ImGui::Button("OK", ImVec2(bw, 0.f))) { if (resolve) resolve(i); }
                     ImGui::SameLine();
@@ -492,7 +505,7 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
         ImGui::End();
         ImGui::PopStyleVar();
     }
-    if (fix_click >= 0 && apply_fix) apply_fix(fix_click);
+    if (fix_click >= 0 && apply_fix) apply_fix(fix_click, fix_alt);
 }
 
 } } // namespace Slic3r::GUI
