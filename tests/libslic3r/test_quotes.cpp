@@ -1,6 +1,10 @@
 #include <catch2/catch_all.hpp>
 
 #include <BRepAlgoAPI_Cut.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepPrimAPI_MakePrism.hxx>
+#include <gp_Vec.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
@@ -64,6 +68,23 @@ TEST_CASE("quotes: a fillet reads as a radius, not a diameter", "[CadDocument][q
     REQUIRE(r);
     CHECK(r->text() == "R2.5");
     CHECK_FALSE(r->concave);
+}
+
+TEST_CASE("quotes: a hexagonal pocket reads its side and its depth", "[CadDocument][quotes]")
+{
+    // a nut trap: hexagon of side 3 (across flats 3*sqrt(3)), floor 3 mm above the bottom face of a 40 x 30 x 20 box
+    BRepBuilderAPI_MakePolygon poly;
+    for (int i = 0; i < 6; ++i) poly.Add(gp_Pnt(20 + 3.0 * std::cos(i * M_PI / 3), 15 + 3.0 * std::sin(i * M_PI / 3), -1));
+    poly.Close();
+    const TopoDS_Shape pocket = BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(poly.Wire()).Face(), gp_Vec(0, 0, 4)).Shape();
+    const TopoDS_Shape part   = BRepAlgoAPI_Cut(BRepPrimAPI_MakeBox(40, 30, 20).Shape(), pocket).Shape();
+    const std::vector<Quotes::Quote> q = Quotes::compute(part, 0);
+    const Quotes::Quote* side  = find(q, Quotes::Kind::Linear, 3.0);
+    REQUIRE(side);
+    CHECK(side->text() == "side 3");
+    const auto depth = std::find_if(q.begin(), q.end(), [](const Quotes::Quote& x) { return x.kind == Quotes::Kind::Linear && x.tag == "depth"; });
+    REQUIRE(depth != q.end());
+    CHECK(depth->text() == "depth 3");
 }
 
 TEST_CASE("quotes: format_mm drops the trailing zeros", "[CadDocument][quotes]")

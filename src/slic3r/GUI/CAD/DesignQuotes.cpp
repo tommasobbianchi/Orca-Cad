@@ -198,9 +198,24 @@ void DesignQuoteOverlay::render(ImGuiWrapper& imgui, const Camera& camera, float
         number(q, q.text(), (s0 + s1) * 0.5f);
     }
 
+    // ---- a hexagonal pocket's side and depth: along the edge itself, set a little inside the pocket ------------------------
+    for (const Quotes::Quote& q : qs) {
+        if (q.kind != Quotes::Kind::Linear) continue;
+        const Vec3d o = q.out * q.off, ext = q.out * (q.off * 1.35);
+        ImVec2 s0, s1, e0, e1, x0, x1;
+        if (!proj(q.a + o, s0) || !proj(q.b + o, s1)) continue;
+        if (!proj(q.a + q.out * (0.08 * q.off), e0) || !proj(q.a + ext, x0)) continue;
+        if (!proj(q.b + q.out * (0.08 * q.off), e1) || !proj(q.b + ext, x1)) continue;
+        if (len(s1 - s0) < 14.f * em) continue;
+        dl->AddLine(e0, x0, st.line, st.thin);
+        dl->AddLine(e1, x1, st.line, st.thin);
+        dim_line(dl, s0, s1, st);
+        number(q, q.text(), (s0 + s1) * 0.5f);
+    }
+
     // ---- holes, shafts and rounds: at the end of the cylinder nearer the eye -------------------------------------------
     for (const Quotes::Quote& q : qs) {
-        if (q.kind == Quotes::Kind::Extent || q.spots.empty()) continue;
+        if (q.kind == Quotes::Kind::Extent || q.kind == Quotes::Kind::Linear || q.spots.empty()) continue;
         // the instance nearest the eye (a pattern of holes is dimensioned once)
         const Quotes::Spot* spot = &q.spots.front();
         double              dmin = 1e300;

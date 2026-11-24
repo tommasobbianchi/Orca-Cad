@@ -1,7 +1,17 @@
 #include "Quotes.hpp"
 #include "CadDocument.hpp"
 
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepTools.hxx>
+#include <BRepTools_WireExplorer.hxx>
+#include <BRep_Tool.hxx>
+#include <TopExp.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
+#include <TopoDS_Edge.hxx>
+#include <TopoDS_Vertex.hxx>
+#include <TopoDS_Wire.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepGProp_Face.hxx>
 #include <Bnd_Box.hxx>
@@ -85,6 +95,80 @@ bool cylinder_piece(const TopoDS_Face& face, Piece& out)
     return true;
 }
 
+// A hexagonal pocket or boss: a planar face whose outline (a hexagon, or a hexagon with a slot cut out of one side) has three
+// consecutive equal straight edges meeting at 60 degrees. Quoted once per distinct size: the side of the hexagon, and the depth
+// read off the wall that stands on that side.
+void hexagon_quotes(const TopoDS_Shape& body, int body_index, std::vector<Quote>& out)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape e2f;
+    TopExp::MapShapesAndAncestors(body, TopAbs_EDGE, TopAbs_FACE, e2f);
+    size_t added = 0;
+    for (TopExp_Explorer ex(body, TopAbs_FACE); ex.More() && added < 16; ex.Next()) {
+        const TopoDS_Face face = TopoDS::Face(ex.Current());
+        BRepAdaptor_Surface s(face);
+        if (s.GetType() != GeomAbs_Plane) continue;
+        std::vector<Vec3d>       P;
+        std::vector<TopoDS_Edge> E;
+        bool straight = true;
+        for (BRepTools_WireExplorer we(BRepTools::OuterWire(face), face); we.More(); we.Next()) {
+            BRepAdaptor_Curve c(we.Current());
+            if (c.GetType() != GeomAbs_Line) { straight = false; break; }
+            P.push_back(to_vec(BRep_Tool::Pnt(we.CurrentVertex())));
+            E.push_back(we.Current());
+        }
+        const size_t n = P.size();
+        if (!straight || n < 6 || n > 12) continue;
+        auto edge = [&](size_t i) { return P[(i + 1) % n] - P[i]; };
+        auto turn = [&](size_t i) {
+            const Vec3d a = edge(i).normalized(), b = edge((i + 1) % n).normalized();
+            return std::acos(std::max(-1.0, std::min(1.0, a.dot(b)))) * 180.0 / kPi;
+        };
+        for (size_t i = 0; i < n; ++i) {
+            const size_t j = (i + 1) % n, k = (i + 2) % n;
+            const double L = edge(i).norm();
+            if (L < 0.2 || std::abs(edge(j).norm() - L) > 1e-3 || std::abs(edge(k).norm() - L) > 1e-3) continue;
+            if (std::abs(turn(i) - 60.0) > 1.0 || std::abs(turn(j) - 60.0) > 1.0) continue;
+            // edge j is a side of the hexagon
+            const bool seen = std::any_of(out.begin(), out.end(), [&](const Quote& q) { return q.kind == Kind::Linear && q.tag == "side" && std::abs(q.value - L) < 1e-4; });
+            if (seen) break;
+            const Vec3d fn  = to_vec(s.Plane().Axis().Direction());
+            const Vec3d mid = 0.5 * (P[j] + P[k]);
+            Vec3d centre = Vec3d::Zero();
+            for (const Vec3d& p : P) centre += p;
+            centre /= double(n);
+            Vec3d in = centre - mid;
+            in -= fn * in.dot(fn);
+            if (in.norm() < 1e-9) break;
+            in.normalize();
+            Quote side;
+            side.kind = Kind::Linear; side.tag = "side"; side.value = L; side.body = body_index;
+            side.a = P[j]; side.b = P[k]; side.out = in; side.off = 0.2 * L;
+            out.push_back(side);
+            ++added;
+            // the wall that stands on that edge gives the depth
+            TopoDS_Face wall;
+            bool have = false;
+            for (const TopoDS_Shape& f : e2f.FindFromKey(E[j]))
+                if (!have && !f.IsSame(face)) { wall = TopoDS::Face(f); have = true; }
+            if (have) {
+                double lo = 1e300, hi = -1e300;
+                for (TopExp_Explorer ve(wall, TopAbs_VERTEX); ve.More(); ve.Next()) {
+                    const double c = (to_vec(BRep_Tool::Pnt(TopoDS::Vertex(ve.Current()))) - mid).dot(fn);
+                    lo = std::min(lo, c); hi = std::max(hi, c);
+                }
+                const double far = std::abs(lo) > std::abs(hi) ? lo : hi;   // the end away from the floor
+                if (std::abs(far) > 0.05) {
+                    Quote depth;
+                    depth.kind = Kind::Linear; depth.tag = "depth"; depth.value = std::abs(far); depth.body = body_index;
+                    depth.a = mid; depth.b = mid + fn * far; depth.out = in; depth.off = 0.2 * L;
+                    out.push_back(depth);
+                }
+            }
+            break;
+        }
+    }
+}
+
 } // namespace
 
 std::string format_mm(double v)
@@ -92,9 +176,10 @@ std::string format_mm(double v)
     char buf[48];
     std::snprintf(buf, sizeof buf, "%.2f", v);
     std::string s = buf;
-    if (s.find('.') != std::string::npos) {
+    // snprintf writes the decimal separator of the current locale: a comma under Italian. Strip the zeros after either.
+    if (s.find_first_of(".,") != std::string::npos) {
         while (s.back() == '0') s.pop_back();
-        if (s.back() == '.') s.pop_back();
+        if (s.back() == '.' || s.back() == ',') s.pop_back();
     }
     return s == "-0" ? "0" : s;
 }
@@ -105,6 +190,7 @@ std::string Quote::text() const
     case Kind::Extent:   return format_mm(value);
     case Kind::Diameter: return (count() > 1 ? std::to_string(count()) + "\xC3\x97 " : std::string()) + "\xC3\x98" + format_mm(2.0 * value);
     case Kind::Radius:   return (count() > 1 ? std::to_string(count()) + "\xC3\x97 " : std::string()) + "R" + format_mm(value);
+    case Kind::Linear:   return tag + " " + format_mm(value);
     }
     return {};
 }
@@ -172,6 +258,7 @@ std::vector<Quote> compute(const TopoDS_Shape& body, int body_index)
     constexpr size_t kMaxSized = 24;   // a body with more sizes than this is a mesh in disguise
     if (sized.size() > kMaxSized) sized.resize(kMaxSized);
     for (Quote& q : sized) out.push_back(std::move(q));
+    hexagon_quotes(body, body_index, out);
     return out;
 }
 

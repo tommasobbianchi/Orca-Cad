@@ -20,7 +20,8 @@ namespace Quotes {
 enum class Kind {
     Extent,     // the overall size along one axis: `a` and `b` are the corners of the body's box, `axis` the direction
     Diameter,   // a hole or a shaft: a full cylinder
-    Radius      // a fillet or a round: part of a cylinder
+    Radius,     // a fillet or a round: part of a cylinder
+    Linear      // a hexagonal pocket (a nut trap): one side of the hexagon, and the depth of the pocket. `a`..`b` is the length measured
 };
 
 // One place the same quote applies. The ends of the cylinder's axis, and the middle of the arc at each end (what a radius
@@ -40,8 +41,11 @@ struct Quote {
     bool              concave{false};
     int               body{-1};
     int               feature{-1};   // the feature that drives the value, or -1: the quote is shown but cannot be edited
+    Vec3d             out{0, 0, 0};  // Linear: unit direction, into the pocket, that the dimension line is set off along
+    double            off{0};        // Linear: how far, mm
+    std::string       tag;           // Linear: "side" or "depth", written before the number
 
-    int         count() const { return kind == Kind::Extent ? 1 : int(spots.size()); }
+    int         count() const { return kind == Kind::Extent || kind == Kind::Linear ? 1 : int(spots.size()); }
     // "Ø6", "4× Ø6", "R5", "42.5"
     std::string text() const;
 };
