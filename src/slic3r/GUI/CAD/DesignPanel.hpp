@@ -281,6 +281,7 @@ private:
     void on_add_mate();
     void on_check_interference();
     void auto_print_check();            // after a committed feature: warnings-only print check, silent when clean or when the last run was slow
+    bool      m_print_full{false};      // the notes on show are the full check's (suggestions too), not the automatic warnings-only one
     long long m_auto_check_ms{0};       // duration of the last automatic print check; above 150 ms it stops running by itself (the button still works)
     void on_print_check();              // design-for-print report on the selected body, to the status line; edits nothing
     void on_apply_print_fix(int note_index, int alt = 0);   // run the Print check note's automatic fix (Fix button)

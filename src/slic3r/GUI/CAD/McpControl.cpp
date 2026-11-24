@@ -3647,7 +3647,7 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
         notes.push_back(std::move(j));
     };
     auto to_model_dir = [&](const Vec3d& d) { return rot.transpose() * d; };   // a direction: rotate by, no translation
-    auto num = [](double v) { std::ostringstream os; os.imbue(std::locale::classic()); os.precision(3); os << v; return os.str(); };
+    auto num = [](double v) { std::ostringstream os; os.imbue(std::locale::classic()); os.precision(3); if (std::abs(v) >= 1000) os << std::llround(v); else os << v; return os.str(); };
 
     // Tip 25: print orientation. The six axis-aligned ways up, ranked by overhang area (bed contact breaks ties).
     struct Ori { Vec3d up; double over, bed, h; };
@@ -4930,7 +4930,7 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
     const double layer_h = params.value("layer_h", doc.variable_value("print_layer_h", 0.4));   // print profile (R1) when the call omits it
     bool layer_done = false;
     int small_marked = 0;
-    auto num = [](double v) { std::ostringstream os; os.imbue(std::locale::classic()); os.precision(3); os << v; return os.str(); };
+    auto num = [](double v) { std::ostringstream os; os.imbue(std::locale::classic()); os.precision(3); if (std::abs(v) >= 1000) os << std::llround(v); else os << v; return os.str(); };
     json notes = json::array();   // the issues that have a place on the part: the viewport pins each one there (model frame)
     auto to_model = [&](const Vec3d& p) { return Vec3d(rot_c + rot.transpose() * (p - rot_c)); };
     auto to_model_dir = [&](const Vec3d& d) { return rot.transpose() * d; };   // a direction: rotate only, no translation

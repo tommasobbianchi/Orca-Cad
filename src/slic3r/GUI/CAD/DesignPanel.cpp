@@ -6405,6 +6405,7 @@ void DesignPanel::on_print_check()
     bool clean = false;
     std::string text;
     std::vector<PrintNote> pins;
+    m_print_full = true;
     try { text = print_check_summary(this, b, clean, false, &pins); }
     catch (const std::exception& e) { set_status(StatusKind::Error, wxString::FromUTF8(e.what())); return; }
     if (m_viewport)
@@ -6423,6 +6424,7 @@ void DesignPanel::auto_print_check()
     bool clean = true;
     std::string text;
     std::vector<PrintNote> pins;
+    m_print_full = false;
     try { text = print_check_summary(this, b, clean, true, &pins); }
     catch (...) { if (m_viewport) m_viewport->set_print_notes({}); return; }   // a body that cannot be analysed (surface, sheet) is not a problem to report here
     if (m_viewport)
@@ -6446,10 +6448,12 @@ void DesignPanel::on_apply_print_fix(int note_index, int alt)
     try { fix = json::parse(fix_json); }
     catch (...) { set_status(StatusKind::Error, _L("The fix data is invalid")); return; }
     if (fix.is_array()) fix = json{{"steps", fix}, {"label", fix_label}};   // PrintNote keeps only the steps array
+    const bool full = m_print_full;   // read it first: the fix's own rebuild runs the automatic check, which clears it
     try {
         const json r = run_print_fix(this, fix);
         refresh_tree();
-        auto_print_check();
+        // after a Fix, show the same kind of list as before it: a full check keeps its suggestions
+        if (full) on_print_check(); else auto_print_check();
         set_status(StatusKind::Info, wxString::Format(_L("Fixed: %s"), wxString::FromUTF8(r.value("applied_label", fix_label))));
     } catch (const std::exception& e) {
         set_status(StatusKind::Error, wxString::FromUTF8(e.what()));
