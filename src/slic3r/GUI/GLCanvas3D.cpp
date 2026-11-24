@@ -10510,8 +10510,13 @@ void GLCanvas3D::_follow_section_target()
 {
     Vec3d n, p;
     std::string name;
-    if (!m_section_target || !m_section_target(n, p, name) || n.isZero())
+    if (!m_section_target || !m_section_target(n, p, name) || n.isZero()) {
+        // Nothing picked and nothing cut (Reset, a new document): forget the last pick, so that
+        // picking the same face again cuts again. Not while the slider is being dragged through 0.
+        if (!is_section_view_active() && !ImGui::IsMouseDown(ImGuiMouseButton_Left))
+            m_section_target_name.clear();
         return;
+    }
     n.normalize();
     if (!m_section_target_name.empty() && n.isApprox(m_section_target_n) && (p - m_section_target_p).norm() < 1e-6)
         return;
