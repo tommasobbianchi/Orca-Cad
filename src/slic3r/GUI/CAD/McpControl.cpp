@@ -809,7 +809,7 @@ json describe_tools()
         compact_tool("rename_feature", "Rename a feature in the history.", {{"feature", "integer", "feature index"}, {"name", "string", "new name"}}),
         compact_tool("move_feature", "Move a feature to another history position; stops where a dependency (a sketch below its consumer) forbids the next step.", {{"feature", "integer", "feature index"}, {"to", "integer", "destination index"}}),
         compact_tool("thread_to_insert", "Replace an internal metric thread under M6 with a heat-set insert pocket on the same plane and spot; the thread is suppressed, not deleted.", {{"feature", "integer", "feature index of the internal thread"}}),
-        compact_tool("nut_trap", "Hexagonal pocket for a metric nut (ISO 4032 size + print_clear_xy), optionally with a side slot, cut into the target body from a plane or face.", {{"designation", "string", "M2|M2.5|M3|M4|M5|M6|M8"}, {"x", "number", "centre x in the plane"}, {"y", "number", "centre y in the plane"}, {"slot", "number", "mm from the centre along +x to slide the nut in; 0 = none"}, {"plane", "string", "XY|XZ|YZ"}, {"flip", "boolean", "cut the other way"}, {"body", "integer", "default last"}}),
+        compact_tool("nut_trap", "Hexagonal pocket for a metric nut (ISO 4032 size + print_clear_xy), optionally with a side slot, cut into the target body from a plane or face.", {{"designation", "string", "M2|M2.5|M3|M4|M5|M6|M8|#4-40|#6-32|#8-32|#10-24|1/4-20|5/16-18|3/8-16"}, {"x", "number", "centre x in the plane"}, {"y", "number", "centre y in the plane"}, {"slot", "number", "mm from the centre along +x to slide the nut in; 0 = none"}, {"plane", "string", "XY|XZ|YZ"}, {"flip", "boolean", "cut the other way"}, {"body", "integer", "default last"}}),
         compact_tool("suppress", "Suppress (or restore) a feature; downstream features rebuild without it.", {{"feature", "integer", "feature index"}, {"suppressed", "boolean", "default true"}}),
         compact_tool("rollback", "Roll the history back to just after a feature (later ones are kept but not built); -1 restores the full history.", {{"index", "integer", "feature index or -1"}}),
         compact_tool("save", "Save the project to an absolute .3mf path under $HOME or /tmp. The 3MF holds the design recipe (reopens editable) and the bodies as printable objects; the bodies are sent to the plate first when it is empty (mesh:false never, mesh:true always).", {{"path", "string", ""}, {"mesh", "boolean", "commit the bodies as objects (default: when the plate has none)"}}),
@@ -4258,6 +4258,7 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
                 const double lo = std::max(2.0, std::floor(tmin / line_width)), hi = lo + 1.0;
                 add_note("wall_multiple", "suggestion", "Wall " + num(tmin) + " mm is not a whole number of " + num(line_width) + " mm lines: " + num(lo * line_width) + " or "
                          + num(hi * line_width) + " mm slice without gaps or over-fill", tat, to_model_dir(tat_n), {});
+                notes.back()["wall_mm"] = tmin; notes.back()["line_width_mm"] = line_width;
             }
             if (100.0 * off / used > 20.0)
                 suggestions.push_back(json{{"kind", "wall_thickness"}, {"line_width_mm", line_width}, {"off_multiple_pct", 100.0 * off / used},
@@ -4559,6 +4560,22 @@ static void attach_print_fixes(json& notes, const json& suggestions, const CadDo
         } else if (kind == "thread_insert" && n.contains("feature") && n["feature"].is_number_integer()) {
             label = "Replace the thread with a " + n.value("insert", std::string("heat-set")) + " insert pocket";
             steps.push_back(json{{"method", "thread_to_insert"}, {"params", {{"feature", n["feature"].get<int>()}}}});
+        } else if ((kind == "z_height_multiple" || kind == "wall_multiple") && rot_id) {
+            // One blind extrude whose distance IS the measured height / wall owns the dimension: set it to the whole-layer / whole-line value.
+            // Two candidates, or none (a wall made by a pocket or a sketch width), and there is no honest single change: advice only.
+            const bool wall = kind == "wall_multiple";
+            const double cur = wall ? n.value("wall_mm", 0.0) : n.value("height_mm", 0.0);
+            const double lw = n.value("line_width_mm", 0.4);
+            const double target = wall ? std::max(2.0, std::round(cur / lw)) * lw : n.value("target_mm", 0.0);
+            int owner = -1, cnt = 0;
+            for (size_t i = 0; i < doc.features.size(); ++i) {
+                const CadFeature& f = doc.features[i];
+                if (f.type == CadFeatureType::Extrude && f.enabled && f.extrude_end == ExtrudeEnd::Blind && f.mode != BooleanMode::Cut && std::abs(f.distance - cur) < 0.02) { owner = int(i); ++cnt; }
+            }
+            if (cnt != 1 || !(target > 0) || !(cur > 0)) continue;
+            std::ostringstream os; os.imbue(std::locale::classic()); os.precision(6); os << target;
+            label = std::string(wall ? "Set the wall to " : "Set the height to ") + os.str() + " mm";
+            steps.push_back(json{{"method", "set_feature_expr"}, {"params", {{"feature", owner}, {"field", "distance"}, {"expr", os.str()}}}});
         } else if (kind == "elephant_foot" && rot_id) {
             // R9: a 0.3 mm chamfer on the edges that meet the bed, so the squashed first layers have room
             label = "Chamfer the bed edges (0.3 mm)";
@@ -4978,6 +4995,16 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
         if (doc.features[i].type == CadFeatureType::Hole && doc.features[i].hole_bridge_layer_h > 1e-6)
             sacrificial.push_back(json{{"feature", int(i)}, {"kind", "hole bridge layers"}, {"layer_h", doc.features[i].hole_bridge_layer_h}, {"layers", 2}});
     const json extras = dfam_extras(m, doc, ang, params.value("line_width", doc.variable_value("print_line_w", doc.variable_value("print_nozzle", 0.0) > 0.0 ? 1.05 * doc.variable_value("print_nozzle", 0.0) : 0.4)), params.value("clearance", 0.3), params.value("clearance_xy", params.value("clearance", 0.2)), params.value("clearance_z", params.value("clearance", 0.25)), bore_r_max, suggestions, warnings, notes, rot, rot_c);
+    // R6: a height that is not a whole number of layers prints short or with a thin last layer. Judged only when the document or the call sets a layer height.
+    if (doc.variables.count("print_layer_h") || params.contains("layer_h")) {
+        const double k = bb.size().z() / layer_h, r = std::round(k);
+        if (r >= 2 && std::abs(k - r) > 0.05) {
+            std::ostringstream os; os.imbue(std::locale::classic()); os.precision(4);
+            os << "Height " << bb.size().z() << " mm is not a whole number of " << layer_h << " mm layers: " << r * layer_h << " mm prints as designed";
+            notes.push_back(json{{"kind", "z_height_multiple"}, {"severity", "suggestion"}, {"text", os.str()}, {"at", nullptr},
+                                 {"height_mm", bb.size().z()}, {"target_mm", r * layer_h}, {"layer_h", layer_h}});
+        }
+    }
     const bool rot_id = !params.contains("rotate")
         || (jn(params["rotate"], 0) == 0.0 && jn(params["rotate"], 1) == 0.0 && jn(params["rotate"], 2) == 0.0);
     attach_print_fixes(notes, suggestions, doc, b, rot_id, params.value("clearance", 0.3), m.bounding_box().min.z());
@@ -6293,18 +6320,23 @@ json action_thread_to_insert(DesignPanel* panel, const json& params)
     }
 }
 
-// Captive nut trap: a hexagonal pocket for a metric nut, optionally with a slot so the nut slides in from the side after printing
+// Captive nut trap: a hexagonal pocket for a metric or inch nut, optionally with a slot so the nut slides in from the side after printing
 // pauses (or from a face). Nut size per ISO 4032 (width across flats s, thickness m max): M2 4/1.6, M2.5 5/2, M3 5.5/2.4, M4 7/3.2,
 // M5 8/4.7, M6 10/5.2, M8 13/6.8. The pocket is s + 2 x print_clear_xy across the flats and m + print_clear_z deep. The slot runs
 // along +x of the plane for `slot` mm from the centre, as wide as the pocket across flats.
 json action_nut_trap(DesignPanel* panel, const json& params)
 {
     struct Nut { const char* d; double af, m; };
-    static const Nut nuts[] = {{"M2", 4.0, 1.6}, {"M2.5", 5.0, 2.0}, {"M3", 5.5, 2.4}, {"M4", 7.0, 3.2}, {"M5", 8.0, 4.7}, {"M6", 10.0, 5.2}, {"M8", 13.0, 6.8}};
-    const std::string desig = params.value("designation", std::string());
+    // Inch (mm = in x 25.4): #4-40 1/4 x 3/32, #6-32 5/16 x 7/64, #8-32 11/32 x 1/8, #10-24 3/8 x 1/8 (hex machine screw nuts, MS35649 / FF-N-836
+    // as tabulated by McMaster-Carr); 1/4-20 7/16 x 7/32, 5/16-18 1/2 x 17/64, 3/8-16 9/16 x 21/64 (hex nuts, ASME B18.2.2 as tabulated by McMaster-Carr).
+    static const Nut nuts[] = {{"M2", 4.0, 1.6}, {"M2.5", 5.0, 2.0}, {"M3", 5.5, 2.4}, {"M4", 7.0, 3.2}, {"M5", 8.0, 4.7}, {"M6", 10.0, 5.2}, {"M8", 13.0, 6.8},
+                               {"#4-40", 6.350, 2.381}, {"#6-32", 7.938, 2.778}, {"#8-32", 8.731, 3.175}, {"#10-24", 9.525, 3.175},
+                               {"1/4-20", 11.113, 5.556}, {"5/16-18", 12.700, 6.747}, {"3/8-16", 14.288, 8.334}};
+    std::string desig = params.value("designation", std::string());
+    if (desig.size() > 4 && desig.compare(desig.size() - 4, 4, " UNC") == 0) desig.resize(desig.size() - 4);   // "#6-32 UNC" is the hole table's spelling
     const Nut* nut = nullptr;
     for (const Nut& n : nuts) if (desig == n.d) nut = &n;
-    if (!nut) throw std::runtime_error("nut_trap needs 'designation' one of M2, M2.5, M3, M4, M5, M6, M8");
+    if (!nut) throw std::runtime_error("nut_trap needs 'designation' one of M2, M2.5, M3, M4, M5, M6, M8, #4-40, #6-32, #8-32, #10-24, 1/4-20, 5/16-18, 3/8-16");
     const double slot = params.value("slot", 0.0);
     if (slot < 0) throw std::runtime_error("slot must be >= 0");
     CadDocument& doc = panel->mcp_doc();

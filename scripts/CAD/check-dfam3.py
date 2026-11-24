@@ -369,5 +369,57 @@ check(abs((wall_lw() or 0) - 0.63) < 1e-6, "R1: print_nozzle 0.6 gives line widt
 safe("set_variable", name="print_line_w", expr="0.5")
 check(abs((wall_lw() or 0) - 0.5) < 1e-6, "R1: an explicit print_line_w wins over the nozzle (%s)" % wall_lw())
 
+
+# --- R2: inch sizes ---
+fresh()
+box(30, 30, 15)
+v0 = safe("mass_properties", body=0).get("volume")
+r = safe("nut_trap", designation="#6-32 UNC", x=0, y=0, plane="XY")
+af = 7.938 + 0.4
+v1 = safe("mass_properties", body=0).get("volume")
+want = af * af * math.sqrt(3) / 2 * (2.778 + 0.25)
+check(r.get("ok") is True and abs((v0 - v1) - want) < 3.0, "R2: #6-32 nut trap removes %.1f mm3 (got %.1f)" % (want, v0 - v1))
+fresh()
+box(30, 30, 15)
+v0 = safe("mass_properties", body=0).get("volume")
+r = safe("hole_standard", designation="#6-32 insert", x=0, y=0, plane="XY")
+v1 = safe("mass_properties", body=0).get("volume")
+want = math.pi * (4.22 / 2) ** 2 * 7.93
+check(r.get("ok") is True and abs((v0 - v1) - want) < 3.0, "R2: '#6-32 insert' pocket removes %.1f mm3 (got %.1f)" % (want, v0 - v1))
+r = safe("hole_standard", designation="1/4-20 insert", x=5, y=5, plane="XY")
+check("__error__" in r or r.get("ok") is False, "R2 near-miss: 1/4-20 insert is refused (the sheet has no row)")
+
+
+# --- R6 fix: wall and Z-height multiples ---
+fresh()
+call("extrude_rect", width=20, height=10, distance=0.9, plane="XZ")   # a 0.9 mm wall standing in Y
+safe("set_variable", name="print_line_w", expr="0.42")   # the document's line width, which apply_print_fix re-reads
+time.sleep(0.4)
+res = safe("analyze_printability", body=0)
+wn = kind_notes(res, "wall_multiple")
+check(len(wn) == 1 and (wn[0].get("fix") or {}).get("steps"), "R6 fix: a 0.9 mm wall extrude gets a wall_multiple note with a fix (%s)" % len(wn))
+v0 = safe("mass_properties", body=0).get("volume")
+r = safe("apply_print_fix", kind="wall_multiple", body=0)
+time.sleep(0.5)
+v1 = safe("mass_properties", body=0).get("volume")
+check("__error__" not in r and abs(v1 - 20 * 10 * 0.84) < 1.0, "R6 fix: the wall becomes 2 lines = 0.84 mm (volume %.1f, want 168)" % v1)
+
+fresh()
+box(20, 20, 10.07)
+safe("set_variable", name="print_layer_h", expr="0.2")
+zn = kind_notes(safe("analyze_printability", body=0), "z_height_multiple")
+check(len(zn) == 1 and (zn[0].get("fix") or {}).get("steps"), "R6: a 10.07 mm part on 0.2 mm layers gets z_height_multiple with a fix (%s)" % len(zn))
+r = safe("apply_print_fix", kind="z_height_multiple", body=0)
+time.sleep(0.5)
+v1 = safe("mass_properties", body=0).get("volume")
+check("__error__" not in r and abs(v1 - 4000.0) < 1.0, "R6 fix: the height becomes 10.0 mm (volume %.1f, want 4000)" % v1)
+fresh()
+box(20, 20, 10.0)
+safe("set_variable", name="print_layer_h", expr="0.2")
+check(len(kind_notes(safe("analyze_printability", body=0), "z_height_multiple")) == 0, "R6 near-miss: 10.0 mm on 0.2 mm layers gets none")
+fresh()
+box(20, 20, 10.07)
+check(len(kind_notes(safe("analyze_printability", body=0), "z_height_multiple")) == 0, "R6 near-miss: no layer height set, no judgement")
+
 print("%d failed" % len(fails))
 sys.exit(1 if fails else 0)

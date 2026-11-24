@@ -1267,11 +1267,15 @@ static const HoleStdEntry kHoleStdTable[] = {
 struct InsertEntry { const char* desig; double hole_d; double length_max; };
 static const InsertEntry kInsertTable[] = {
     {"M2", 3.2, 5}, {"M2.5", 3.7, 6}, {"M3", 4.0, 6}, {"M4", 5.3, 8}, {"M5", 6.4, 10}, {"M6", 7.6, 12}, {"M8", 10.2, 16},
+    // The same sheet's inch table ("Inch Heat-Set Insert Specifications"), converted at 25.4 mm/in: hole 0.129 / 0.166 / 0.196 / 0.213 in, longest
+    // listed insert 0.250 / 0.312 / 0.375 / 0.437 in. The sheet has no 1/4-20 row, so there is none here.
+    {"#4-40", 3.28, 6.35}, {"#6-32", 4.22, 7.93}, {"#8-32", 4.98, 9.53}, {"#10-24", 5.41, 11.10},
 };
 
 bool CadDocument::insert_pocket_for_thread(double major_d, std::string& designation, double& hole_d)
 {
     for (const auto& ie : kInsertTable) {
+        if (ie.desig[0] != 'M') continue;   // inch sizes are not matched by a metric thread diameter
         const double nominal = std::atof(ie.desig + 1);   // "M2.5" -> 2.5
         if (nominal < 6.0 && std::abs(nominal - major_d) < 0.05) { designation = ie.desig; hole_d = ie.hole_d; return true; }
     }
@@ -1319,7 +1323,9 @@ int CadDocument::add_hole_standard(const std::string& designation, int style, bo
 {
     static const std::string kIns = " insert";
     if (designation.size() > kIns.size() && designation.compare(designation.size() - kIns.size(), kIns.size(), kIns) == 0) {
-        const std::string base = designation.substr(0, designation.size() - kIns.size());
+        std::string base = designation.substr(0, designation.size() - kIns.size());
+        static const std::string kUnc = " UNC";   // "#6-32 UNC insert" is the hole table's spelling of "#6-32 insert"
+        if (base.size() > kUnc.size() && base.compare(base.size() - kUnc.size(), kUnc.size(), kUnc) == 0) base.resize(base.size() - kUnc.size());
         for (const auto& ie : kInsertTable)
             if (base == ie.desig)
                 return add_hole_styled(ie.hole_d, depth > 0 ? depth : ie.length_max, false, x, y, plane, 0, 0, 0, 0, 0, designation, name);
