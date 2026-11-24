@@ -1259,17 +1259,20 @@ static const HoleStdEntry kHoleStdTable[] = {
     {"5/16-18 UNC",  8.4, 13.5,  8.6, 16.1, 82},
     {"3/8-16 UNC",  10.1, 15.9, 10.2, 19.4, 82},
 };
-// Heat-set insert pockets: hole diameter and insert length (max of the listed range) per metric size.
+// Heat-set insert pockets: hole diameter and the listed insert length range per size.
 // Source: Albany County Fasteners, "Heat-Set Insert Specifications" (metric table, (c) 2025,
 // www.albanycountyfasteners.com/media/64/3d/5a/1764619189/heat-set-insert-specs.pdf), a distributor sheet, not an insert
 // maker's drawing: confirm against the maker's datasheet for the insert in hand. It states no melt chamber or lead-in,
-// so none is built; `depth` on the call overrides the default of the longest listed insert.
-struct InsertEntry { const char* desig; double hole_d; double length_max; };
+// so none is built. The default pocket depth is the SHORTEST listed insert (an insert is not pressed in all the way
+// to a longer one's depth); `depth` on the call overrides it for a longer insert. The sheet's metric table stops at M8.
+struct InsertEntry { const char* desig; double hole_d; double length_min; double length_max; };
 static const InsertEntry kInsertTable[] = {
-    {"M2", 3.2, 5}, {"M2.5", 3.7, 6}, {"M3", 4.0, 6}, {"M4", 5.3, 8}, {"M5", 6.4, 10}, {"M6", 7.6, 12}, {"M8", 10.2, 16},
-    // The same sheet's inch table ("Inch Heat-Set Insert Specifications"), converted at 25.4 mm/in: hole 0.129 / 0.166 / 0.196 / 0.213 in, longest
-    // listed insert 0.250 / 0.312 / 0.375 / 0.437 in. The sheet has no 1/4-20 row, so there is none here.
-    {"#4-40", 3.28, 6.35}, {"#6-32", 4.22, 7.93}, {"#8-32", 4.98, 9.53}, {"#10-24", 5.41, 11.10},
+    {"M2", 3.2, 3, 5}, {"M2.5", 3.7, 3.5, 6}, {"M3", 4.0, 4, 6}, {"M4", 5.3, 5, 8}, {"M5", 6.4, 6, 10}, {"M6", 7.6, 8, 12}, {"M8", 10.2, 10, 16},
+    // The same sheet's inch table ("Inch Heat-Set Insert Specifications"), converted at 25.4 mm/in. Hole / shortest / longest listed length in inches:
+    // #2-56 0.107 / 0.125 / 0.187, #4-40 0.129 / 0.187 / 0.250, #6-32 0.166 / 0.250 / 0.312, #8-32 0.196 / 0.250 / 0.375,
+    // #10-24 and #10-32 0.213 / 0.312 / 0.437, 1/4-20 0.323 / 0.375 / 0.500.
+    {"#2-56", 2.72, 3.18, 4.75}, {"#4-40", 3.28, 4.75, 6.35}, {"#6-32", 4.22, 6.35, 7.93}, {"#8-32", 4.98, 6.35, 9.53},
+    {"#10-24", 5.41, 7.93, 11.10}, {"#10-32", 5.41, 7.93, 11.10}, {"1/4-20", 8.20, 9.53, 12.70},
 };
 
 bool CadDocument::insert_pocket_for_thread(double major_d, std::string& designation, double& hole_d)
@@ -1328,7 +1331,7 @@ int CadDocument::add_hole_standard(const std::string& designation, int style, bo
         if (base.size() > kUnc.size() && base.compare(base.size() - kUnc.size(), kUnc.size(), kUnc) == 0) base.resize(base.size() - kUnc.size());
         for (const auto& ie : kInsertTable)
             if (base == ie.desig)
-                return add_hole_styled(ie.hole_d, depth > 0 ? depth : ie.length_max, false, x, y, plane, 0, 0, 0, 0, 0, designation, name);
+                return add_hole_styled(ie.hole_d, depth > 0 ? depth : ie.length_min, false, x, y, plane, 0, 0, 0, 0, 0, designation, name);
         throw std::runtime_error(format(_u8L("unknown heat-set insert size \"%1%\""), base));
     }
     const HoleStdEntry* e = hole_std_lookup(designation);

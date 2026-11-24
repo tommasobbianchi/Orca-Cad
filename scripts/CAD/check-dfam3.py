@@ -99,8 +99,8 @@ v0 = safe("mass_properties", body=0).get("volume")
 r = safe("hole_standard", designation="M3 insert", x=0, y=0, plane="XY")
 check(r.get("ok") is True, "R2: hole_standard 'M3 insert' runs (%s)" % (r.get("__error__") or "ok"))
 v1 = safe("mass_properties", body=0).get("volume")
-check(isinstance(v0, (int, float)) and isinstance(v1, (int, float)) and abs((v0 - v1) - 3.14159265 * 2.0 * 2.0 * 6.0) < 3.0,
-      "R2: pocket removes pi*2^2*6 = 75.4 mm3 (got %s)" % (None if v0 is None or v1 is None else round(v0 - v1, 1)))
+check(isinstance(v0, (int, float)) and isinstance(v1, (int, float)) and abs((v0 - v1) - 3.14159265 * 2.0 * 2.0 * 4.0) < 3.0,
+      "R2: pocket removes pi*2^2*4 = 50.3 mm3 (got %s)" % (None if v0 is None or v1 is None else round(v0 - v1, 1)))
 r = safe("hole_standard", designation="M7 insert", x=5, y=5, plane="XY")
 check("__error__" in r or r.get("ok") is False, "R2 near-miss: unknown insert size is refused")
 
@@ -334,8 +334,8 @@ r = safe("apply_print_fix", kind="thread_insert", body=0)
 time.sleep(0.5)
 check("__error__" not in r, "R2 fix: apply_print_fix thread_insert runs (%s)" % (r.get("__error__") or "ok"))
 v_ins = safe("mass_properties", body=0).get("volume")
-check(abs((v0 - v_ins) - 75.4) < 3.0 and abs((v0 - v_thread) - (v0 - v_ins)) > 10,
-      "R2 fix: the thread is replaced by the 75.4 mm3 insert pocket (thread removed %.1f, now %.1f)" % (v0 - v_thread, v0 - v_ins))
+check(abs((v0 - v_ins) - 50.3) < 3.0 and abs((v0 - v_thread) - (v0 - v_ins)) > 10,
+      "R2 fix: the thread is replaced by the 50.3 mm3 insert pocket (thread removed %.1f, now %.1f)" % (v0 - v_thread, v0 - v_ins))
 safe("undo"); time.sleep(0.3)
 check(abs(safe("mass_properties", body=0).get("volume") - v_thread) < 1.0, "R2 fix: undo brings the thread back in one step")
 
@@ -385,10 +385,20 @@ box(30, 30, 15)
 v0 = safe("mass_properties", body=0).get("volume")
 r = safe("hole_standard", designation="#6-32 insert", x=0, y=0, plane="XY")
 v1 = safe("mass_properties", body=0).get("volume")
-want = math.pi * (4.22 / 2) ** 2 * 7.93
+want = math.pi * (4.22 / 2) ** 2 * 6.35
 check(r.get("ok") is True and abs((v0 - v1) - want) < 3.0, "R2: '#6-32 insert' pocket removes %.1f mm3 (got %.1f)" % (want, v0 - v1))
-r = safe("hole_standard", designation="1/4-20 insert", x=5, y=5, plane="XY")
-check("__error__" in r or r.get("ok") is False, "R2 near-miss: 1/4-20 insert is refused (the sheet has no row)")
+r = safe("hole_standard", designation="M10 insert", x=5, y=5, plane="XY")
+check("__error__" in r or r.get("ok") is False, "R2 near-miss: M10 insert is refused (the sheet's metric table stops at M8)")
+r = safe("hole_standard", designation="1/4-20 insert", x=-8, y=-8, plane="XY")
+check(r.get("ok") is True, "R2: '1/4-20 insert' is on the sheet and runs (%s)" % (r.get("__error__") or "ok"))
+# every metric nut size, from M1.6 to M24: the pocket is across-flats + 2*0.2 wide and nut-thickness + 0.25 deep
+for d, af, m in (("M1.6", 3.2, 1.3), ("M10", 16, 8.4), ("M12", 18, 10.8), ("M14", 21, 12.8), ("M16", 24, 14.8), ("M20", 30, 18.0), ("M24", 36, 21.5)):
+    fresh()
+    safe("extrude_rect", width=60, height=60, distance=40)
+    time.sleep(0.4)
+    r = safe("nut_trap", designation=d, x=0, y=0, plane="XY")
+    check(r.get("ok") is True and abs(r.get("across_flats_mm", 0) - (af + 0.4)) < 1e-6 and abs(r.get("depth_mm", 0) - (m + 0.25)) < 1e-6,
+          "R2: nut_trap %s -> AF %.1f depth %.2f (%s)" % (d, af + 0.4, m + 0.25, r.get("__error__") or r.get("error") or "ok"))
 
 
 # --- R6 fix: wall and Z-height multiples ---

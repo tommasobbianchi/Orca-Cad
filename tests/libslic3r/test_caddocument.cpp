@@ -11623,15 +11623,15 @@ TEST_CASE("hole: heat-set insert pocket from the table", "[CadDocument][hole][df
     doc.add_extrude(sk, 15.0, false, BooleanMode::New, "Extrude");
     REQUIRE(doc.recompute());
     const double v_box = doc.body_mass_properties(0).volume;
-    // M3: pocket 4.0 mm, deep enough for the longest listed insert (6 mm) when no depth is given
+    // M3: pocket 4.0 mm, as deep as the shortest listed insert (4 mm) when no depth is given
     int h = doc.add_hole_standard("M3 insert", 0, false, 0.0, 0.0, 0.0, SketchPlane::XY(), "Insert");
     REQUIRE(doc.features[size_t(h)].hole_diameter == Approx(4.0));
-    REQUIRE(doc.features[size_t(h)].hole_depth == Approx(6.0));
+    REQUIRE(doc.features[size_t(h)].hole_depth == Approx(4.0));
     REQUIRE(doc.features[size_t(h)].hole_standard == "M3 insert");
     REQUIRE_FALSE(doc.features[size_t(h)].hole_through);
     REQUIRE(doc.recompute());
     REQUIRE(doc.error.empty());
-    REQUIRE(doc.body_mass_properties(0).volume == Approx(v_box - M_PI * 2.0 * 2.0 * 6.0).epsilon(0.01));
+    REQUIRE(doc.body_mass_properties(0).volume == Approx(v_box - M_PI * 2.0 * 2.0 * 4.0).epsilon(0.01));
     // explicit depth wins, M5 is 6.4 mm
     int h5 = doc.add_hole_standard("M5 insert", 0, false, 9.0, 8.0, 8.0, SketchPlane::XY(), "Insert");
     REQUIRE(doc.features[size_t(h5)].hole_diameter == Approx(6.4));

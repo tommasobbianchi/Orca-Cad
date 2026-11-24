@@ -809,7 +809,7 @@ json describe_tools()
         compact_tool("rename_feature", "Rename a feature in the history.", {{"feature", "integer", "feature index"}, {"name", "string", "new name"}}),
         compact_tool("move_feature", "Move a feature to another history position; stops where a dependency (a sketch below its consumer) forbids the next step.", {{"feature", "integer", "feature index"}, {"to", "integer", "destination index"}}),
         compact_tool("thread_to_insert", "Replace an internal metric thread under M6 with a heat-set insert pocket on the same plane and spot; the thread is suppressed, not deleted.", {{"feature", "integer", "feature index of the internal thread"}}),
-        compact_tool("nut_trap", "Hexagonal pocket for a metric nut (ISO 4032 size + print_clear_xy), optionally with a side slot, cut into the target body from a plane or face.", {{"designation", "string", "M2|M2.5|M3|M4|M5|M6|M8|#4-40|#6-32|#8-32|#10-24|1/4-20|5/16-18|3/8-16"}, {"x", "number", "centre x in the plane"}, {"y", "number", "centre y in the plane"}, {"slot", "number", "mm from the centre along +x to slide the nut in; 0 = none"}, {"plane", "string", "XY|XZ|YZ"}, {"flip", "boolean", "cut the other way"}, {"body", "integer", "default last"}}),
+        compact_tool("nut_trap", "Hexagonal pocket for a metric nut (ISO 4032 size + print_clear_xy), optionally with a side slot, cut into the target body from a plane or face.", {{"designation", "string", "M1.6|M2|M2.5|M3|M4|M5|M6|M8|M10|M12|M14|M16|M20|M24|#2-56|#4-40|#6-32|#8-32|#10-24|#10-32|1/4-20|5/16-18|3/8-16"}, {"x", "number", "centre x in the plane"}, {"y", "number", "centre y in the plane"}, {"slot", "number", "mm from the centre along +x to slide the nut in; 0 = none"}, {"plane", "string", "XY|XZ|YZ"}, {"flip", "boolean", "cut the other way"}, {"body", "integer", "default last"}}),
         compact_tool("suppress", "Suppress (or restore) a feature; downstream features rebuild without it.", {{"feature", "integer", "feature index"}, {"suppressed", "boolean", "default true"}}),
         compact_tool("rollback", "Roll the history back to just after a feature (later ones are kept but not built); -1 restores the full history.", {{"index", "integer", "feature index or -1"}}),
         compact_tool("save", "Save the project to an absolute .3mf path under $HOME or /tmp. The 3MF holds the design recipe (reopens editable) and the bodies as printable objects; the bodies are sent to the plate first when it is empty (mesh:false never, mesh:true always).", {{"path", "string", ""}, {"mesh", "boolean", "commit the bodies as objects (default: when the plate has none)"}}),
@@ -6340,21 +6340,22 @@ json action_thread_to_insert(DesignPanel* panel, const json& params)
 
 // Captive nut trap: a hexagonal pocket for a metric or inch nut, optionally with a slot so the nut slides in from the side after printing
 // pauses (or from a face). Nut size per ISO 4032 (width across flats s, thickness m max): M2 4/1.6, M2.5 5/2, M3 5.5/2.4, M4 7/3.2,
-// M5 8/4.7, M6 10/5.2, M8 13/6.8. The pocket is s + 2 x print_clear_xy across the flats and m + print_clear_z deep. The slot runs
+// M5 8/4.7, M6 10/5.2, M8 13/6.8, M10 16/8.4, M12 18/10.8, M14 21/12.8, M16 24/14.8, M20 30/18, M24 36/21.5 (M1.6 3.2/1.3). The pocket is s + 2 x print_clear_xy across the flats and m + print_clear_z deep. The slot runs
 // along +x of the plane for `slot` mm from the centre, as wide as the pocket across flats.
 json action_nut_trap(DesignPanel* panel, const json& params)
 {
     struct Nut { const char* d; double af, m; };
     // Inch (mm = in x 25.4): #4-40 1/4 x 3/32, #6-32 5/16 x 7/64, #8-32 11/32 x 1/8, #10-24 3/8 x 1/8 (hex machine screw nuts, MS35649 / FF-N-836
     // as tabulated by McMaster-Carr); 1/4-20 7/16 x 7/32, 5/16-18 1/2 x 17/64, 3/8-16 9/16 x 21/64 (hex nuts, ASME B18.2.2 as tabulated by McMaster-Carr).
-    static const Nut nuts[] = {{"M2", 4.0, 1.6}, {"M2.5", 5.0, 2.0}, {"M3", 5.5, 2.4}, {"M4", 7.0, 3.2}, {"M5", 8.0, 4.7}, {"M6", 10.0, 5.2}, {"M8", 13.0, 6.8},
-                               {"#4-40", 6.350, 2.381}, {"#6-32", 7.938, 2.778}, {"#8-32", 8.731, 3.175}, {"#10-24", 9.525, 3.175},
+    static const Nut nuts[] = {{"M1.6", 3.2, 1.3}, {"M2", 4.0, 1.6}, {"M2.5", 5.0, 2.0}, {"M3", 5.5, 2.4}, {"M4", 7.0, 3.2}, {"M5", 8.0, 4.7}, {"M6", 10.0, 5.2}, {"M8", 13.0, 6.8},
+                               {"M10", 16.0, 8.4}, {"M12", 18.0, 10.8}, {"M14", 21.0, 12.8}, {"M16", 24.0, 14.8}, {"M20", 30.0, 18.0}, {"M24", 36.0, 21.5},
+                               {"#2-56", 4.763, 1.588}, {"#10-32", 9.525, 3.175}, {"#4-40", 6.350, 2.381}, {"#6-32", 7.938, 2.778}, {"#8-32", 8.731, 3.175}, {"#10-24", 9.525, 3.175},
                                {"1/4-20", 11.113, 5.556}, {"5/16-18", 12.700, 6.747}, {"3/8-16", 14.288, 8.334}};
     std::string desig = params.value("designation", std::string());
     if (desig.size() > 4 && desig.compare(desig.size() - 4, 4, " UNC") == 0) desig.resize(desig.size() - 4);   // "#6-32 UNC" is the hole table's spelling
     const Nut* nut = nullptr;
     for (const Nut& n : nuts) if (desig == n.d) nut = &n;
-    if (!nut) throw std::runtime_error("nut_trap needs 'designation' one of M2, M2.5, M3, M4, M5, M6, M8, #4-40, #6-32, #8-32, #10-24, 1/4-20, 5/16-18, 3/8-16");
+    if (!nut) throw std::runtime_error("nut_trap needs 'designation' one of M1.6, M2, M2.5, M3, M4, M5, M6, M8, M10, M12, M14, M16, M20, M24, #2-56, #10-32, #4-40, #6-32, #8-32, #10-24, 1/4-20, 5/16-18, 3/8-16");
     const double slot = params.value("slot", 0.0);
     if (slot < 0) throw std::runtime_error("slot must be >= 0");
     CadDocument& doc = panel->mcp_doc();
