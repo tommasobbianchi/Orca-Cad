@@ -4254,7 +4254,7 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
                 warnings.push_back("walls thinner than 2 line widths (" + num(2 * line_width) + " mm); the thinnest is " + num(tmin) + " mm");
                 add_note("thin_wall", "warning", "Wall " + num(tmin) + " mm thick: under 2 line widths (" + num(2 * line_width) + " mm), it will not print solid", tat, to_model_dir(tat_n), thin_tris);
             }
-            if (tmin >= 2.0 * line_width * 0.95 && tmin < 10.0 * line_width && std::abs(tmin / line_width - std::round(tmin / line_width)) > 0.1) {   // thinnest wall more than 0.1 line off a whole number   // R6: name the nearest whole-line walls; a fix only exists when ONE feature owns the wall, so none here
+            if (doc.variable_value("print_multiples", 0.0) > 0.5 && tmin >= 2.0 * line_width * 0.95 && tmin < 10.0 * line_width && std::abs(tmin / line_width - std::round(tmin / line_width)) > 0.1) {   // thinnest wall more than 0.1 line off a whole number   // R6: name the nearest whole-line walls; a fix only exists when ONE feature owns the wall, so none here
                 const double lo = std::max(2.0, std::floor(tmin / line_width)), hi = lo + 1.0;
                 add_note("wall_multiple", "suggestion", "Wall " + num(tmin) + " mm is not a whole number of " + num(line_width) + " mm lines: " + num(lo * line_width) + " or "
                          + num(hi * line_width) + " mm slice without gaps or over-fill", tat, to_model_dir(tat_n), {});
@@ -4996,7 +4996,7 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
             sacrificial.push_back(json{{"feature", int(i)}, {"kind", "hole bridge layers"}, {"layer_h", doc.features[i].hole_bridge_layer_h}, {"layers", 2}});
     const json extras = dfam_extras(m, doc, ang, params.value("line_width", doc.variable_value("print_line_w", doc.variable_value("print_nozzle", 0.0) > 0.0 ? 1.05 * doc.variable_value("print_nozzle", 0.0) : 0.4)), params.value("clearance", 0.3), params.value("clearance_xy", params.value("clearance", 0.2)), params.value("clearance_z", params.value("clearance", 0.25)), bore_r_max, suggestions, warnings, notes, rot, rot_c);
     // R6: a height that is not a whole number of layers prints short or with a thin last layer. Judged only when the document or the call sets a layer height.
-    if (doc.variables.count("print_layer_h") || params.contains("layer_h")) {
+    if (doc.variable_value("print_multiples", 0.0) > 0.5 && (doc.variables.count("print_layer_h") || params.contains("layer_h"))) {
         const double k = bb.size().z() / layer_h, r = std::round(k);
         if (r >= 2 && std::abs(k - r) > 0.05) {
             std::ostringstream os; os.imbue(std::locale::classic()); os.precision(4);

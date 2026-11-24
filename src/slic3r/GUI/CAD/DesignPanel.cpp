@@ -3496,6 +3496,19 @@ DesignPanel::DesignPanel(wxWindow* parent)
     // The Print check toggle and its Fix buttons drive through the panel: the canvas only draws.
     m_viewport->on_print_check_toggle = [this]() { auto_print_check(); };
     m_viewport->on_print_fix_requested = [this](int i) { on_apply_print_fix(i); };
+    m_viewport->print_profile_get = [this](const char* n, double d) { return m_doc.variable_value(n, d); };
+    m_viewport->print_profile_set = [this](const char* n, const std::string& expr) {
+        const std::string name = n;
+        const auto it = m_doc.variables.find(name);
+        if (expr.empty() ? it == m_doc.variables.end() : (it != m_doc.variables.end() && it->second == expr)) return;   // nothing changes
+        m_doc.checkpoint();   // one undo step per edit
+        if (expr.empty()) m_doc.variables.erase(name); else m_doc.variables[name] = expr;
+        bool ok = false;
+        try { ok = m_doc.recompute(); } catch (const std::exception&) {}
+        if (!ok) { m_doc.undo(); set_status(StatusKind::Error, _L("That value could not be applied")); return; }
+        mcp_after_change();
+        auto_print_check();
+    };
 
     // Selection no longer writes the status line: on_sketch_step owns it, says the same thing
     // for Select mode and — unlike this callback, which also fired while an edit-op mirrored its

@@ -203,6 +203,7 @@ check(len(kind_notes(safe("analyze_printability", body=0), "knife_edge")) == 0, 
 # --- R6 / R7 / R9 / R11 / R12 / R13 step 1 ---
 def cup(inner):   # open box with 4 walls of (20 - inner) / 2 mm
     fresh()
+    safe("set_variable", name="print_multiples", expr="1")   # the multiples checks are opt-in
     box(20, 20, 10)
     box(inner, inner, 10)
     safe("transform", body=1, dz=2)
@@ -393,6 +394,7 @@ check("__error__" in r or r.get("ok") is False, "R2 near-miss: 1/4-20 insert is 
 # --- R6 fix: wall and Z-height multiples ---
 fresh()
 call("extrude_rect", width=20, height=10, distance=0.9, plane="XZ")   # a 0.9 mm wall standing in Y
+safe("set_variable", name="print_multiples", expr="1")
 safe("set_variable", name="print_line_w", expr="0.42")   # the document's line width, which apply_print_fix re-reads
 time.sleep(0.4)
 res = safe("analyze_printability", body=0)
@@ -407,6 +409,8 @@ check("__error__" not in r and abs(v1 - 20 * 10 * 0.84) < 1.0, "R6 fix: the wall
 fresh()
 box(20, 20, 10.07)
 safe("set_variable", name="print_layer_h", expr="0.2")
+check(len(kind_notes(safe("analyze_printability", body=0), "z_height_multiple")) == 0, "R6: off by default: no z_height_multiple without print_multiples")
+safe("set_variable", name="print_multiples", expr="1")
 zn = kind_notes(safe("analyze_printability", body=0), "z_height_multiple")
 check(len(zn) == 1 and (zn[0].get("fix") or {}).get("steps"), "R6: a 10.07 mm part on 0.2 mm layers gets z_height_multiple with a fix (%s)" % len(zn))
 r = safe("apply_print_fix", kind="z_height_multiple", body=0)
@@ -416,9 +420,11 @@ check("__error__" not in r and abs(v1 - 4000.0) < 1.0, "R6 fix: the height becom
 fresh()
 box(20, 20, 10.0)
 safe("set_variable", name="print_layer_h", expr="0.2")
+safe("set_variable", name="print_multiples", expr="1")
 check(len(kind_notes(safe("analyze_printability", body=0), "z_height_multiple")) == 0, "R6 near-miss: 10.0 mm on 0.2 mm layers gets none")
 fresh()
 box(20, 20, 10.07)
+safe("set_variable", name="print_multiples", expr="1")
 check(len(kind_notes(safe("analyze_printability", body=0), "z_height_multiple")) == 0, "R6 near-miss: no layer height set, no judgement")
 
 print("%d failed" % len(fails))

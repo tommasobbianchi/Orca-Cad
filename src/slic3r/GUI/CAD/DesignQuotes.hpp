@@ -63,6 +63,10 @@ public:
     std::function<void(int)>                 resolve;   // toggle the grey resolved state
     std::function<void(int)>                 focus;     // focus a pin (a ring around it); the camera does not move
     std::function<void(int)>                 apply_fix; // run the note's automatic fix (Fix button)
+    // The print profile: document variables the checks read (print_nozzle, print_line_w, print_layer_h, print_bed_x/y/z, print_warp_prone,
+    // print_multiples). get returns the value or the fallback when the variable is not defined; set takes an expression, "" removes the variable.
+    std::function<double(const char*, double)>           profile_get;
+    std::function<void(const char*, const std::string&)> profile_set;
 
     // Set by the canvas each frame: the body's display mesh for the red tint and the occlusion ray cast, and the focus ring.
     const indexed_triangle_set* its{nullptr};

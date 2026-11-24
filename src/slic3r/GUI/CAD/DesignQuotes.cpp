@@ -265,7 +265,7 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
     m_hovered = false;
     if (!notes) return;
     std::vector<PrintNote>& ns = notes();
-    if (ns.empty()) return;
+    if (ns.empty() && !(its && profile_get && profile_set)) return;   // nothing to pin and no checked body to hang the profile on
     const Projector proj(camera);
     ImDrawList*     dl = ImGui::GetBackgroundDrawList();
     const float     em = imgui.get_style_scaling();
@@ -369,7 +369,8 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
     // cannot host a resolve + dismiss button pair, so this ImGui panel drives the same note vector.
     int open_n = 0, fix_click = -1;   // the fix replaces the note vector: run it after the loop, never inside
     for (const PrintNote& n : ns) if (n.open) ++open_n;
-    if (open_n > 0) {
+    const bool show_profile = its && profile_get && profile_set;   // a body has been checked: the profile section is offered, even when it is clean
+    if (open_n > 0 || show_profile) {
         const auto& vp = proj.vp;
         const float pw = std::min(560.f * em, float(vp[2]) * 0.7f);
         ImGui::SetNextWindowPos(ImVec2(float(vp[0] + vp[2]) - 8.f * em, float(vp[1] + vp[3]) - 8.f * em), ImGuiCond_Always, ImVec2(1.f, 1.f));   // bottom-right: the top is the ribbon, the right edge the view cube and Select popup
@@ -381,7 +382,7 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
             ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.22f, 0.22f, 0.24f, 1.f));
             ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.28f, 0.28f, 0.30f, 1.f));
             ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.32f, 0.32f, 0.34f, 1.f));
-            const bool hdr_open = ImGui::CollapsingHeader("Print check", ImGuiTreeNodeFlags_DefaultOpen);
+            const bool hdr_open = open_n > 0 && ImGui::CollapsingHeader("Print check", ImGuiTreeNodeFlags_DefaultOpen);
             ImGui::PopStyleColor(3);
             if (hdr_open) {
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.30f, 0.30f, 0.32f, 1.f));
@@ -428,6 +429,49 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
                     ImGui::PopID();
                 }
                 ImGui::PopStyleColor(3);
+            }
+            if (show_profile) {
+                ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.22f, 0.22f, 0.24f, 1.f));
+                ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.28f, 0.28f, 0.30f, 1.f));
+                ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.32f, 0.32f, 0.34f, 1.f));
+                const bool prof_open = ImGui::CollapsingHeader("Print profile");
+                ImGui::PopStyleColor(3);
+                if (prof_open) {
+                    auto fmt = [](double v) { std::ostringstream os; os.imbue(std::locale::classic()); os << v; return os.str(); };
+                    // A value the document does not define yet shows its default, dimmed; typing one defines the variable.
+                    auto num = [&](const char* label, const char* var, double def, double lo, double hi, const char* tip) {
+                        const bool defined = profile_get(var, -1e9) > -1e8;
+                        float v = float(defined ? profile_get(var, def) : def);
+                        if (!defined) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                        ImGui::SetNextItemWidth(90.f * em);
+                        const bool entered = ImGui::InputFloat(label, &v, 0.f, 0.f, "%.2f", ImGuiInputTextFlags_EnterReturnsTrue);
+                        if (!defined) ImGui::PopStyleColor();
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+                        if (entered && v >= lo && v <= hi) profile_set(var, fmt(double(v)));
+                    };
+                    const double nozzle = profile_get("print_nozzle", -1.0);
+                    num("Nozzle (mm)", "print_nozzle", 0.4, 0.1, 2.0, "Nozzle diameter. The default line width follows it (1.05 x nozzle).");
+                    num("Line width (mm)", "print_line_w", nozzle > 0 ? 1.05 * nozzle : 0.4, 0.1, 3.0, "Extrusion line width used by the wall checks.");
+                    num("Layer height (mm)", "print_layer_h", 0.2, 0.04, 1.5, "Layer height: teardrop flats and bridge strips of the holes follow it.");
+                    num("Bed X (mm)", "print_bed_x", 256.0, 10.0, 2000.0, "Bed size for the fits-the-bed check.");
+                    num("Bed Y (mm)", "print_bed_y", 256.0, 10.0, 2000.0, "Bed size for the fits-the-bed check.");
+                    num("Bed Z (mm)", "print_bed_z", 256.0, 10.0, 2000.0, "Build height for the fits-the-bed check.");
+                    auto flag = [&](const char* label, const char* var, const char* tip) {
+                        bool on = profile_get(var, 0.0) > 0.5;
+                        if (ImGui::Checkbox(label, &on)) profile_set(var, on ? "1" : "");
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+                    };
+                    flag("Warp-prone material (ABS, ASA, PC)", "print_warp_prone", "Adds stress-relief slot advice on long flat bases.");
+                    flag("Check wall and height multiples", "print_multiples", "Suggests walls in whole line widths and a height in whole layers. Off by default.");
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.30f, 0.30f, 0.32f, 1.f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.40f, 0.40f, 0.43f, 1.f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.48f, 0.48f, 0.52f, 1.f));
+                    if (ImGui::Button("Reset profile")) {
+                        for (const char* var : {"print_nozzle", "print_line_w", "print_layer_h", "print_bed_x", "print_bed_y", "print_bed_z", "print_warp_prone", "print_multiples"})
+                            profile_set(var, "");
+                    }
+                    ImGui::PopStyleColor(3);
+                }
             }
         }
         ImGui::End();

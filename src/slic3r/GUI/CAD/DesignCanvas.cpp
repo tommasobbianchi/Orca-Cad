@@ -233,6 +233,11 @@ DesignCanvas::DesignCanvas(wxWindow* parent)
         if (m_quotes_on) m_quotes.render(imgui, wxGetApp().plater()->get_camera(), m_canvas->get_scale());   // under the bars: they draw after
         m_print_notes.its = m_print_mesh.empty() ? nullptr : &m_print_mesh.its;
         m_print_notes.aabb = m_print_aabb.get();
+        if (!m_print_notes.profile_get) {
+            m_print_notes.profile_get = [this](const char* n, double d) { return print_profile_get ? print_profile_get(n, d) : d; };
+            m_print_notes.profile_set = [this](const char* n, const std::string& e) { if (print_profile_set) print_profile_set(n, e); request_repaint(); };
+            m_print_notes.notes = [this]() -> std::vector<PrintNote>& { return m_print_note_list; };
+        }
         m_print_notes.focus_index = m_print_focus;
         const auto now = std::chrono::steady_clock::now();
         m_print_notes.focus_active = m_print_focus >= 0 && std::chrono::duration_cast<std::chrono::milliseconds>(now - m_print_focus_at).count() < 2000;
