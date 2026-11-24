@@ -206,11 +206,25 @@ void DesignQuoteOverlay::render(ImGuiWrapper& imgui, const Camera& camera, float
         if (!proj(q.a + o, s0) || !proj(q.b + o, s1)) continue;
         if (!proj(q.a + q.out * (0.08 * q.off), e0) || !proj(q.a + ext, x0)) continue;
         if (!proj(q.b + q.out * (0.08 * q.off), e1) || !proj(q.b + ext, x1)) continue;
-        if (len(s1 - s0) < 14.f * em) continue;
-        dl->AddLine(e0, x0, st.line, st.thin);
-        dl->AddLine(e1, x1, st.line, st.thin);
-        dim_line(dl, s0, s1, st);
-        number(q, q.text(), (s0 + s1) * 0.5f);
+        const bool depth = q.tag == "depth";
+        const bool flat  = len(s1 - s0) < 14.f * em;   // seen end on: no line to draw
+        if (flat && !depth) continue;
+        if (!flat) {
+            dl->AddLine(e0, x0, st.line, st.thin);
+            dl->AddLine(e1, x1, st.line, st.thin);
+            dim_line(dl, s0, s1, st);
+        }
+        if (depth && !flat) { number(q, q.text(), (s0 + s1) * 0.5f); continue; }
+        // The side's number goes just outside the hexagon, so it does not cover the pocket. A depth seen end on (looking
+        // straight down the pocket) has the same anchor, and place_text stacks it under the side.
+        const Vec3d edge_mid = depth ? q.a : Vec3d(0.5 * (q.a + q.b));
+        ImVec2 m, in;
+        if (!proj(edge_mid, m) || !proj(edge_mid + q.out * q.off, in)) continue;
+        const ImVec2 d  = m - in;
+        const float  dn = len(d);
+        const ImVec2 u  = dn > 0.5f ? d * (1.f / dn) : ImVec2(0.f, -1.f);
+        const ImVec2 ts = ImGui::CalcTextSize(q.text().c_str());
+        number(q, q.text(), m + u * (std::abs(u.x) * ts.x * 0.5f + std::abs(u.y) * ts.y * 0.5f + 10.f * em));
     }
 
     // ---- holes, shafts and rounds: at the end of the cylinder nearer the eye -------------------------------------------
