@@ -4361,6 +4361,23 @@ bool DesignSketchTool::is_current_shape(int body, const TopoDS_Shape& sampled) c
     return shape != nullptr && sampled.IsSame(*shape);
 }
 
+// The overlays are drawn outside the volume shaders, so a section view has to trim them here.
+bool DesignSketchTool::clip_segment(Vec3d& a, Vec3d& b) const
+{
+    for (const std::array<double, 4>& p : m_cuts) {
+        const Vec3d  n(p[0], p[1], p[2]);
+        // The tolerance keeps the edges that lie in the cut plane itself.
+        const double fa = n.dot(a) + p[3] + 1e-4, fb = n.dot(b) + p[3] + 1e-4;
+        if (fa < 0. && fb < 0.)
+            return false;
+        if (fa < 0.)
+            a += (b - a) * (fa / (fa - fb));
+        else if (fb < 0.)
+            b += (a - b) * (fb / (fb - fa));
+    }
+    return true;
+}
+
 // View-facing ribbons along a body's polylines (shape coordinates), `hw` either side of the line
 // and moved by `pull` toward the eye, so a line wins the depth test against the faces meeting at
 // it while a face in front of it still hides it.
@@ -4371,7 +4388,9 @@ void DesignSketchTool::append_ribbons(GLModel::Geometry& g, int body, const std:
     unsigned int base = unsigned(g.vertices_count());
     for (const std::vector<Vec3d>& pl : polylines)
         for (size_t s = 1; s < pl.size(); ++s) {
-            const Vec3d a = body_xform_pt(body, pl[s - 1]) + pull, c = body_xform_pt(body, pl[s]) + pull;
+            Vec3d a = body_xform_pt(body, pl[s - 1]), c = body_xform_pt(body, pl[s]);
+            if (!clip_segment(a, c)) continue;
+            a += pull; c += pull;
             Vec3d dir = c - a; if (dir.norm() < 1e-9) continue; dir.normalize();
             Vec3d off = dir.cross(vd);
             if (off.norm() < 1e-9) continue;   // edge seen end-on: a point, nothing to draw
@@ -5196,7 +5215,8 @@ void DesignSketchTool::render_solid_sel(SolidSel kind, const std::vector<Vec3d>&
         GLModel::Geometry g; g.format = { EPT::Triangles, EVL::P3 };
         unsigned int base = 0;
         for (size_t s = 1; s < edge_pts.size(); ++s) {
-            const Vec3d a = edge_pts[s - 1], b = edge_pts[s];
+            Vec3d a = edge_pts[s - 1], b = edge_pts[s];
+            if (!clip_segment(a, b)) continue;
             Vec3d dir = b - a; if (dir.norm() < 1e-9) continue; dir.normalize();
             Vec3d off = dir.cross(vd);
             if (off.norm() < 1e-9) off = dir.cross(cam.get_dir_up());
@@ -5216,7 +5236,7 @@ void DesignSketchTool::render_solid_sel(SolidSel kind, const std::vector<Vec3d>&
             m_solid_edge_model.set_color(cyan);
             m_solid_edge_model.render();
         }
-    } else if (kind == SolidSel::Vertex) {
+    } else if (Vec3d p = vertex_pt, q = vertex_pt; kind == SolidSel::Vertex && clip_segment(p, q)) {
         // A camera-facing square at the picked corner, sized in screen terms (the same
         // 1/zoom trick the edge ribbon uses) so it stays a constant dot at every zoom. A
         // selection you cannot see is not a selection (L5), which is why vertex picking waited
@@ -10936,6 +10956,7 @@ void DesignSketchTool::render(GLCanvas3D& canvas)
     m_dim_label_seq = 0;
     m_label_rects.clear();
     m_render_scale  = canvas.get_scale();
+    m_cuts          = canvas.cut_half_spaces();
     // The open value field is anchored OVER the label it edits, and the label draws on top of
     // it — the same number twice at the same spot. Record which label that is so draw_text can
     // skip exactly it; the shape's other values must stay legible as the chain walks them.

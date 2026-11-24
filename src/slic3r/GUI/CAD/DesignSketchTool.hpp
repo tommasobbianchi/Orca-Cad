@@ -1475,6 +1475,8 @@ private:
     std::vector<double>                          m_body_edges_tol;   // the chord tolerance they were sampled at
     bool                                         m_body_edges_hidden{false};
     void render_body_edges();
+    std::vector<std::array<double, 4>> m_cuts;           // GLCanvas3D::cut_half_spaces() of this frame
+    bool clip_segment(Vec3d& a, Vec3d& b) const;         // trims to the kept side; false when nothing is left
     const TopoDS_Shape* body_shape(int body) const;   // nullptr when there is no such body or it has no shape
     bool is_current_shape(int body, const TopoDS_Shape& sampled) const;   // `sampled` is still the body's shape
     void append_ribbons(GLModel::Geometry& g, int body, const std::vector<std::vector<Vec3d>>& polylines,

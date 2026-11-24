@@ -10537,6 +10537,18 @@ void GLCanvas3D::_follow_section_target()
 }
 #endif
 
+#ifdef SLIC3R_CAD
+std::vector<std::array<double, 4>> GLCanvas3D::cut_half_spaces() const
+{
+    std::vector<std::array<double, 4>> cuts{ _get_volumes_clipping_plane().get_data() };
+    if (m_use_clipping_planes) {   // the Z range, as set_z_range() takes it
+        cuts.push_back({ 0., 0., 1., m_clipping_planes[0].get_data()[3] });
+        cuts.push_back({ 0., 0., -1., m_clipping_planes[1].get_data()[3] });
+    }
+    return cuts;
+}
+#endif
+
 void GLCanvas3D::_render_section_view_panel(const ImVec2& anchor, const ImVec2& pivot)
 {
     if (!m_section_view->panel_open)

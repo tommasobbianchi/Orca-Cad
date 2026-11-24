@@ -1038,6 +1038,9 @@ public:
     void zoom_to_box(const BoundingBoxf3& box) { _zoom_to_box(box); }
     // Section view on the Design tab: the cut is parallel to a face or plane the user picks. The provider answers false while nothing is picked.
     void set_section_target(std::function<bool(Vec3d& normal, Vec3d& point, std::string& name)> f) { m_section_target = std::move(f); }
+    // What the volume shaders cut away right now, for overlays drawn outside them: a point stays
+    // when n.p + d >= 0 holds for every {nx, ny, nz, d}.
+    std::vector<std::array<double, 4>> cut_half_spaces() const;
 private:
     std::function<bool(Vec3d&, Vec3d&, std::string&)> m_section_target;
     std::string m_section_target_name;   // "" = nothing picked yet
