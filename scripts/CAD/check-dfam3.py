@@ -338,5 +338,22 @@ check(abs((v0 - v_ins) - 75.4) < 3.0 and abs((v0 - v_thread) - (v0 - v_ins)) > 1
 safe("undo"); time.sleep(0.3)
 check(abs(safe("mass_properties", body=0).get("volume") - v_thread) < 1.0, "R2 fix: undo brings the thread back in one step")
 
+
+# --- R2: nut trap ---
+fresh()
+box(30, 30, 15)
+v0 = safe("mass_properties", body=0).get("volume")
+r = safe("nut_trap", designation="M3", x=0, y=0, plane="XY")
+check(r.get("ok") is True, "R2: nut_trap M3 runs (%s)" % (r.get("__error__") or r.get("error") or "ok"))
+af = 5.5 + 0.4
+hexa = af * af * math.sqrt(3) / 2   # area of a regular hexagon with flats af apart
+v1 = safe("mass_properties", body=0).get("volume")
+check(abs((v0 - v1) - hexa * (2.4 + 0.25)) < 2.0, "R2: M3 nut trap removes hexagon %.1f mm2 x 2.65 mm = %.1f mm3 (got %.1f)" % (hexa, hexa * 2.65, v0 - v1))
+r = safe("nut_trap", designation="M3", x=0, y=8, plane="XY", slot=14)
+v2 = safe("mass_properties", body=0).get("volume")
+check(r.get("ok") is True and (v1 - v2) > hexa * 2.65, "R2: a slotted trap removes more than the plain hexagon (%.1f)" % (v1 - v2))
+r = safe("nut_trap", designation="M7", x=0, y=0, plane="XY")
+check("__error__" in r or r.get("ok") is False, "R2 near-miss: an unknown nut size is refused")
+
 print("%d failed" % len(fails))
 sys.exit(1 if fails else 0)
