@@ -319,5 +319,24 @@ check("__error__" not in r, "R7 fix: apply_print_fix shelf_underside runs (%s)" 
 vol1 = safe("mass_properties", body=0).get("volume")
 check(vol1 - vol0 > 20, "R7 fix: a 1.5 mm chamfer on the concave join ADDS material (gained %.1f mm3)" % (vol1 - vol0))
 
+
+# --- R2 fix: thread -> insert ---
+fresh()
+box(30, 30, 15)
+v0 = safe("mass_properties", body=0).get("volume")
+safe("thread", radius=1.5, pitch=0.5, height=6, depth=0.3, internal=True, x=0, y=0, plane="XY")
+time.sleep(0.5)
+v_thread = safe("mass_properties", body=0).get("volume")
+tn = kind_notes(safe("analyze_printability", body=0), "thread_insert")
+check(len(tn) == 1 and (tn[0].get("fix") or {}).get("steps"), "R2 fix: an M3 internal thread gets a thread_insert note with a fix (%s)" % (len(tn)))
+r = safe("apply_print_fix", kind="thread_insert", body=0)
+time.sleep(0.5)
+check("__error__" not in r, "R2 fix: apply_print_fix thread_insert runs (%s)" % (r.get("__error__") or "ok"))
+v_ins = safe("mass_properties", body=0).get("volume")
+check(abs((v0 - v_ins) - 75.4) < 3.0 and abs((v0 - v_thread) - (v0 - v_ins)) > 10,
+      "R2 fix: the thread is replaced by the 75.4 mm3 insert pocket (thread removed %.1f, now %.1f)" % (v0 - v_thread, v0 - v_ins))
+safe("undo"); time.sleep(0.3)
+check(abs(safe("mass_properties", body=0).get("volume") - v_thread) < 1.0, "R2 fix: undo brings the thread back in one step")
+
 print("%d failed" % len(fails))
 sys.exit(1 if fails else 0)

@@ -808,6 +808,7 @@ json describe_tools()
         compact_tool("sketch_dimensions", "The dimensions of a committed sketch, in creation order (the index is stable until the sketch is edited), with their kind, value and bound expression. Bind one with set_feature_expr {feature: sketch, field: \"dim:<index>\", expr}.", {{"sketch", "integer", "Sketch feature index"}}),
         compact_tool("rename_feature", "Rename a feature in the history.", {{"feature", "integer", "feature index"}, {"name", "string", "new name"}}),
         compact_tool("move_feature", "Move a feature to another history position; stops where a dependency (a sketch below its consumer) forbids the next step.", {{"feature", "integer", "feature index"}, {"to", "integer", "destination index"}}),
+        compact_tool("thread_to_insert", "Replace an internal metric thread under M6 with a heat-set insert pocket on the same plane and spot; the thread is suppressed, not deleted.", {{"feature", "integer", "feature index of the internal thread"}}),
         compact_tool("suppress", "Suppress (or restore) a feature; downstream features rebuild without it.", {{"feature", "integer", "feature index"}, {"suppressed", "boolean", "default true"}}),
         compact_tool("rollback", "Roll the history back to just after a feature (later ones are kept but not built); -1 restores the full history.", {{"index", "integer", "feature index or -1"}}),
         compact_tool("save", "Save the project to an absolute .3mf path under $HOME or /tmp. The 3MF holds the design recipe (reopens editable) and the bodies as printable objects; the bodies are sent to the plate first when it is empty (mesh:false never, mesh:true always).", {{"path", "string", ""}, {"mesh", "boolean", "commit the bodies as objects (default: when the plate has none)"}}),
@@ -4554,6 +4555,9 @@ static void attach_print_fixes(json& notes, const json& suggestions, const CadDo
             if (n.contains("at") && !n["at"].is_null()) z = jn(n["at"], 2);
             label = "Chamfer the inside corners (2 mm)";
             steps.push_back(json{{"method", "chamfer"}, {"params", {{"where", json{{"kind", "line"}, {"z", z}}}, {"distance", 2.0}, {"body", body}}}});
+        } else if (kind == "thread_insert" && n.contains("feature") && n["feature"].is_number_integer()) {
+            label = "Replace the thread with a " + n.value("insert", std::string("heat-set")) + " insert pocket";
+            steps.push_back(json{{"method", "thread_to_insert"}, {"params", {{"feature", n["feature"].get<int>()}}}});
         } else if (kind == "elephant_foot" && rot_id) {
             // R9: a 0.3 mm chamfer on the edges that meet the bed, so the squashed first layers have room
             label = "Chamfer the bed edges (0.3 mm)";
@@ -6261,6 +6265,33 @@ json action_suppress(DesignPanel* panel, const json& params)
     return json{{"ok", ok}, {"feature", fi}, {"suppressed", suppressed}, {"error", doc.error}};
 }
 
+json action_thread_to_insert(DesignPanel* panel, const json& params)
+{
+    CadDocument& doc = panel->mcp_doc();
+    if (!params.contains("feature") || !params["feature"].is_number_integer()) throw std::runtime_error("thread_to_insert needs 'feature' (index of an internal thread)");
+    const int fi = params["feature"].get<int>();
+    if (fi < 0 || fi >= int(doc.features.size())) throw std::runtime_error("feature index out of range");
+    const CadFeature src = doc.features[size_t(fi)];
+    std::string desig; double pocket = 0;
+    if (src.type != CadFeatureType::Thread || !src.thread_internal || !src.thread_major_nominal || !CadDocument::insert_pocket_for_thread(2.0 * src.thread_radius, desig, pocket))
+        throw std::runtime_error("feature " + std::to_string(fi) + " is not an internal metric thread under M6 that a heat-set insert replaces");
+    doc.checkpoint();
+    try {
+        // the thread is suppressed (not deleted, so it can be restored) and an insert pocket opens on the same plane at the same spot
+        const int h = doc.add_hole_standard(desig + " insert", 0, false, 0.0, src.thread_x, src.thread_y, src.plane, "Insert pocket");
+        doc.features[size_t(h)].target_body = src.target_body;
+        doc.features[size_t(fi)].enabled = false;
+        const bool ok = doc.recompute();
+        if (!ok) { const std::string why = doc.error; doc.undo(); doc.error = why; }
+        panel->mcp_after_change();
+        return json{{"ok", ok}, {"hole_index", h}, {"suppressed", fi}, {"insert", desig}, {"pocket_mm", pocket}, {"error", doc.error}};
+    } catch (const std::exception& ex) {
+        doc.undo();
+        panel->mcp_after_change();
+        return json{{"ok", false}, {"error", ex.what()}};
+    }
+}
+
 json action_rename_feature(DesignPanel* panel, const json& params)
 {
     CadDocument& doc = panel->mcp_doc();
@@ -6887,6 +6918,7 @@ json call_method_core(DesignPanel* panel, const std::string& method, const json&
     if (method == "variables_import")  return action_variables_import(panel, params);
     if (method == "sketch_dimensions") return action_sketch_dimensions(panel, params);
     if (method == "suppress")          return action_suppress(panel, params);
+    if (method == "thread_to_insert")  return action_thread_to_insert(panel, params);
     if (method == "rename_feature")    return action_rename_feature(panel, params);
     if (method == "move_feature")      return action_move_feature(panel, params);
     if (method == "rollback")          return action_rollback(panel, params);
