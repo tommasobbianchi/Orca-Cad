@@ -4707,8 +4707,46 @@ static void attach_print_fixes(json& notes, const json& suggestions, const CadDo
                     std::ostringstream os; os.imbue(std::locale::classic()); os.precision(3);
                     os << "Split across " << "XYZ"[axis] << " at " << best_s << " mm from the low end (" << (L - best_s) << " mm left): the smallest cross-section, " << best_a << " mm2, that keeps both halves in the bed";
                     label = os.str();
-                    steps.push_back(json{{"method", "cut"}, {"params", {{"origin", {org.x(), org.y(), org.z()}}, {"normal", {nrm.x(), nrm.y(), nrm.z()}}, {"keep", "both"}, {"body", body}}}});
+                    const json cut_step = json{{"method", "cut"}, {"params", {{"origin", {org.x(), org.y(), org.z()}}, {"normal", {nrm.x(), nrm.y(), nrm.z()}}, {"keep", "both"}, {"body", body}}}};
+                    bool cut_pushed = false;
                     n["split"] = json{{"axis", std::string(1, "XYZ"[axis])}, {"offset_from_low_mm", best_s}, {"cross_section_mm2", best_a}};
+                    // R13 step 3: alignment dowels. Sockets d + 2 x clear_xy wide (the R3 horizontal clearance, variable print_clear_xy, default 0.2),
+                    // 2 x d deep in each half, and one rod per socket, d wide and shorter by 2 x clear_z so it never bottoms out. Only when the
+                    // cut face is at least 8 mm each way. The `hole` verb with an explicit origin is centred on the plane, so its depth is
+                    // twice the socket depth: each half only has material on its own side.
+                    const int a1 = (axis + 1) % 3, a2 = (axis + 2) % 3;
+                    const double e1 = hi[a1] - lo[a1], e2 = hi[a2] - lo[a2], emin = std::min(e1, e2);
+                    if (emin >= 8.0) {
+                        const double cxy = doc.variable_value("print_clear_xy", 0.2), cz = doc.variable_value("print_clear_z", 0.25);
+                        const double d = std::max(3.0, std::min(8.0, std::floor(0.25 * emin * 2.0) / 2.0));
+                        const double Ld = std::max(2.0 * d, 6.0);
+                        const int a_long = e1 >= e2 ? a1 : a2;
+                        const double e_long = std::max(e1, e2);
+                        std::vector<double> offs;   // offsets from the cut-face centre along the longer in-plane axis
+                        if (e_long >= 4.0 * d) offs = {-0.25 * e_long, 0.25 * e_long}; else offs = {0.0};
+                        // The sockets are drilled BEFORE the cut, straddling the plane in the one body, so no body index of the second half is needed
+                        // (a hole aimed at body 1 inside the same call missed it). A `hole` with an explicit origin/normal drills only toward its
+                        // normal side (measured), so each socket is two holes, one per side, each Ld deep.
+                        for (double o : offs) {
+                            Vec3d off = Vec3d::Zero(); off[a_long] = o;
+                            for (double sgn : {1.0, -1.0}) {
+                                const Vec3d nv = nrm * sgn, hv = std::abs(nv.x()) < 0.9 ? Vec3d(1, 0, 0) : Vec3d(0, 1, 0);   // the frame plane_from builds
+                                const Vec3d xa = (hv - nv * hv.dot(nv)).normalized(), ya = nv.cross(xa);
+                                steps.push_back(json{{"method", "hole"}, {"params", {{"diameter", d + 2.0 * cxy}, {"depth", Ld}, {"origin", {org.x(), org.y(), org.z()}},
+                                                     {"normal", {nv.x(), nv.y(), nv.z()}}, {"x", off.dot(xa)}, {"y", off.dot(ya)}, {"body", body}}}});
+                            }
+                        }
+                        steps.push_back(cut_step); cut_pushed = true;
+                        // one upright rod per socket (it prints standing), parked beside the part
+                        for (size_t k = 0; k < offs.size(); ++k) {
+                            const Vec3d at = Vec3d(hi[0] + 10.0 + (d + 4.0) * double(k), lo[1], lo[2]) - doc.modeling_origin;
+                            steps.push_back(json{{"method", "primitive"}, {"params", {{"shape", "cylinder"}, {"at", {at.x(), at.y(), at.z()}}, {"radius", 0.5 * d},
+                                                 {"height", 2.0 * Ld - 2.0 * cz}, {"boolean", "new"}}}});
+                        }
+                        n["dowels"] = json{{"count", int(offs.size())}, {"diameter_mm", d}, {"socket_diameter_mm", d + 2.0 * cxy}, {"socket_depth_mm", Ld}, {"rod_length_mm", 2.0 * Ld - 2.0 * cz}};
+                        label += "; " + std::to_string(offs.size()) + " dowel(s) d" + [&]{ std::ostringstream o; o.imbue(std::locale::classic()); o << d; return o.str(); }() + " with matching sockets";
+                    }
+                    if (!cut_pushed) steps.push_back(cut_step);
                 }
             }
         } else if (kind == "text_indent") {
@@ -6954,8 +6992,9 @@ json run_print_fix_impl(DesignPanel* panel, const json& fix)
             json r;
             try { r = call_method_core(panel, method, params); }
             catch (const MethodNotFound&) { throw std::runtime_error("unknown fix verb: " + method); }
+            catch (const std::exception& e) { throw std::runtime_error("fix step " + std::to_string(si + 1) + " of " + std::to_string(fix["steps"].size()) + ": " + e.what()); }
             if (!r.is_object() || !r.value("ok", false))
-                throw std::runtime_error(method + ": " + r.value("error", std::string("failed")));
+                throw std::runtime_error("fix step " + std::to_string(si + 1) + " of " + std::to_string(fix["steps"].size()) + " (" + method + " " + params.dump().substr(0, 160) + "): " + r.value("error", std::string("failed")));
             prev_result = r;
             ++applied;
         }

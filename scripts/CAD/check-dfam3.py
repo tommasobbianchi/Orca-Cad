@@ -272,5 +272,31 @@ box(600, 50, 5)
 nn = kind_notes(safe("analyze_printability", body=0), "exceeds_bed")
 check(len(nn) == 1 and not (nn[0].get("fix") or {}).get("steps"), "R13.2 near-miss: a part needing two cuts gets no single-cut fix")
 
+# --- R13 step 3: dowels with sockets ---
+import math as _m
+fresh()
+box(60, 40, 20)
+safe("set_variable", name="print_bed_x", expr="45")
+safe("set_variable", name="print_bed_y", expr="45")   # both ways round, or the part just turns to fit
+res = safe("analyze_printability", body=0)
+nn = kind_notes(res, "exceeds_bed")
+dw = (nn[0].get("dowels") if nn else None) or {}
+check(dw.get("count") == 2 and abs(dw.get("diameter_mm", 0) - 5.0) < 1e-6, "R13.3: a 60 x 40 x 20 cut face gets 2 dowels of d5 (%s)" % dw)
+r = safe("apply_print_fix", kind="exceeds_bed", body=0)
+time.sleep(0.8)
+check("__error__" not in r, "R13.3: the dowel fix runs (%s)" % (r.get("__error__") or "ok"))
+vols = [safe("mass_properties", body=i).get("volume") for i in range(4)]
+print("R13.3 volumes:", vols)
+want_half = 30 * 40 * 20 - 2 * _m.pi * 2.7 ** 2 * 10
+want_rod = _m.pi * 2.5 ** 2 * (20 - 0.5)
+check(all(isinstance(v, (int, float)) for v in vols) and abs(vols[0] - want_half) < 2 and abs(vols[1] - want_half) < 2,
+      "R13.3: each half has two 5.4 mm sockets 10 mm deep (%.1f, %.1f, want %.1f)" % (vols[0] or -1, vols[1] or -1, want_half))
+check(isinstance(vols[2], (int, float)) and abs(vols[2] - want_rod) < 2 and isinstance(vols[3], (int, float)),
+      "R13.3: two rods d5 x 19.5 mm exist (%s, want %.1f)" % (vols[2:], want_rod))
+fresh()
+box(300, 50, 5)
+nn = kind_notes(safe("analyze_printability", body=0), "exceeds_bed")
+check(nn and "dowels" not in nn[0], "R13.3 near-miss: a 5 mm thick cut face (under 8 mm) gets no dowels")
+
 print("%d failed" % len(fails))
 sys.exit(1 if fails else 0)
