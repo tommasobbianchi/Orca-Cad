@@ -298,5 +298,26 @@ box(300, 50, 5)
 nn = kind_notes(safe("analyze_printability", body=0), "exceeds_bed")
 check(nn and "dowels" not in nn[0], "R13.3 near-miss: a 5 mm thick cut face (under 8 mm) gets no dowels")
 
+
+# --- fixes for R9 / R7 ---
+fresh()
+box(30, 30, 10)
+vol0 = safe("mass_properties", body=0).get("volume")
+r = safe("apply_print_fix", kind="elephant_foot", body=0)
+time.sleep(0.5)
+check("__error__" not in r, "R9 fix: apply_print_fix elephant_foot runs (%s)" % (r.get("__error__") or "ok"))
+vol1 = safe("mass_properties", body=0).get("volume")
+check(vol0 - vol1 > 3 and vol0 - vol1 < 10, "R9 fix: 4 bed edges chamfered 0.3 mm remove ~5.4 mm3 in all (lost %.1f)" % (vol0 - vol1))
+
+fresh()
+box(40, 40, 20)
+safe("primitive", shape="box", at=[30, 0, 10], width=20, depth=40, height=3, boolean="union", body=0)
+vol0 = safe("mass_properties", body=0).get("volume")
+r = safe("apply_print_fix", kind="shelf_underside", body=0)
+time.sleep(0.5)
+check("__error__" not in r, "R7 fix: apply_print_fix shelf_underside runs (%s)" % (r.get("__error__") or "ok"))
+vol1 = safe("mass_properties", body=0).get("volume")
+check(vol1 - vol0 > 20, "R7 fix: a 1.5 mm chamfer on the concave join ADDS material (gained %.1f mm3)" % (vol1 - vol0))
+
 print("%d failed" % len(fails))
 sys.exit(1 if fails else 0)

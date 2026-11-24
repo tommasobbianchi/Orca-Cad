@@ -1492,7 +1492,7 @@ std::vector<int> ids_from_where(DesignPanel* panel, const json& params, const ch
     if (doc.bodies.empty()) throw std::runtime_error(std::string(verb) + ": no body");
     json b = params.contains("body") ? params["body"] : json(-1);
     if (b.is_null() || (b.is_number_integer() && b.get<int>() < 0)) b = int(doc.bodies.size()) - 1;   // omitted = the last body, as fillet does
-    const json q = {{"type", type}, {"where", params["where"]}, {"limit", 1000}, {"body", b}};
+    const json q = {{"type", type}, {"where", params["where"]}, {"limit", params["where"].is_object() ? params["where"].value("limit", 1000) : 1000}, {"body", b}};
     const json r = action_select_topology(panel, q);
     std::vector<int> ids;
     for (const json& v : r["ids"]) ids.push_back(v.get<int>());
@@ -4554,6 +4554,14 @@ static void attach_print_fixes(json& notes, const json& suggestions, const CadDo
             if (n.contains("at") && !n["at"].is_null()) z = jn(n["at"], 2);
             label = "Chamfer the inside corners (2 mm)";
             steps.push_back(json{{"method", "chamfer"}, {"params", {{"where", json{{"kind", "line"}, {"z", z}}}, {"distance", 2.0}, {"body", body}}}});
+        } else if (kind == "elephant_foot" && rot_id) {
+            // R9: a 0.3 mm chamfer on the edges that meet the bed, so the squashed first layers have room
+            label = "Chamfer the bed edges (0.3 mm)";
+            steps.push_back(json{{"method", "chamfer"}, {"params", {{"where", json{{"kind", "line"}, {"z", bed_z}}}, {"distance", 0.3}, {"body", body}}}});
+        } else if (kind == "shelf_underside" && rot_id && n.contains("at") && !n["at"].is_null()) {
+            // R7: the nearest edge to the pin is the shelf-to-wall join; a 1.5 mm chamfer there fills the corner so the underside leans at 45 deg
+            label = "Chamfer the shelf join (1.5 mm)";
+            steps.push_back(json{{"method", "chamfer"}, {"params", {{"where", json{{"kind", "line"}, {"near", n["at"]}, {"limit", 1}}}, {"distance", 1.5}, {"body", body}}}});
         } else if (kind == "warp_risk" && rot_id) {
             label = "Add mouse ears (disc 10 mm, 0.3 mm)";
             for (const Vec3d& c : ear_corners) {
