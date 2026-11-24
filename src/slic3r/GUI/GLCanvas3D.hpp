@@ -1036,6 +1036,14 @@ public:
     DesignSketchTool* get_design_sketch_tool() const { return m_design_sketch_tool; }
     // The Design tab frames what it selects itself (DesignCanvas::zoom_to_box), as the Fit button does.
     void zoom_to_box(const BoundingBoxf3& box) { _zoom_to_box(box); }
+    // Section view on the Design tab: the cut is parallel to a face or plane the user picks. The provider answers false while nothing is picked.
+    void set_section_target(std::function<bool(Vec3d& normal, Vec3d& point, std::string& name)> f) { m_section_target = std::move(f); }
+private:
+    std::function<bool(Vec3d&, Vec3d&, std::string&)> m_section_target;
+    std::string m_section_target_name;   // "" = nothing picked yet
+    Vec3d       m_section_target_n{ Vec3d::Zero() }, m_section_target_p{ Vec3d::Zero() };
+    void _follow_section_target();
+public:
 #endif
     void enable_dynamic_background(bool enable) { m_dynamic_background_enabled = enable; }
     void enable_labels(bool enable) { m_labels.enable(enable); }
@@ -1496,7 +1504,7 @@ private:
     void _render_assemble_view_toolbar() const;
     void _render_return_toolbar() const;
     void _render_canvas_toolbar();
-    void _render_section_view_panel(const ImVec2& bottom_left);
+    void _render_section_view_panel(const ImVec2& anchor, const ImVec2& pivot);
     void _render_separator_toolbar_right() const;
     void _render_separator_toolbar_left() const;
     void _render_collapse_toolbar() const;

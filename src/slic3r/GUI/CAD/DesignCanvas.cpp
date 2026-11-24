@@ -1413,6 +1413,11 @@ bool DesignCanvas::toggle_axes()
     return on;
 }
 
+void DesignCanvas::set_section_target(std::function<bool(Vec3d&, Vec3d&, std::string&)> f)
+{
+    if (m_canvas) m_canvas->set_section_target(std::move(f));
+}
+
 void DesignCanvas::set_section_plane(bool on, double z, bool keep_upper)
 {
     m_section_on = on;

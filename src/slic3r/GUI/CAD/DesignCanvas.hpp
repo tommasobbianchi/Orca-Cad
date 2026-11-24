@@ -365,6 +365,8 @@ public:
     // Section views (non-destructive): the panel owns the named "Section View N" list; the canvas
     // just applies/clears one horizontal clip at a time. model_mid_z() is the default cut height.
     void   set_section_plane(bool on, double z, bool keep_upper = false);
+    // The face or plane the canvas Section view panel cuts parallel to (see GLCanvas3D::set_section_target).
+    void   set_section_target(std::function<bool(Vec3d& normal, Vec3d& point, std::string& name)> f);
     double model_mid_z() const;
 
     // Dimension tool: act on the current sketch selection.

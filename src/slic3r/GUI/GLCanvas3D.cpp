@@ -10294,7 +10294,11 @@ void GLCanvas3D::_render_canvas_toolbar()
             align_section_view_to_camera();
         imgui.tooltip(_L("Section view"), ImGui::GetFontSize() * 20.0f);
     }
-    const ImVec2 section_panel_pos = ImGui::GetItemRectMin() - ImVec2(0.f, spacing.y);
+    // Above the button when the column is at the bottom; beside it (inner side, hanging down) when it is at the top.
+    const ImVec2 sec_min = ImGui::GetItemRectMin(), sec_max = ImGui::GetItemRectMax();
+    const ImVec2 section_panel_pivot(at_right ? 1.f : 0.f, at_bottom ? 1.f : 0.f);
+    const ImVec2 section_panel_pos = at_bottom ? ImVec2(at_right ? sec_max.x : sec_min.x, sec_min.y - spacing.y)
+                                               : ImVec2(at_right ? sec_min.x - spacing.x : sec_max.x + spacing.x, sec_min.y);
 
     ImGui::Dummy({ 0, spacing.y});
 
@@ -10303,7 +10307,11 @@ void GLCanvas3D::_render_canvas_toolbar()
 
     if (ImGui::ImageButton3(m_normal_id, m_hover_id, btn_size)) {
         if(!ImGui::IsPopupOpen("CanvasToolbarMenu")){
-            ImGui::SetNextWindowPos(ImVec2(pos[0] + padding.x, pos[1] - padding.y - (zoom_btn ? (btn_size.y + spacing.y) : 0.f)), ImGuiCond_Always, ImVec2(0, 1)); // pivot bottom-left
+            const ImVec2 bmin = ImGui::GetItemRectMin(), bmax = ImGui::GetItemRectMax();
+            if (at_bottom)
+                ImGui::SetNextWindowPos(ImVec2(at_right ? bmax.x : bmin.x, pos[1] - padding.y - (zoom_btn ? (btn_size.y + spacing.y) : 0.f)), ImGuiCond_Always, ImVec2(at_right ? 1.f : 0.f, 1.f));
+            else
+                ImGui::SetNextWindowPos(ImVec2(at_right ? bmin.x - spacing.x : bmax.x + spacing.x, bmin.y), ImGuiCond_Always, ImVec2(at_right ? 1.f : 0.f, 0.f));
             ImGui::OpenPopup("CanvasToolbarMenu");
         }
     }
@@ -10492,10 +10500,44 @@ void GLCanvas3D::_render_canvas_toolbar()
 
     imgui.end();
 
-    _render_section_view_panel(section_panel_pos);
+    _render_section_view_panel(section_panel_pos, section_panel_pivot);
 }
 
-void GLCanvas3D::_render_section_view_panel(const ImVec2& bottom_left)
+#ifdef SLIC3R_CAD
+// Cut parallel to the newest picked face or plane. A face on the outside starts the cut 1 mm under it; a plane
+// at or beyond the far side of the part (the bed plane) cuts through the middle instead.
+void GLCanvas3D::_follow_section_target()
+{
+    Vec3d n, p;
+    std::string name;
+    if (!m_section_target || !m_section_target(n, p, name) || n.isZero())
+        return;
+    n.normalize();
+    if (!m_section_target_name.empty() && n.isApprox(m_section_target_n) && (p - m_section_target_p).norm() < 1e-6)
+        return;
+    BoundingBoxf3 box = volumes_bounding_box(true);
+    if (!box.defined)
+        box = volumes_bounding_box();
+    if (!box.defined)
+        return;
+    const double mid  = n.dot(box.center());
+    const double half = 0.5 * n.cwiseAbs().dot(box.size());
+    double d = n.dot(p);
+    if (d >= mid + half - 0.01)
+        d = mid + half - std::min(1.0, half);
+    else if (d <= mid - half + 0.01)
+        d = mid;
+    const double radius = box.radius();
+    m_section_target_n    = n;
+    m_section_target_p    = p;
+    m_section_target_name = name;
+    m_section_view->normal = n;
+    m_section_view->ratio  = std::clamp((mid + radius - d) / (2. * radius), 0.001, 1.);
+    _on_section_view_changed();
+}
+#endif
+
+void GLCanvas3D::_render_section_view_panel(const ImVec2& anchor, const ImVec2& pivot)
 {
     if (!m_section_view->panel_open)
         return;
@@ -10509,7 +10551,7 @@ void GLCanvas3D::_render_section_view_panel(const ImVec2& bottom_left)
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.f, 8.f) * sc);
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.f, 4.f) * sc);
 
-    ImGui::SetNextWindowPos(bottom_left, ImGuiCond_Always, ImVec2(0.f, 1.f));
+    ImGui::SetNextWindowPos(anchor, ImGuiCond_Always, pivot);
     imgui.begin(std::string("##CanvasSectionView"), ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove |
                                                    ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar);
 
@@ -10524,13 +10566,23 @@ void GLCanvas3D::_render_section_view_panel(const ImVec2& bottom_left)
     const ImGuiStyle& style  = ImGui::GetStyle();
     const float       tips_h = tips.size() * (ImGui::GetTextLineHeight() + style.ItemSpacing.y) - style.ItemSpacing.y + 2.f * style.WindowPadding.y;
     GLGizmoUtils::render_tooltip_button(&imgui, *this, tips, ImGui::GetWindowPos().x,
-        ImGui::GetWindowPos().y - style.ItemSpacing.y - tips_h - ImGui::GetContentRegionMax().y - ImGui::GetFrameHeight());
+        pivot.y > 0.5f ? ImGui::GetWindowPos().y - style.ItemSpacing.y - tips_h - ImGui::GetContentRegionMax().y - ImGui::GetFrameHeight()
+                       : ImGui::GetWindowPos().y);
 
     ImGui::SameLine();
     ImGui::AlignTextToFramePadding();
     imgui.text(_L("Section view"));
 
+    bool need_pick = false;
+#ifdef SLIC3R_CAD
+    if (m_section_target) {
+        _follow_section_target();
+        need_pick = m_section_target_name.empty();
+    }
+#endif
+
     float ratio = float(get_section_view_ratio());
+    imgui.disabled_begin(need_pick);
     ImGui::SameLine();
     ImGui::SetNextItemWidth(imgui.scaled(7.f));
     bool changed = imgui.bbl_slider_float_style("##section_view", &ratio, 0.f, 1.f, "%.2f", 1.0f, true);
@@ -10543,6 +10595,7 @@ void GLCanvas3D::_render_section_view_panel(const ImVec2& bottom_left)
     ImGui::SameLine();
     if (imgui.button(_L("Set viewing angle")))
         align_section_view_to_camera();
+    imgui.disabled_end();
 
     imgui.disabled_begin(!is_section_view_active());
     ImGui::SameLine();
@@ -10555,6 +10608,12 @@ void GLCanvas3D::_render_section_view_panel(const ImVec2& bottom_left)
     ImGui::PopStyleVar();
     ImGui::PopStyleColor(3);
     imgui.disabled_end();
+
+    #ifdef SLIC3R_CAD
+    if (m_section_target)
+        imgui.text(need_pick ? _L("Click a face or a plane to cut parallel to it")
+                             : wxString::Format(_L("Cut parallel to: %s (click another to change)"), wxString::FromUTF8(m_section_target_name)));
+#endif
 
     imgui.end();
 
