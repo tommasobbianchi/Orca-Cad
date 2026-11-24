@@ -355,5 +355,19 @@ check(r.get("ok") is True and (v1 - v2) > hexa * 2.65, "R2: a slotted trap remov
 r = safe("nut_trap", designation="M7", x=0, y=0, plane="XY")
 check("__error__" in r or r.get("ok") is False, "R2 near-miss: an unknown nut size is refused")
 
+
+# --- R1: nozzle sets the default line width ---
+def wall_lw():
+    return (safe("analyze_printability", body=0).get("extras") or {}).get("walls", {}).get("line_width_mm")
+
+
+fresh()
+box(20, 20, 10)
+check(abs((wall_lw() or 0) - 0.4) < 1e-6, "R1: no profile: line width 0.4 (%s)" % wall_lw())
+safe("set_variable", name="print_nozzle", expr="0.6")
+check(abs((wall_lw() or 0) - 0.63) < 1e-6, "R1: print_nozzle 0.6 gives line width 0.63 (%s)" % wall_lw())
+safe("set_variable", name="print_line_w", expr="0.5")
+check(abs((wall_lw() or 0) - 0.5) < 1e-6, "R1: an explicit print_line_w wins over the nozzle (%s)" % wall_lw())
+
 print("%d failed" % len(fails))
 sys.exit(1 if fails else 0)
