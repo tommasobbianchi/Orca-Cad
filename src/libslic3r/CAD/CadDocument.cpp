@@ -224,6 +224,17 @@ static TopoDS_Wire make_thread_v(const gp_Pnt& origin, const gp_Dir& xdir, const
     return poly.Wire();
 }
 
+// R10: the printed-thread groove, a trapezoid with 45 deg flanks. Base (half-width hb) at base_r, flat apex (half-width hf)
+// at apex_r; z_shift slides it along the axis (half a pitch puts an internal groove where the external ridge is).
+static TopoDS_Wire make_thread_trap(const gp_Pnt& origin, const gp_Dir& xdir, const gp_Dir& zdir,
+                                    double base_r, double apex_r, double hb, double hf, double z_shift)
+{
+    gp_Vec vx(xdir), vz(zdir);
+    auto pt = [&](double r, double z) { return gp_Pnt(origin.XYZ() + (vx * r).XYZ() + (vz * (z + z_shift)).XYZ()); };
+    BRepBuilderAPI_MakePolygon poly(pt(base_r, hb), pt(base_r, -hb), pt(apex_r, -hf), pt(apex_r, hf), true);
+    return poly.Wire();
+}
+
 static TopoDS_Wire make_thread_profile(const gp_Pnt& origin, const gp_Dir& xdir,
                                        const gp_Dir& zdir, double radius,
                                        double pitch, double depth, bool internal)
@@ -3750,6 +3761,25 @@ void CadDocument::apply_feature(TopoDS_Shape& result, bool& have_body,
             if (cut.IsDone() && !cut.Shape().IsNull()) target = cut.Shape();
         };
 
+        // R10: with the document variable print_thread_profile > 0, a printed thread: 45 deg flanks, a flat crest of P/4 and a
+        // depth of P/4 (an ISO V is 0.61 P deep with a sharp crest, which prints as a rounded blob). An internal thread is cut
+        // print_thread_clear (default 0.2 mm) looser radially and half a pitch out of phase, so it meets an external one of the same R/P.
+        if (f.thread_major_nominal && variable_value("print_thread_profile", 0.0) > 0.5) {
+            const double P = f.thread_pitch, Dp = 0.25 * P, hf = 0.125 * P, ov = 0.05 * P;
+            const double hb = hf + Dp + ov;   // half-width at the base ring, ov outside the surface so the boolean has a real overlap
+            TopoDS_Shape groove;
+            if (f.thread_internal) {
+                if (!have_body) throw std::runtime_error("internal thread needs a body");
+                const double cl = std::max(0.0, variable_value("print_thread_clear", 0.2));
+                const double r_min = R + cl - Dp;   // the bore (crest of the internal thread), the groove runs out to R + cl
+                cut_from(result, BRepPrimAPI_MakeCylinder(ax2, r_min - 0.01, f.thread_height).Shape());
+                if (sweep(R, make_thread_trap(c, xdir, zdir, r_min - ov, R + cl, hb, hf, 0.5 * P), groove)) cut_from(result, groove);
+            } else {
+                if (!have_body || result.IsNull()) { result = BRepPrimAPI_MakeCylinder(ax2, R, f.thread_height).Shape(); have_body = true; }
+                if (sweep(R, make_thread_trap(c, xdir, zdir, R + ov, R - Dp, hb, hf, 0.0), groove)) cut_from(result, groove);
+            }
+            break;
+        }
         if (f.thread_major_nominal) {
             if (f.thread_internal) {
                 // Tapped hole: bore to the minor radius R - D, then cut the groove out to the

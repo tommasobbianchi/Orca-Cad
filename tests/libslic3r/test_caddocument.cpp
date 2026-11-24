@@ -62,7 +62,10 @@
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <BRepGProp.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
 #include <GProp_GProps.hxx>
+#include <BRepAlgoAPI_Common.hxx>
+#include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepPrimAPI_MakeCone.hxx>
@@ -11648,4 +11651,43 @@ TEST_CASE("insert pocket lookup by thread major diameter", "[CadDocument][hole][
     REQUIRE(hole == Approx(6.4));
     REQUIRE_FALSE(CadDocument::insert_pocket_for_thread(6.0, d, hole));   // M6 and up hold a printed thread: no note
     REQUIRE_FALSE(CadDocument::insert_pocket_for_thread(3.4, d, hole));   // not a nominal size
+}
+
+TEST_CASE("Printed thread profile: M12 external meets a matching internal thread without interference", "[CadDocument][thread][dfam]")
+{
+    auto vol = [](const TopoDS_Shape& sh) { GProp_GProps g; BRepGProp::VolumeProperties(sh, g); return g.Mass(); };
+    const double P = 1.75, R = 6.0, H = 10.0;
+    auto make_ext = [&](bool print) {
+        CadDocument d;
+        if (print) d.variables = {{"print_thread_profile", "1"}};
+        d.add_thread(R, P, H, 0.61 * P, false, 0, 0, SketchPlane::XY(), "Ext");
+        REQUIRE(d.recompute());
+        REQUIRE(d.bodies.size() == 1);
+        return d.bodies[0].shape;
+    };
+    auto make_int = [&](bool print) {
+        CadDocument d;
+        if (print) d.variables = {{"print_thread_profile", "1"}};
+        const int sk = d.add_sketch(SketchShape::Rectangle, SketchPlane::XY(), 30, 30, 0, "S");
+        d.add_extrude(sk, H + 2, false, BooleanMode::New, "Block");
+        d.add_thread(R, P, H, 0.61 * P, true, 0, 0, SketchPlane::XY(), "Int");
+        REQUIRE(d.recompute());
+        return d.bodies[0].shape;
+    };
+    const TopoDS_Shape ext = make_ext(true), nut = make_int(true);
+    REQUIRE(BRepCheck_Analyzer(ext).IsValid());
+    REQUIRE(BRepCheck_Analyzer(nut).IsValid());
+    // the printed profile is shallower than ISO, so the rod keeps more material than the ISO one
+    CHECK(vol(ext) > vol(make_ext(false)));
+    BRepAlgoAPI_Common com(ext, nut);
+    REQUIRE(com.IsDone());
+    const double overlap = vol(com.Shape());
+    INFO("overlap mm3 = " << overlap);
+    // the helices start and stop mid-turn, so the first and last two turns are where the phases cannot match: judge the middle
+    const TopoDS_Shape slab = BRepPrimAPI_MakeBox(gp_Pnt(-20, -20, 2 * P), gp_Pnt(20, 20, H - 2 * P)).Shape();
+    BRepAlgoAPI_Common mid(com.Shape(), slab);
+    REQUIRE(mid.IsDone());
+    const double mid_overlap = vol(mid.Shape());
+    INFO("whole overlap mm3 = " << overlap << ", middle = " << mid_overlap);
+    CHECK(mid_overlap < 0.5);   // clearance 0.2 mm: the two solids may touch but not share volume
 }
