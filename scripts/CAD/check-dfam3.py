@@ -254,5 +254,23 @@ fresh()
 box(200, 50, 5)
 check(len(kind_notes(safe("analyze_printability", body=0), "exceeds_bed")) == 0, "R13.1 near-miss: a 200 mm part fits")
 
+# --- R13 step 2: one split plane that keeps both halves in the bed ---
+fresh()
+box(300, 50, 5)
+res = safe("analyze_printability", body=0)
+nn = kind_notes(res, "exceeds_bed")
+fx = (nn[0].get("fix") if nn else None) or {}
+check(bool(fx.get("steps")) and fx["steps"][0].get("method") == "cut", "R13.2: an oversize part gets a cut fix (%s)" % (fx.get("label") or nn))
+r = safe("apply_print_fix", kind="exceeds_bed", body=0)
+time.sleep(0.5)
+check("__error__" not in r, "R13.2: apply_print_fix exceeds_bed runs (%s)" % (r.get("__error__") or "ok"))
+bodies = [safe("analyze_printability", body=i) for i in (0, 1)]
+fits = all("__error__" not in b and max(b.get("footprint_mm", [999, 999])) <= 256 for b in bodies)
+check(fits, "R13.2: both halves are inside the 256 mm bed (%s)" % [b.get("footprint_mm") for b in bodies])
+fresh()
+box(600, 50, 5)
+nn = kind_notes(safe("analyze_printability", body=0), "exceeds_bed")
+check(len(nn) == 1 and not (nn[0].get("fix") or {}).get("steps"), "R13.2 near-miss: a part needing two cuts gets no single-cut fix")
+
 print("%d failed" % len(fails))
 sys.exit(1 if fails else 0)

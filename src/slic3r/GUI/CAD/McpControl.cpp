@@ -110,6 +110,7 @@
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <gp_Trsf.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
 
 using json = nlohmann::json;
 
@@ -4401,7 +4402,8 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
             const std::string text = "The part (" + num(sz.x()) + " x " + num(sz.y()) + " x " + num(sz.z()) + " mm) does not fit the " + num(bx) + " x " + num(by) + " x " + num(bz)
                 + " mm bed: split it (split verb) or lay it diagonal. Set print_bed_x/y/z variables for your printer";
             tips_advice.push_back("exceeds_bed");
-            notes.push_back(json{{"kind", "exceeds_bed"}, {"severity", "warning"}, {"text", text}, {"at", nullptr}});
+            notes.push_back(json{{"kind", "exceeds_bed"}, {"severity", "warning"}, {"text", text}, {"at", nullptr},
+                                 {"size", {sz.x(), sz.y(), sz.z()}}, {"bed", {bx, by, bz}}});
             warnings.push_back(text);
         }
         // R12: a long flat base on a warp-prone material (variable print_warp_prone = 1 for ABS/ASA/PC; R1 has no material field yet). Hypothesis, not measured.
@@ -4672,6 +4674,43 @@ static void attach_print_fixes(json& notes, const json& suggestions, const CadDo
                 steps.push_back(json{{"method", "transform"}, {"params", {{"body", int(i)},
                     {"axis_x", u.x()}, {"axis_y", u.y()}, {"axis_z", u.z()}, {"angle", ang},
                     {"pivot_x", 0.0}, {"pivot_y", 0.0}, {"pivot_z", 0.0}}}});
+        } else if (kind == "exceeds_bed" && rot_id && body >= 0 && body < int(doc.bodies.size()) && !doc.bodies[size_t(body)].shape.IsNull()
+                   && n.contains("size") && n.contains("bed")) {
+            // R13 step 2: ONE planar cut across the axis that overruns the bed, placed where the cross-section is smallest (the
+            // glue/dowel face) among the positions that leave both halves inside the bed. Sampled by the volume of a thin slab.
+            Bnd_Box bb; BRepBndLib::Add(doc.bodies[size_t(body)].shape, bb);
+            double lo[3], hi[3]; bb.Get(lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
+            int axis = 0; double worst = 0;
+            for (int a = 0; a < 3; ++a) { const double r = jn(n["size"], a) / std::max(1e-9, jn(n["bed"], a)); if (r > worst) { worst = r; axis = a; } }
+            const double L = jn(n["size"], axis), B = jn(n["bed"], axis);
+            if (L > B && L - B <= B) {   // one cut can do it
+                const double s_lo = L - B, s_hi = B;
+                double best_s = 0.5 * L, best_a = 1e300;
+                const int samples = 9;
+                for (int k = 0; k < samples; ++k) {
+                    const double sp = s_lo + (s_hi - s_lo) * (samples == 1 ? 0.5 : double(k) / (samples - 1));
+                    double c0[3] = {lo[0] - 1, lo[1] - 1, lo[2] - 1}, c1[3] = {hi[0] + 1, hi[1] + 1, hi[2] + 1};
+                    c0[axis] = lo[axis] + sp - 0.2; c1[axis] = lo[axis] + sp + 0.2;
+                    try {
+                        BRepAlgoAPI_Common cm(doc.bodies[size_t(body)].shape, BRepPrimAPI_MakeBox(gp_Pnt(c0[0], c0[1], c0[2]), gp_Pnt(c1[0], c1[1], c1[2])).Shape());
+                        if (!cm.IsDone()) continue;
+                        GProp_GProps g; BRepGProp::VolumeProperties(cm.Shape(), g);
+                        const double a = g.Mass() / 0.4;
+                        if (a < best_a - 1e-6 || (std::abs(a - best_a) <= 1e-6 && std::abs(sp - 0.5 * L) < std::abs(best_s - 0.5 * L))) { best_a = a; best_s = sp; }
+                    } catch (const Standard_Failure&) {}
+                }
+                if (best_a < 1e299) {
+                    Vec3d org((lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, (lo[2] + hi[2]) * 0.5);
+                    org[axis] = lo[axis] + best_s;
+                    org -= doc.modeling_origin;   // plane_from adds it back
+                    Vec3d nrm = Vec3d::Zero(); nrm[axis] = 1.0;
+                    std::ostringstream os; os.imbue(std::locale::classic()); os.precision(3);
+                    os << "Split across " << "XYZ"[axis] << " at " << best_s << " mm from the low end (" << (L - best_s) << " mm left): the smallest cross-section, " << best_a << " mm2, that keeps both halves in the bed";
+                    label = os.str();
+                    steps.push_back(json{{"method", "cut"}, {"params", {{"origin", {org.x(), org.y(), org.z()}}, {"normal", {nrm.x(), nrm.y(), nrm.z()}}, {"keep", "both"}, {"body", body}}}});
+                    n["split"] = json{{"axis", std::string(1, "XYZ"[axis])}, {"offset_from_low_mm", best_s}, {"cross_section_mm2", best_a}};
+                }
+            }
         } else if (kind == "text_indent") {
             // Raised text (an Add extrude of a text sketch) becomes a cut of the same depth into the face: mode -> Cut, direction flipped.
             for (size_t i = 0; i < doc.features.size() && steps.size() < 12; ++i) {
