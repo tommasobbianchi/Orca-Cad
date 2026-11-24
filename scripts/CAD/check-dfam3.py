@@ -446,6 +446,13 @@ fresh()
 box(30, 30, 15)
 check(len(kind_notes(safe("analyze_printability", body=0), "hole_allowance")) == 0, "R9 near-miss: a part with no hole gets none")
 
+# the elephant-foot chamfer is exactly 45 deg: it must not trip steep_chamfer
+fresh()
+box(40, 20, 10)
+safe("apply_print_fix", kind="elephant_foot", body=0)
+time.sleep(0.6)
+check(len(kind_notes(safe("analyze_printability", body=0), "steep_chamfer")) == 0, "R9 fix: the 45 deg elephant-foot chamfer is not itself flagged steep_chamfer")
+
 # --- R4: thin font and bed-face text ---
 def thin_font(font, h):
     fresh()

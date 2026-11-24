@@ -4176,7 +4176,7 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
             // (<=3 deg from straight down) nor at/above the overhang limit is still an
             // overhang; a chamfer there must be 45 deg or steeper to print without support.
             // ponytail: reuse the component fields already gathered for the rounded branch.
-            if (c.area >= 2.0 && c.a1 - c.a0 < 3.0 && c.a0 > 3.0 && c.a1 < 90.0 - ang) {
+            if (c.area >= 2.0 && c.a1 - c.a0 < 3.0 && c.a0 > 3.0 && c.a1 < 90.0 - ang - 0.5) {   // 0.5 deg slack: an exact 45 deg chamfer (our own elephant_foot fix) is the limit, not over it
                 if (bore_r > 0 && c.z1 - c.z0 <= bore_r * 1.05) continue;   // the roof arc of a horizontal bore: under horizontal_holes
                 const double from_vert = 90.0 - 0.5 * (c.a0 + c.a1);
                 const std::string text = "Sloped face " + num(from_vert) + " deg from vertical overhangs (limit " + num(ang) + "): make this chamfer 45 deg or steeper so it prints without support";
