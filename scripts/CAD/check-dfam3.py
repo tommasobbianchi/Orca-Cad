@@ -605,6 +605,18 @@ box(40, 40, 15)
 safe("nut_trap", designation="M5", x=0, y=0, slot=30)   # from the bed face: the slot has a ceiling between two walls
 check(not kind_notes(safe("analyze_printability", body=0), "shelf_underside"), "R7: a pocket ceiling between two walls is not a shelf (no gussets in a nut slot)")
 
+# a shell with no open face is a closed hollow part; a kit insert size makes its coupon hole
+fresh()
+box(20, 20, 10)
+safe("shell", thickness=0.9)
+v = safe("mass_properties", body=0).get("volume", 0)
+check(abs(v - (4000 - 18.2 * 18.2 * 8.2)) < 1.0, "shell with no open face: closed wall of 0.9 (volume %.1f, want 1283.8)" % v)
+fresh()
+box(20, 20, 15)
+r = safe("hole_standard", designation="M3 OD5 insert", x=0, y=0)
+v = safe("mass_properties", body=0).get("volume", 0)
+check(abs(6000 - v - 3.14159265 * 2.2 ** 2 * 4) < 1.0, "kit insert M3 OD5: 4.4 mm pocket, 4 deep (removed %.1f, want 60.8; %s)" % (6000 - v, r.get("__error__") or "ok"))
+
 # the warp note offers two fixes: mouse ears (fix) and rounding the vertical edges (fix2, alt=1)
 fresh()
 safe("extrude_rect", width=60, height=60, distance=20)

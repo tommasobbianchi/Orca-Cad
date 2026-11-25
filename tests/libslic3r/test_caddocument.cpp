@@ -10211,6 +10211,21 @@ TEST_CASE("shell of an L bracket has sharp inner corners", "[CadDocument][oracle
     CHECK(props.Mass() == Approx(1800.0 * 20.0 - 1416.0 * 18.0).epsilon(1e-4));
 }
 
+TEST_CASE("shell with no open face is a closed hollow part", "[CadDocument][oracle]")
+{
+    CadDocument doc;
+    const int sk = combine_rect(doc, 0, 0, 20, 20, 0, "Base");
+    doc.add_extrude(sk, 10.0, false, BooleanMode::New, "Box");
+    doc.add_shell(0.9, -1, 0, "Shell");
+    REQUIRE(doc.recompute());
+    REQUIRE(doc.bodies.size() == 1);
+    // the wall: the box minus the cavity 18.2 x 18.2 x 8.2, outer surface unchanged (positive mass = oriented outward)
+    GProp_GProps props; BRepGProp::VolumeProperties(doc.bodies[0].shape, props);
+    CHECK(props.Mass() == Approx(4000.0 - 18.2 * 18.2 * 8.2).epsilon(1e-4));
+    CHECK(GeometryEngine::faces_of(doc.bodies[0].shape).size() == 12);
+    CHECK(BRepCheck_Analyzer(doc.bodies[0].shape).IsValid());
+}
+
 // A removal that cuts the body in two leaves two bodies.
 TEST_CASE("a cut through the middle of a bar yields two bodies", "[CadDocument][oracle]")
 {

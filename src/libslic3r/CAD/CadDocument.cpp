@@ -4015,6 +4015,16 @@ void CadDocument::apply_feature(TopoDS_Shape& result, bool& have_body,
             if (mts.IsDone() && !mts.Shape().IsNull()) { shelled = mts.Shape(); break; }
         }
         if (shelled.IsNull()) throw std::runtime_error(_u8L("shell failed"));
+        if (remove.IsEmpty()) {
+            // With no face to open, OCCT stops after the inward offset: `shelled` is the cavity, not the wall. Cut it out.
+            TopExp_Explorer sh(shelled, TopAbs_SHELL);
+            if (!sh.More()) throw std::runtime_error(_u8L("shell failed"));
+            TopoDS_Solid cavity = BRepBuilderAPI_MakeSolid(TopoDS::Shell(sh.Current())).Solid();
+            BRepLib::OrientClosedSolid(cavity);
+            BRepAlgoAPI_Cut cut(result, cavity);
+            if (!cut.IsDone() || cut.Shape().IsNull()) throw std::runtime_error(_u8L("shell failed"));
+            shelled = cut.Shape();
+        }
         result = shelled;
         break;
     }
