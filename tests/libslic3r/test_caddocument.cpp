@@ -11639,6 +11639,19 @@ TEST_CASE("hole: heat-set insert pocket from the table", "[CadDocument][hole][df
     REQUIRE_THROWS(doc.add_hole_standard("M7 insert", 0, false, 0.0, 0.0, 0.0, SketchPlane::XY(), "Insert"));
 }
 
+TEST_CASE("hole: assortment-kit inserts are listed by outer diameter", "[CadDocument][hole][dfam]")
+{
+    double d = 0, depth = 0;
+    REQUIRE(CadDocument::insert_pocket("M3 OD5", d, depth));
+    REQUIRE_THAT(d, Catch::Matchers::WithinAbs(4.4, 1e-9));
+    REQUIRE_THAT(depth, Catch::Matchers::WithinAbs(4.0, 1e-9));
+    REQUIRE(CadDocument::insert_pocket("M6 OD8", d, depth));
+    REQUIRE_THAT(d, Catch::Matchers::WithinAbs(7.4, 1e-9));
+    std::string desig;
+    REQUIRE(CadDocument::insert_pocket_for_thread(3.0, desig, d));   // a thread still maps to the plain size, not a kit one
+    REQUIRE(desig == "M3");
+}
+
 TEST_CASE("insert pocket lookup by thread major diameter", "[CadDocument][hole][dfam]")
 {
     std::string d; double hole = 0;
