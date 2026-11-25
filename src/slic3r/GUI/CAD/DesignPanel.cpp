@@ -6561,7 +6561,9 @@ void DesignPanel::on_apply_print_fix(int note_index, int alt)
     try { fix = json::parse(fix_json); }
     catch (...) { set_status(StatusKind::Error, _L("The fix data is invalid")); return; }
     if (fix.is_array()) fix = json{{"steps", fix}, {"label", fix_label}};   // PrintNote keeps only the steps array
-    const bool full = m_print_full;   // read it first: the fix's own rebuild runs the automatic check, which clears it
+    // Read it first: the fix's own rebuild runs the automatic check, which clears it. A list showing suggestions is a full one
+    // too, whoever ran it (the analyze verb feeds the same panel).
+    const bool full = m_print_full || std::any_of(notes.begin(), notes.end(), [](const PrintNote& p) { return !p.warning; });
     try {
         const json r = run_print_fix(this, fix);
         refresh_tree();
