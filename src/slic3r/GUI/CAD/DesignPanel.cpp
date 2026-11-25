@@ -2023,14 +2023,29 @@ DesignPanel::DesignPanel(wxWindow* parent)
         e.Skip();
     });
     c_m_box_hole->row(_L("Hole plane"), m_hole_plane);
+    m_hole_kind = c_m_box_hole->make_combo();
+    for (const wxString& k : { _L("Drilled hole"), _L("Heat-set insert pocket"), _L("Nut trap") })
+        m_hole_kind->Append(k);
+    m_hole_kind->SetSelection(0);
+    c_m_box_hole->row(_L("Type"), m_hole_kind);
+    m_hole_g_size = c_m_box_hole->begin_group();
+    m_hole_size = c_m_box_hole->make_combo();
+    c_m_box_hole->row(_L("Size"), m_hole_size);
+    c_m_box_hole->end_group();
+    m_hole_g_size->Show(false);
+    m_hole_kind->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent&) { apply_hole_size(true); sync_hole_card(); refresh_preview(); });
+    m_hole_size->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent&) { apply_hole_size(false); sync_hole_card(); refresh_preview(); });
+    m_hole_g_drill = c_m_box_hole->begin_group();
     m_hole_diameter = c_m_box_hole->make_spin(6.0);
     c_m_box_hole->row(_L("Diameter"), m_hole_diameter);
     m_hole_depth = c_m_box_hole->make_spin(10.0);
     c_m_box_hole->row(_L("Depth (blind)"), m_hole_depth);
+    c_m_box_hole->end_group();
     m_hole_x = c_m_box_hole->make_spin(0.0, -1000.0, 1000.0);
     c_m_box_hole->row(_L("Pos X"), m_hole_x);
     m_hole_y = c_m_box_hole->make_spin(0.0, -1000.0, 1000.0);
     c_m_box_hole->row(_L("Pos Y"), m_hole_y);
+    m_hole_g_opts = c_m_box_hole->begin_group();
     m_hole_through = c_m_box_hole->make_check();
     
     m_hole_through->SetValue(true);
@@ -2047,6 +2062,18 @@ DesignPanel::DesignPanel(wxWindow* parent)
     c_m_box_hole->row(_L("Counterbore depth"), m_hole_cbore_depth);
     m_hole_bridge_h = c_m_box_hole->make_spin(0.0, 0.0, 5.0);
     c_m_box_hole->row(_L("Sacrificial layers (0 = off)"), m_hole_bridge_h);
+    c_m_box_hole->end_group();
+    m_hole_g_nut = c_m_box_hole->begin_group();
+    m_hole_slot = c_m_box_hole->make_spin(0.0, 0.0, 1000.0);
+    c_m_box_hole->row(_L("Side slot (0 = none)"), m_hole_slot);
+    m_hole_bolt = c_m_box_hole->make_check();
+    c_m_box_hole->row(_L("Bolt hole"), m_hole_bolt);
+    m_hole_nut_bridge = c_m_box_hole->make_check();
+    c_m_box_hole->row(_L("Bridge layers"), m_hole_nut_bridge);
+    c_m_box_hole->end_group();
+    m_hole_g_nut->Show(false);
+    m_hole_slot->Bind(wxEVT_SPINCTRLDOUBLE, [this](wxSpinDoubleEvent&) { refresh_preview(); });
+    m_hole_bolt->Bind(wxEVT_TOGGLEBUTTON, [this](wxCommandEvent&) { sync_hole_card(); refresh_preview(); });
     m_hole_target_label = c_m_box_hole->make_text(_L("(none — uses Hole plane)"));
     m_hole_target_label->SetReference(false);
     c_m_box_hole->row(_L("On face"), m_hole_target_label);
@@ -5523,6 +5550,57 @@ void DesignPanel::attach_to_face(CadFeature& f, int body, int face, bool cylinde
     f.attach_face = face;
 }
 
+int DesignPanel::hole_kind() const { return m_hole_kind ? std::max(0, m_hole_kind->GetSelection()) : 0; }
+
+std::string DesignPanel::hole_size_name() const
+{
+    return m_hole_size ? std::string(m_hole_size->GetValue().ToUTF8().data()) : std::string();
+}
+
+bool DesignPanel::hole_nut(double& across_flats, double& depth) const
+{
+    double s = 0, m = 0;
+    if (!CadDocument::nut_size(hole_size_name(), s, m)) return false;
+    across_flats = s + 2.0 * m_doc.variable_value("print_clear_xy", 0.2);
+    depth        = m + m_doc.variable_value("print_clear_z", 0.25);
+    return true;
+}
+
+void DesignPanel::sync_hole_card()
+{
+    if (!m_hole_g_nut) return;
+    const bool editing = m_edit_index >= 0;      // an existing hole keeps being what it is
+    if (editing) m_hole_kind->SetSelection(0);
+    m_hole_kind->Enable(!editing);
+    const int kind = hole_kind();
+    m_hole_g_size->Show(kind != 0);
+    m_hole_g_drill->Show(kind != 2);
+    m_hole_g_opts->Show(kind == 0);
+    m_hole_g_nut->Show(kind == 2);
+    double d = 0;
+    const bool can_bolt = CadDocument::bolt_clearance(hole_size_name(), d);
+    m_hole_bolt->Enable(can_bolt);
+    m_hole_nut_bridge->Enable(can_bolt && m_hole_bolt->GetValue());
+}
+
+void DesignPanel::apply_hole_size(bool new_kind)
+{
+    const int kind = hole_kind();
+    if (new_kind && kind != 0) {
+        m_hole_size->Clear();
+        const std::vector<std::string> sizes = kind == 1 ? CadDocument::insert_sizes() : CadDocument::nut_sizes();
+        for (const std::string& n : sizes) m_hole_size->Append(wxString::FromUTF8(n));
+        const auto m3 = std::find(sizes.begin(), sizes.end(), std::string("M3"));
+        m_hole_size->SetSelection(m3 == sizes.end() ? 0 : int(m3 - sizes.begin()));
+    }
+    double d = 6.0, depth = 10.0;
+    if (kind == 1 && !CadDocument::insert_pocket(hole_size_name(), d, depth)) return;
+    if (kind == 2 || (kind == 0 && !new_kind)) return;
+    m_hole_diameter->SetValue(d);
+    m_hole_depth->SetValue(depth);
+    m_hole_through->SetValue(kind == 0);
+}
+
 void DesignPanel::on_add_hole()
 {
     if (m_doc.body.IsNull()) {
@@ -5536,6 +5614,27 @@ void DesignPanel::on_add_hole()
     double      px      = m_hole_x->GetValue();
     double      py      = m_hole_y->GetValue();
 
+    if (hole_kind() == 2) {
+        double bolt_d = 0;
+        const std::string size = hole_size_name();
+        const bool bolt = m_hole_bolt->GetValue() && CadDocument::bolt_clearance(size, bolt_d);
+        try {
+            // ponytail: the trap is not attached to the picked face, so it does not follow a later edit of that face
+            m_doc.add_nut_trap(size, px, py, m_hole_slot->GetValue(), plane, m_hole_on_face ? m_hole_face_body : -1, false,
+                               bolt,
+                               bolt && m_hole_nut_bridge->GetValue() ? 2.0 * m_doc.variable_value("print_layer_h", 0.2) : 0.0);
+        } catch (const std::exception& ex) {
+            set_status(StatusKind::Error, kernel_error_text(ex.what()));
+            return;
+        }
+        if (!recompute_guarded(_L("Rebuilding model…")))
+            set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(m_doc.error)));
+        else
+            set_status_ok();
+        refresh_tree();
+        return;
+    }
+
     m_feature_counter++;
     const int hidx = m_doc.add_hole(dia, depth, through, px, py, plane,
                                     feature_name(_L("Hole")));
@@ -5544,7 +5643,11 @@ void DesignPanel::on_add_hole()
         hf.hole_teardrop = m_hole_teardrop->GetValue();
         hf.hole_teardrop_flat = m_hole_td_flat->GetValue();
         hf.hole_layer_h = m_hole_layer_h->GetValue();
-        if (m_hole_cbore_d->GetValue() > dia && m_hole_cbore_depth->GetValue() > 0) {   // a counterbore, with the sacrificial strips under its ledge when asked
+        if (hole_kind() == 1) {
+            hf.hole_standard = hole_size_name();
+            hf.name          = "Insert pocket " + hole_size_name();
+        }
+        if (hole_kind() == 0 && m_hole_cbore_d->GetValue() > dia && m_hole_cbore_depth->GetValue() > 0) {   // a counterbore, with the sacrificial strips under its ledge when asked
             hf.hole_style = 1; hf.hole_cbore_diameter = m_hole_cbore_d->GetValue(); hf.hole_cbore_depth = m_hole_cbore_depth->GetValue();
             hf.hole_bridge_layer_h = m_hole_bridge_h->GetValue();
         }
@@ -11302,6 +11405,24 @@ CadFeature DesignPanel::build_candidate(Tool t) const
         }
         break;
     case Tool::Hole:
+        if (!editing && hole_kind() == 2) {   // preview a nut trap as the one cut it makes
+            double af = 0, depth = 0;
+            f.type = CadFeatureType::Extrude;
+            if (!hole_nut(af, depth)) break;
+            const std::vector<Vec2d> p = CadDocument::nut_trap_outline(af, m_hole_x->GetValue(), m_hole_y->GetValue(), m_hole_slot->GetValue());
+            for (size_t i = 0; i < p.size(); ++i) {
+                SketchEntity e;
+                e.p0 = p[i];
+                e.p1 = p[(i + 1) % p.size()];
+                f.entities.push_back(e);
+            }
+            f.sketch_ref = -1;
+            f.plane      = hole_plane();
+            f.distance   = depth;
+            f.mode       = BooleanMode::Cut;
+            if (m_hole_on_face) f.target_body = m_hole_face_body;
+            break;
+        }
         f.type          = CadFeatureType::Hole;
         f.plane         = hole_plane();
         f.hole_diameter = m_hole_diameter->GetValue();
@@ -11310,7 +11431,7 @@ CadFeature DesignPanel::build_candidate(Tool t) const
         f.hole_teardrop = m_hole_teardrop->GetValue();
         f.hole_teardrop_flat = m_hole_td_flat->GetValue();
         f.hole_layer_h = m_hole_layer_h->GetValue();
-        if (m_hole_cbore_d->GetValue() > m_hole_diameter->GetValue() && m_hole_cbore_depth->GetValue() > 0) {
+        if (hole_kind() == 0 && m_hole_cbore_d->GetValue() > m_hole_diameter->GetValue() && m_hole_cbore_depth->GetValue() > 0) {
             f.hole_style = 1; f.hole_cbore_diameter = m_hole_cbore_d->GetValue(); f.hole_cbore_depth = m_hole_cbore_depth->GetValue();
             f.hole_bridge_layer_h = m_hole_bridge_h->GetValue();
         } else { f.hole_style = 0; f.hole_bridge_layer_h = 0; }
@@ -11970,10 +12091,12 @@ void DesignPanel::update_hole_gizmo()
     const SketchPlane plane = hole_plane();
     m_viewport->set_hole_face_bounds(m_hole_has_bounds, m_hole_umin, m_hole_umax,
                                      m_hole_vmin, m_hole_vmax);
-    m_viewport->begin_hole_gizmo(plane,
-                                 m_hole_x->GetValue(), m_hole_y->GetValue(),
-                                 m_hole_diameter->GetValue(), m_hole_depth->GetValue(),
-                                 m_hole_through->GetValue());
+    double dia = m_hole_diameter->GetValue(), depth = m_hole_depth->GetValue(), af = 0, nut_depth = 0;
+    bool through = m_hole_through->GetValue();
+    if (hole_kind() == 2 && hole_nut(af, nut_depth)) {   // the circle round the hexagon's corners
+        dia = 2.0 * af / std::sqrt(3.0); depth = nut_depth; through = false;
+    }
+    m_viewport->begin_hole_gizmo(plane, m_hole_x->GetValue(), m_hole_y->GetValue(), dia, depth, through);
 }
 
 // Push the active Thread card's plane + position + radius/length to the viewport gizmo.
@@ -13675,7 +13798,7 @@ void DesignPanel::open_tool(Tool t)
     case Tool::Extrude: m_hdr_extrude->SetLabel(title(_L_CONTEXT("Extrude", "Design"))); break;
     case Tool::Dressup: m_hdr_dressup->SetLabel(title(
                             m_dressup_type->GetSelection() == 0 ? _L("Fillet") : _L("Chamfer"))); break;
-    case Tool::Hole:    m_hdr_hole->SetLabel(title(_L("Hole")));       break;
+    case Tool::Hole:    m_hdr_hole->SetLabel(title(_L("Hole")));       sync_hole_card(); break;
     case Tool::Thread:  m_hdr_thread->SetLabel(title(_L("Thread")));   break;
     case Tool::Shell:   m_hdr_shell->SetLabel(title(_L_CONTEXT("Shell", "Design")));     break;
     case Tool::Revolve: m_hdr_revolve->SetLabel(title(_L("Revolve"))); break;

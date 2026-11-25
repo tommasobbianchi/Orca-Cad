@@ -676,6 +676,19 @@ public:
     // Heat-set insert that replaces an internal thread of this nominal (major) diameter: designation and pocket diameter.
     // Only sizes below M6 (a printed thread that small strips); false for any other diameter.
     static bool insert_pocket_for_thread(double major_d, std::string& designation, double& hole_d);
+    // The insert table as the Hole card lists it: sizes, and a size's pocket diameter and default depth.
+    static std::vector<std::string> insert_sizes();
+    static bool insert_pocket(const std::string& designation, double& hole_d, double& depth);
+    // Captive nuts: sizes, width across flats and thickness; clearance diameter of the bolt (false where no source is held).
+    static std::vector<std::string> nut_sizes();
+    static bool nut_size(const std::string& designation, double& across_flats, double& thickness);
+    static bool bolt_clearance(const std::string& designation, double& diameter);
+    // The pocket outline around (x, y): a hexagon of flats `af`; with `slot` beyond the corner radius the +x side is a channel.
+    static std::vector<Vec2d> nut_trap_outline(double af, double x, double y, double slot);
+    // Sketch + cut extrude (+ a bolt hole with two crossed sacrificial layers on the ledge when asked). Returns the extrude's
+    // index; throws on an unknown size or a bolt size without a clearance. The caller checkpoints and recomputes.
+    int add_nut_trap(const std::string& designation, double x, double y, double slot, const SketchPlane& plane,
+                     int target_body, bool flip, bool bolt_hole, double bridge_layer_h);
     bool        rename_variable(const std::string& from, const std::string& to, std::string& err);
     std::string variables_csv() const;
     int         variables_from_csv(const std::string& csv, std::string& err);

@@ -1111,6 +1111,21 @@ private:
     NumField*            m_hole_cbore_d{nullptr};      // counterbore diameter (0 = none)
     NumField*           m_hole_cbore_depth{nullptr};
     NumField*           m_hole_bridge_h{nullptr};     // sacrificial layer thickness under the counterbore ledge (0 = none)
+    // Hole card "Type": a drilled hole, a heat-set insert pocket (a hole with the table's size) or a captive nut trap.
+    ChoiceField*        m_hole_kind{nullptr};
+    ChoiceField*        m_hole_size{nullptr};
+    NumField*           m_hole_slot{nullptr};         // nut trap: side slot from the centre, 0 = none
+    ToggleField*        m_hole_bolt{nullptr};         // nut trap: drill the bolt clearance hole too
+    ToggleField*        m_hole_nut_bridge{nullptr};   // nut trap with bolt: sacrificial strips, 2 x print_layer_h thick
+    CardGroup*          m_hole_g_size{nullptr};
+    CardGroup*          m_hole_g_drill{nullptr};
+    CardGroup*          m_hole_g_opts{nullptr};
+    CardGroup*          m_hole_g_nut{nullptr};
+    int  hole_kind() const;                       // 0 drilled, 1 insert pocket, 2 nut trap
+    std::string hole_size_name() const;
+    bool hole_nut(double& across_flats, double& depth) const;   // pocket size of the chosen nut, clearances applied
+    void sync_hole_card();                        // which rows the chosen type shows
+    void apply_hole_size(bool new_kind);          // fill the size list (new_kind) and the insert's diameter/depth
     NumField* m_hole_x{nullptr};
     NumField* m_hole_y{nullptr};
     // #2: when the Hole tool is opened on a picked solid face, drill on that face centred

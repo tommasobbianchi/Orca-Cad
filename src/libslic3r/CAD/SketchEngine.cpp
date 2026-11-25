@@ -271,7 +271,7 @@ TopoDS_Shape SketchEngine::make_extrude_face(const TopoDS_Face& face, const Sket
 
 TopoDS_Shape SketchEngine::make_extrude_regions(
     const std::vector<std::vector<std::vector<Vec2d>>>& regions,
-    const SketchPlane& plane, double length, bool symmetric)
+    const SketchPlane& plane, double length, bool symmetric, const Vec3d& shear)
 {
     // The loop below skips regions that fail, so a zero depth is rejected before it.
     if (std::abs(length) < 1e-9) throw std::runtime_error(_u8L("extrude depth is zero"));
@@ -351,7 +351,9 @@ TopoDS_Shape SketchEngine::make_extrude_regions(
             sff.FixOrientation();
             const TopoDS_Face face = sff.Face();
 
-            TopoDS_Shape solid = extrude_face_internal(face, dir, length, symmetric);
+            TopoDS_Shape solid = !symmetric && !shear.isZero()
+                ? BRepPrimAPI_MakePrism(face, gp_Vec(dir) * length + gp_Vec(shear.x(), shear.y(), shear.z())).Shape()
+                : extrude_face_internal(face, dir, length, symmetric);
             bb.Add(comp, solid);
             last = solid;
             ++count;

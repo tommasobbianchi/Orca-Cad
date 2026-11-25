@@ -809,7 +809,7 @@ json describe_tools()
         compact_tool("rename_feature", "Rename a feature in the history.", {{"feature", "integer", "feature index"}, {"name", "string", "new name"}}),
         compact_tool("move_feature", "Move a feature to another history position; stops where a dependency (a sketch below its consumer) forbids the next step.", {{"feature", "integer", "feature index"}, {"to", "integer", "destination index"}}),
         compact_tool("thread_to_insert", "Replace an internal metric thread under M6 with a heat-set insert pocket on the same plane and spot; the thread is suppressed, not deleted.", {{"feature", "integer", "feature index of the internal thread"}}),
-        compact_tool("nut_trap", "Hexagonal pocket for a metric nut (ISO 4032 size + print_clear_xy), optionally with a side slot, cut into the target body from a plane or face.", {{"designation", "string", "M1.6|M2|M2.5|M3|M4|M5|M6|M8|M10|M12|M14|M16|M20|M24|#2-56|#4-40|#6-32|#8-32|#10-24|#10-32|1/4-20|5/16-18|3/8-16"}, {"x", "number", "centre x in the plane"}, {"y", "number", "centre y in the plane"}, {"slot", "number", "mm from the centre along +x to slide the nut in; 0 = none"}, {"plane", "string", "XY|XZ|YZ"}, {"flip", "boolean", "cut the other way"}, {"body", "integer", "default last"}}),
+        compact_tool("nut_trap", "Hexagonal pocket for a metric nut (ISO 4032 size + print_clear_xy), optionally with a side slot and a bolt hole, cut into the target body from a plane or face.", {{"bolt", "boolean", "also drill the bolt clearance hole through"}, {"bridge_layer_h", "number", "with bolt: thickness of the two crossed sacrificial layers on the ledge; 0 = none"}, {"designation", "string", "M1.6|M2|M2.5|M3|M4|M5|M6|M8|M10|M12|M14|M16|M20|M24|#2-56|#4-40|#6-32|#8-32|#10-24|#10-32|1/4-20|5/16-18|3/8-16"}, {"x", "number", "centre x in the plane"}, {"y", "number", "centre y in the plane"}, {"slot", "number", "mm from the centre along +x to slide the nut in; 0 = none"}, {"plane", "string", "XY|XZ|YZ"}, {"flip", "boolean", "cut the other way"}, {"body", "integer", "default last"}}),
         compact_tool("suppress", "Suppress (or restore) a feature; downstream features rebuild without it.", {{"feature", "integer", "feature index"}, {"suppressed", "boolean", "default true"}}),
         compact_tool("rollback", "Roll the history back to just after a feature (later ones are kept but not built); -1 restores the full history.", {{"index", "integer", "feature index or -1"}}),
         compact_tool("save", "Save the project to an absolute .3mf path under $HOME or /tmp. The 3MF holds the design recipe (reopens editable) and the bodies as printable objects; the bodies are sent to the plate first when it is empty (mesh:false never, mesh:true always).", {{"path", "string", ""}, {"mesh", "boolean", "commit the bodies as objects (default: when the plate has none)"}}),
@@ -3665,7 +3665,7 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
             if (nu >= -1e-9) continue;
             const double hc = ((p0 + p1 + p2) / 3.0).dot(u);
             if (hc - lo < 0.05 && -nu > 0.99) { bed += 0.5 * nn; continue; }
-            if (-nu > cos_lim) over += 0.5 * nn;
+            if (-nu > cos_lim + 1e-3) over += 0.5 * nn;
         }
         os.push_back({u, over, bed, hi - lo});
     }
@@ -3873,6 +3873,22 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
         int foot_n = 0; Vec3d foot_mid = Vec3d::Zero(); std::vector<int> foot_tris;   // R9: sharp convex edges on the bed face
         const double zmin_b = m.bounding_box().min.z();
         int shelf_n = 0; Vec3d shelf_mid = Vec3d::Zero(); std::vector<int> shelf_tris;   // R7: wall-to-shelf-underside inside corners above the bed
+        struct Join { Vec3d a, b, out; int under, wall; };
+        std::vector<Join> joins;
+        std::vector<Vec3d> brace_pts;   // vertices of 45 degree down-facing faces (gussets, chamfers)
+        for (int t = 0; t < int(F.size()); ++t)
+            if (const double z = tri_normal(t).z(); z < -0.6 && z > -0.8)
+                for (int k = 0; k < 3; ++k) brace_pts.push_back(V[F[size_t(t)](k)].cast<double>());
+        // 2: p is a corner of a 45 degree face; 1: such a face reaches the wall straight below p; 0: bare.
+        auto braced = [&](const Vec3d& p) {
+            int r = 0;
+            for (const Vec3d& q : brace_pts) {
+                const Vec3d d = q - p;
+                if (d.squaredNorm() < 1e-6) return 2;
+                if (std::hypot(d.x(), d.y()) < 1e-3 && d.z() < 0) r = 1;
+            }
+            return r;
+        };
         int knife_n = 0; double knife_min_wedge = 180.0; Vec3d knife_mid, knife_norm = Vec3d::Zero(); std::vector<int> knife_tris;   // R5
         int in_n = 0; double in_longest = -1.0; Vec3d in_mid, in_norm = Vec3d::Zero(); std::vector<int> in_tris;   // R8: concave vertical edges
         for (const auto& kv : edges) {
@@ -3898,8 +3914,13 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
             }
             if (!convex && theta >= 80.0 && theta <= 100.0 && L >= 5.0 && std::abs(e.z()) < 0.1 && mid.z() - zmin_b > 0.5
                 && ((n1.z() < -0.95 && std::abs(n2.z()) < 0.1) || (n2.z() < -0.95 && std::abs(n1.z()) < 0.1))) {
+                // Braced at both ends: the side of a gusset (one end on its 45 degree face), or a gap of at most 10 mm between two.
+                const int b1 = braced(pos[size_t(ed.a)]), b2 = braced(pos[size_t(ed.b)]);
+                if (b1 && b2 && (b1 == 2 || b2 == 2 || L <= 10.1)) continue;
                 if (shelf_n++ == 0) shelf_mid = mid;
                 if (shelf_tris.size() < 2000) shelf_tris.push_back(n1.z() < -0.95 ? ed.t1 : ed.t2);
+                const bool first_under = n1.z() < -0.95;
+                joins.push_back({pos[size_t(ed.a)], pos[size_t(ed.b)], first_under ? n2 : n1, first_under ? ed.t1 : ed.t2, first_under ? ed.t2 : ed.t1});
             }
             if (convex && theta > 150.0 && L >= 3.0) {
                 ++knife_n;
@@ -3936,9 +3957,41 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
             add_note("elephant_foot", "suggestion", text, foot_mid, Vec3d(0, 0, -1), foot_tris);
             suggestions.push_back(json{{"kind", "elephant_foot"}, {"edges", foot_n}, {"why", text}});
         }
+        json shelf;   // the pinned join, measured: ends, the way out from the wall, how far the underside reaches, how much wall is below
+        if (!joins.empty()) {
+            const Join& j0 = joins.front();
+            const Vec3d dir = (j0.b - j0.a).normalized(), out = Vec3d(j0.out.x(), j0.out.y(), 0.0).normalized();
+            double lo = 0.0, hi = (j0.b - j0.a).norm();   // the pieces of the join that lie on the same line
+            for (const Join& j : joins)
+                if ((j.a - j0.a).cross(dir).norm() < 1e-3 && (j.b - j0.a).cross(dir).norm() < 1e-3 && j.out.dot(j0.out) > 0.99)
+                    for (const Vec3d& p : {j.a, j.b}) { lo = std::min(lo, (p - j0.a).dot(dir)); hi = std::max(hi, (p - j0.a).dot(dir)); }
+            // flood the flat face a triangle belongs to
+            std::vector<std::vector<int>> adj(F.size());
+            for (const auto& kv : edges)
+                if (kv.second.n == 2 && tri_normal(kv.second.t1).dot(tri_normal(kv.second.t2)) > 0.999) {
+                    adj[size_t(kv.second.t1)].push_back(kv.second.t2);
+                    adj[size_t(kv.second.t2)].push_back(kv.second.t1);
+                }
+            auto reach = [&](int seed, const Vec3d& axis) {
+                double best = 0.0;
+                std::vector<int>  todo{seed};
+                std::vector<char> seen(F.size(), 0);
+                seen[size_t(seed)] = 1;
+                while (!todo.empty()) {
+                    const int t = todo.back(); todo.pop_back();
+                    for (int k = 0; k < 3; ++k) best = std::max(best, (V[F[size_t(t)](k)].cast<double>() - j0.a).dot(axis));
+                    for (int u : adj[size_t(t)]) if (!seen[size_t(u)]) { seen[size_t(u)] = 1; todo.push_back(u); }
+                }
+                return best;
+            };
+            const Vec3d a = j0.a + dir * lo, b = j0.a + dir * hi;
+            shelf = json{{"a", {a.x(), a.y(), a.z()}}, {"b", {b.x(), b.y(), b.z()}}, {"out", {out.x(), out.y(), out.z()}},
+                         {"depth", reach(j0.under, out)}, {"drop", reach(j0.wall, Vec3d(0, 0, -1))}};
+        }
         if (shelf_n > 0) {   // detection only: the chamfer/gusset needs the edge as a B-rep edge id, which the mesh edge does not give
             const std::string text = num(double(shelf_n)) + " shelf underside(s) meet a wall: a flat underside prints with sagging. Add a 45 deg chamfer along the join (small shelf) or a triangular gusset (deep shelf)";
             add_note("shelf_underside", "suggestion", text, shelf_mid, Vec3d(0, 0, -1), shelf_tris);
+            if (!shelf.is_null()) notes.back()["shelf"] = shelf;
             suggestions.push_back(json{{"kind", "shelf_underside"}, {"edges", shelf_n}, {"why", text}});
         }
         if (knife_n > 0) {
@@ -4372,7 +4425,13 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
         advise("test_fit", "Fitted parts: print a small test piece of the mating region first to check the fit before the full print");
     if (pairs.size() > 0)
         advise("compliance", "Parts that press together can use thin flexible tabs (compliance) for a push fit");
-    if (has_text)
+    bool raised_text = false;   // still standing proud, and not already made printable (shallow, undersides sloped)
+    for (const CadFeature& f : doc.features) {
+        if (f.type != CadFeatureType::Extrude || !f.enabled || f.mode != BooleanMode::Add) continue;
+        if (f.sketch_ref < 0 || f.sketch_ref >= int(doc.features.size()) || !doc.features[size_t(f.sketch_ref)].is_text()) continue;
+        if (!(f.distance <= 0.8 + 1e-6 && std::abs(f.taper_deg) >= 44.0)) raised_text = true;
+    }
+    if (raised_text)
         advise("text_indent", "Text reads best indented into a vertical face (cut, not raised): less overhang and better resolution");
     // R4a: strokes thinner than one extrusion line vanish in the slice. Open each glyph region by line_width (erode then dilate
     // by half of it): what the opening drops is what the nozzle cannot print. Fires when >=10 % of the glyph area is lost.
@@ -4561,7 +4620,7 @@ static void attach_print_fixes(json& notes, const json& suggestions, const CadDo
                         ear_corners.emplace_back(jn(c, 0), jn(c, 1), jn(c, 2));
     for (json& n : notes) {
         const std::string kind = n.value("kind", std::string());
-        std::string label, short_label, alt_label;
+        std::string label, short_label, alt_label, alt_short = "Round";
         json steps = json::array(), alt_steps = json::array();
         if ((kind == "vertical_edge" || kind == "inside_vertical_edge") && rot_id) {
             label = "Fillet the vertical edges (R 2 mm)";
@@ -4608,6 +4667,34 @@ static void attach_print_fixes(json& notes, const json& suggestions, const CadDo
             // R7: the nearest edge to the pin is the shelf-to-wall join; a 1.5 mm chamfer there fills the corner so the underside leans at 45 deg
             label = "Chamfer the shelf join (1.5 mm)";
             steps.push_back(json{{"method", "chamfer"}, {"params", {{"where", json{{"kind", "line"}, {"near", n["at"]}, {"limit", 1}}}, {"distance", 1.5}, {"body", body}}}});
+            // A deep shelf is out of a 1.5 mm chamfer's reach: triangular 45 deg gussets under it, no more than 10 mm apart.
+            if (n.contains("shelf") && n["shelf"].value("depth", 0.0) > 3.0) {
+                const json& sh = n["shelf"];
+                const Vec3d a(jn(sh["a"], 0), jn(sh["a"], 1), jn(sh["a"], 2)), b(jn(sh["b"], 0), jn(sh["b"], 1), jn(sh["b"], 2));
+                const Vec3d out(jn(sh["out"], 0), jn(sh["out"], 1), jn(sh["out"], 2));
+                const double leg = std::min(sh.value("depth", 0.0), sh.value("drop", 0.0));
+                const double len = (b - a).norm(), t = std::min(len, std::max(1.2, 3.0 * doc.variable_value("print_line_w", 0.42)));
+                if (leg > 1.5 && len > 1e-6) {
+                    const int    count = len > 2.0 * t ? std::min(8, std::max(2, int(std::ceil((len - t) / (10.0 + t))) + 1)) : 1;
+                    const Vec3d  dir = (b - a) / len;
+                    const Vec3d  hx = std::abs(dir.x()) < 0.9 ? Vec3d(1, 0, 0) : Vec3d(0, 1, 0);   // plane_from()'s frame for this normal
+                    const Vec3d  ax = (hx - dir * hx.dot(dir)).normalized(), ay = dir.cross(ax);
+                    const Vec3d  to_out = out * leg, down(0, 0, -leg);
+                    json ribs = json::array();
+                    for (int k = 0; k < count; ++k) {
+                        const Vec3d o = a + dir * (count > 1 ? (len - t) * k / (count - 1) : 0.0) - doc.modeling_origin;
+                        ribs.push_back(json{{"method", "extrude"}, {"params", {
+                            {"normal", {dir.x(), dir.y(), dir.z()}}, {"origin", {o.x(), o.y(), o.z()}},
+                            {"profile", json::array({json::array({0.0, 0.0}), json::array({to_out.dot(ax), to_out.dot(ay)}),
+                                                     json::array({down.dot(ax), down.dot(ay)})})},
+                            {"distance", t}, {"boolean", "union"}, {"body", body}}}});
+                    }
+                    alt_steps = std::move(steps); alt_label = label; alt_short = "Chamfer";
+                    steps = std::move(ribs);
+                    short_label = "Gusset";
+                    label = "Add " + std::to_string(count) + " triangular gusset(s) under the shelf (45 deg)";
+                }
+            }
         } else if (kind == "warp_risk" && rot_id) {
             label = "Add mouse ears (disc 10 mm, 0.3 mm)";
             short_label = "Ears";
@@ -4826,6 +4913,17 @@ static void attach_print_fixes(json& notes, const json& suggestions, const CadDo
                 steps.push_back(json{{"method", "set_feature_expr"}, {"params", {{"feature", int(i)}, {"field", "extrude_mode"}, {"expr", "2"}}}});
             }
             if (steps.empty()) continue;   // the text is already cut (or has no extrude)
+            // The other way: leave wall text raised, 0.4-0.8 mm proud, undersides sloped 45 deg.
+            for (size_t i = 0; i < doc.features.size() && alt_steps.size() < 12; ++i) {
+                const CadFeature& f = doc.features[i];
+                if (f.type != CadFeatureType::Extrude || !f.enabled || f.mode != BooleanMode::Add) continue;
+                if (f.sketch_ref < 0 || f.sketch_ref >= int(doc.features.size()) || !doc.features[size_t(f.sketch_ref)].is_text()) continue;
+                if (std::abs(doc.features[size_t(f.sketch_ref)].plane.normal.z()) >= 0.3) continue;
+                std::ostringstream o; o.imbue(std::locale::classic()); o << std::max(0.4, std::min(0.8, f.distance));
+                alt_steps.push_back(json{{"method", "set_feature_expr"}, {"params", {{"feature", int(i)}, {"field", "distance"}, {"expr", o.str()}}}});
+                alt_steps.push_back(json{{"method", "set_feature_expr"}, {"params", {{"feature", int(i)}, {"field", "taper_deg"}, {"expr", "45"}}}});
+            }
+            if (!alt_steps.empty()) { alt_label = "Keep the text raised: 0.4-0.8 mm proud, undersides sloped 45 deg"; alt_short = "Raised"; short_label = "Cut"; }
             label = "Cut the text into the face instead of raising it (cut_depth set by the face: 0.4-0.8 mm on walls, 2 layers on the bed)";
         } else if (kind == "curve_axis" && rot_id) {
             // Rotate every body about the origin so the curve's (sign-flipped, up-pointing) axis maps to +Z.
@@ -4864,7 +4962,7 @@ static void attach_print_fixes(json& notes, const json& suggestions, const CadDo
         }
         n["fix"] = json{{"label", label}, {"steps", std::move(steps)}};
         if (!short_label.empty()) n["fix"]["short"] = short_label;
-        if (!alt_steps.empty()) n["fix2"] = json{{"label", alt_label}, {"short", "Round"}, {"steps", std::move(alt_steps)}};
+        if (!alt_steps.empty()) n["fix2"] = json{{"label", alt_label}, {"short", alt_short}, {"steps", std::move(alt_steps)}};
     }
 }
 
@@ -4909,7 +5007,7 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
         if (nz >= -1e-9) continue;
         const double zc = (p0.z() + p1.z() + p2.z()) / 3.0;
         if (zc - zmin < 0.05 && -nz > 0.99) { bed += a; continue; }   // flat on the bed: contact, not an overhang
-        if (-nz <= cos_lim) continue;
+        if (-nz <= cos_lim + 1e-3) continue;   // a face at exactly the limit (a 45 deg gusset, chamfer, sheared letter) prints
         over += a;
         auto& lev = levels[std::lround(zc * 10.0)];
         auto& L = lev.d; auto& btris = lev.tris;
@@ -6350,41 +6448,39 @@ json action_thread_to_insert(DesignPanel* panel, const json& params)
     }
 }
 
-// Captive nut trap: a hexagonal pocket for a metric or inch nut, optionally with a slot so the nut slides in from the side after printing
-// pauses (or from a face). Nut size per ISO 4032 (width across flats s, thickness m max): M2 4/1.6, M2.5 5/2, M3 5.5/2.4, M4 7/3.2,
-// M5 8/4.7, M6 10/5.2, M8 13/6.8, M10 16/8.4, M12 18/10.8, M14 21/12.8, M16 24/14.8, M20 30/18, M24 36/21.5 (M1.6 3.2/1.3). The pocket is s + 2 x print_clear_xy across the flats and m + print_clear_z deep. The slot runs
-// along +x of the plane for `slot` mm from the centre, as wide as the pocket across flats.
+// Captive nut trap (CadDocument::add_nut_trap; sizes and their sources are in the kernel): the pocket is s + 2 x print_clear_xy
+// across the flats and m + print_clear_z deep; the slot runs along +x of the plane for `slot` mm from the centre.
 json action_nut_trap(DesignPanel* panel, const json& params)
 {
-    struct Nut { const char* d; double af, m; };
-    // Inch (mm = in x 25.4): #4-40 1/4 x 3/32, #6-32 5/16 x 7/64, #8-32 11/32 x 1/8, #10-24 3/8 x 1/8 (hex machine screw nuts, MS35649 / FF-N-836
-    // as tabulated by McMaster-Carr); 1/4-20 7/16 x 7/32, 5/16-18 1/2 x 17/64, 3/8-16 9/16 x 21/64 (hex nuts, ASME B18.2.2 as tabulated by McMaster-Carr).
-    static const Nut nuts[] = {{"M1.6", 3.2, 1.3}, {"M2", 4.0, 1.6}, {"M2.5", 5.0, 2.0}, {"M3", 5.5, 2.4}, {"M4", 7.0, 3.2}, {"M5", 8.0, 4.7}, {"M6", 10.0, 5.2}, {"M8", 13.0, 6.8},
-                               {"M10", 16.0, 8.4}, {"M12", 18.0, 10.8}, {"M14", 21.0, 12.8}, {"M16", 24.0, 14.8}, {"M20", 30.0, 18.0}, {"M24", 36.0, 21.5},
-                               {"#2-56", 4.763, 1.588}, {"#10-32", 9.525, 3.175}, {"#4-40", 6.350, 2.381}, {"#6-32", 7.938, 2.778}, {"#8-32", 8.731, 3.175}, {"#10-24", 9.525, 3.175},
-                               {"1/4-20", 11.113, 5.556}, {"5/16-18", 12.700, 6.747}, {"3/8-16", 14.288, 8.334}};
-    std::string desig = params.value("designation", std::string());
-    if (desig.size() > 4 && desig.compare(desig.size() - 4, 4, " UNC") == 0) desig.resize(desig.size() - 4);   // "#6-32 UNC" is the hole table's spelling
-    const Nut* nut = nullptr;
-    for (const Nut& n : nuts) if (desig == n.d) nut = &n;
-    if (!nut) throw std::runtime_error("nut_trap needs 'designation' one of M1.6, M2, M2.5, M3, M4, M5, M6, M8, M10, M12, M14, M16, M20, M24, #2-56, #10-32, #4-40, #6-32, #8-32, #10-24, 1/4-20, 5/16-18, 3/8-16");
-    const double slot = params.value("slot", 0.0);
-    if (slot < 0) throw std::runtime_error("slot must be >= 0");
+    const std::string desig = params.value("designation", std::string());
     CadDocument& doc = panel->mcp_doc();
-    const double cxy = doc.variable_value("print_clear_xy", 0.2), cz = doc.variable_value("print_clear_z", 0.25);
-    const double af = nut->af + 2.0 * cxy, R = af / std::sqrt(3.0);   // circumradius of a regular hexagon with flats af apart
-    const double x = params.value("x", 0.0), y = params.value("y", 0.0);
-    json prof = json::array();
-    auto pt = [&](double px, double py) { prof.push_back(json::array({x + px, y + py})); };
-    if (slot > R) { pt(0.5 * R, 0.5 * af); pt(slot, 0.5 * af); pt(slot, -0.5 * af); pt(0.5 * R, -0.5 * af); }
-    else { pt(0.5 * R, 0.5 * af); pt(R, 0.0); pt(0.5 * R, -0.5 * af); }
-    pt(-0.5 * R, -0.5 * af); pt(-R, 0.0); pt(-0.5 * R, 0.5 * af);
-    json ep = params;
-    ep["profile"] = prof; ep["distance"] = nut->m + cz; ep["boolean"] = "cut";
-    for (const char* k : {"designation", "slot", "x", "y"}) ep.erase(k);
-    json r = action_extrude(panel, ep);
-    r["nut"] = desig; r["across_flats_mm"] = af; r["depth_mm"] = nut->m + cz;
-    return r;
+    double af = 0, thick = 0;
+    if (!CadDocument::nut_size(desig, af, thick)) {
+        std::string all;
+        for (const std::string& n : CadDocument::nut_sizes()) all += (all.empty() ? "" : ", ") + n;
+        throw std::runtime_error("nut_trap needs 'designation' one of " + all);
+    }
+    const double slot = params.value("slot", 0.0), lh = params.value("bridge_layer_h", 0.0);
+    if (slot < 0 || lh < 0) throw std::runtime_error("slot and bridge_layer_h must be >= 0");
+    const bool bolt = params.value("bolt", false);
+    if (doc.bodies.empty()) throw std::runtime_error("no body to cut");
+    const SketchPlane pl = plane_from(params, doc);
+    const int target = target_body_arg(params, doc);
+    doc.checkpoint();
+    try {
+        const int e = doc.add_nut_trap(desig, params.value("x", 0.0), params.value("y", 0.0), slot, pl, target,
+                                       params.value("flip", false), bolt, lh);
+        const bool ok = doc.recompute();
+        if (!ok) { const std::string why = doc.error; doc.undo(); doc.error = why; }
+        panel->mcp_after_change();
+        return json{{"ok", ok}, {"extrude_index", e}, {"sketch_index", e - 1}, {"bodies", int(doc.bodies.size())}, {"nut", desig},
+                    {"across_flats_mm", af + 2.0 * doc.variable_value("print_clear_xy", 0.2)},
+                    {"depth_mm", thick + doc.variable_value("print_clear_z", 0.25)}, {"error", doc.error}};
+    } catch (const std::exception& ex) {
+        doc.undo();
+        panel->mcp_after_change();
+        return json{{"ok", false}, {"error", ex.what()}};
+    }
 }
 
 json action_rename_feature(DesignPanel* panel, const json& params)

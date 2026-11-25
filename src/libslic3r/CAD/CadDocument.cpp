@@ -1320,6 +1320,96 @@ int CadDocument::add_hole_styled(double diameter, double depth, bool through,
     return append_feature(f);
 }
 
+std::vector<std::string> CadDocument::insert_sizes()
+{
+    std::vector<std::string> out;
+    for (const auto& ie : kInsertTable) out.emplace_back(ie.desig);
+    return out;
+}
+
+bool CadDocument::insert_pocket(const std::string& designation, double& hole_d, double& depth)
+{
+    for (const auto& ie : kInsertTable)
+        if (designation == ie.desig) { hole_d = ie.hole_d; depth = ie.length_min; return true; }
+    return false;
+}
+
+// Nut size per ISO 4032 (width across flats s, thickness m max): M2 4/1.6, M2.5 5/2, M3 5.5/2.4, M4 7/3.2, M5 8/4.7, M6 10/5.2,
+// M8 13/6.8, M10 16/8.4, M12 18/10.8, M14 21/12.8, M16 24/14.8, M20 30/18, M24 36/21.5 (M1.6 3.2/1.3).
+// Inch (mm = in x 25.4): #4-40 1/4 x 3/32, #6-32 5/16 x 7/64, #8-32 11/32 x 1/8, #10-24 3/8 x 1/8 (hex machine screw nuts, MS35649 /
+// FF-N-836 as tabulated by McMaster-Carr); 1/4-20 7/16 x 7/32, 5/16-18 1/2 x 17/64, 3/8-16 9/16 x 21/64 (hex nuts, ASME B18.2.2).
+struct NutEntry { const char* desig; double af, m; };
+static const NutEntry kNutTable[] = {
+    {"M1.6", 3.2, 1.3}, {"M2", 4.0, 1.6}, {"M2.5", 5.0, 2.0}, {"M3", 5.5, 2.4}, {"M4", 7.0, 3.2}, {"M5", 8.0, 4.7}, {"M6", 10.0, 5.2},
+    {"M8", 13.0, 6.8}, {"M10", 16.0, 8.4}, {"M12", 18.0, 10.8}, {"M14", 21.0, 12.8}, {"M16", 24.0, 14.8}, {"M20", 30.0, 18.0},
+    {"M24", 36.0, 21.5}, {"#2-56", 4.763, 1.588}, {"#4-40", 6.350, 2.381}, {"#6-32", 7.938, 2.778}, {"#8-32", 8.731, 3.175},
+    {"#10-24", 9.525, 3.175}, {"#10-32", 9.525, 3.175}, {"1/4-20", 11.113, 5.556}, {"5/16-18", 12.700, 6.747}, {"3/8-16", 14.288, 8.334},
+};
+
+std::vector<std::string> CadDocument::nut_sizes()
+{
+    std::vector<std::string> out;
+    for (const auto& n : kNutTable) out.emplace_back(n.desig);
+    return out;
+}
+
+bool CadDocument::nut_size(const std::string& designation, double& across_flats, double& thickness)
+{
+    std::string d = designation;
+    if (d.size() > 4 && d.compare(d.size() - 4, 4, " UNC") == 0) d.resize(d.size() - 4);   // "#6-32 UNC" is the hole table's spelling
+    for (const auto& n : kNutTable)
+        if (d == n.desig) { across_flats = n.af; thickness = n.m; return true; }
+    return false;
+}
+
+bool CadDocument::bolt_clearance(const std::string& designation, double& diameter)
+{
+    const HoleStdEntry* e = hole_std_lookup(designation);
+    if (e != nullptr) diameter = e->clearance;
+    return e != nullptr;
+}
+
+std::vector<Vec2d> CadDocument::nut_trap_outline(double af, double x, double y, double slot)
+{
+    const double R = af / std::sqrt(3.0);   // circumradius of a regular hexagon with flats af apart
+    std::vector<Vec2d> p;
+    auto pt = [&](double px, double py) { p.emplace_back(x + px, y + py); };
+    if (slot > R) { pt(0.5 * R, 0.5 * af); pt(slot, 0.5 * af); pt(slot, -0.5 * af); pt(0.5 * R, -0.5 * af); }
+    else          { pt(0.5 * R, 0.5 * af); pt(R, 0.0); pt(0.5 * R, -0.5 * af); }
+    pt(-0.5 * R, -0.5 * af); pt(-R, 0.0); pt(-0.5 * R, 0.5 * af);
+    return p;
+}
+
+int CadDocument::add_nut_trap(const std::string& designation, double x, double y, double slot, const SketchPlane& plane,
+                              int target_body, bool flip, bool bolt_hole, double bridge_layer_h)
+{
+    double s = 0, m = 0, bolt_d = 0;
+    if (!nut_size(designation, s, m))
+        throw std::runtime_error(format(_u8L("unknown nut size \"%1%\""), designation));
+    if (bolt_hole && !bolt_clearance(designation, bolt_d))
+        throw std::runtime_error(format(_u8L("no bolt clearance is held for %1%: drill that hole yourself"), designation));
+    const double af = s + 2.0 * variable_value("print_clear_xy", 0.2), depth = m + variable_value("print_clear_z", 0.25);
+    SketchProfile prof;
+    prof.points = nut_trap_outline(af, x, y, slot);
+    prof.closed = true;
+    const int sk = add_sketch_profile(prof, plane, "Nut trap sketch " + designation);
+    const int ex = add_extrude(sk, depth, false, BooleanMode::Cut, "Nut trap " + designation);
+    features[size_t(ex)].target_body = target_body;
+    features[size_t(ex)].flip        = flip;
+    if (bolt_hole) {
+        // The lower of the two crossed strips runs along the hole's x: turn the hole's frame a quarter so it spans flat to flat.
+        SketchPlane hp = plane;
+        hp.x_axis = plane.y_axis;
+        hp.y_axis = -plane.x_axis;
+        if (flip) { hp.normal = -hp.normal; hp.y_axis = -hp.y_axis; }
+        const double hy = flip ? x : -x;
+        const int h = add_hole_styled(bolt_d, 10.0, true, y, hy, hp, 1, af, depth, 0, 0, designation, "Bolt hole " + designation);
+        features[size_t(h)].target_body         = target_body;
+        features[size_t(h)].hole_bridge_layer_h = bridge_layer_h;
+    }
+    return ex;
+}
+
 int CadDocument::add_hole_standard(const std::string& designation, int style, bool through,
                                    double depth, double x, double y,
                                    const SketchPlane& plane, const std::string& name)
@@ -3193,7 +3283,16 @@ void CadDocument::apply_feature(TopoDS_Shape& result, bool& have_body,
                                         sk.import_scale_x, sk.import_scale_y),
                       sk.plane,
                       f.extrude_end == ExtrudeEnd::ThroughAll ? 1e5 : signed_d,
-                      f.extrude_end == ExtrudeEnd::ThroughAll ? true : (sym || f.extrude_end == ExtrudeEnd::TwoSided))
+                      f.extrude_end == ExtrudeEnd::ThroughAll ? true : (sym || f.extrude_end == ExtrudeEnd::TwoSided),
+                      // Taper on art standing on a wall: not a draft (letters have holes and thin strokes) but a shear upward,
+                      // so every underside rises at that angle and prints without support.
+                      [&]() -> Vec3d {
+                          const Vec3d n = sk.plane.normal;
+                          if (f.extrude_end != ExtrudeEnd::Blind || std::abs(f.taper_deg) < 1e-6 || std::abs(f.taper_deg) > 60.0 || std::abs(n.z()) > 0.3)
+                              return Vec3d::Zero();
+                          const Vec3d up = (Vec3d(0, 0, 1) - n * n.z()).normalized();
+                          return up * (std::abs(signed_d) * std::tan(std::abs(f.taper_deg) * M_PI / 180.0));
+                      }())
                 : [&]() {
                     auto one_region = [&](TopoDS_Face profile) -> TopoDS_Shape {
                       if (f.thin_in > 0 || f.thin_out > 0) {
@@ -3674,8 +3773,15 @@ void CadDocument::apply_feature(TopoDS_Shape& result, bool& have_body,
             gp_Ax2 cbax(o, n);
             TopoDS_Shape cb = BRepPrimAPI_MakeCylinder(cbax, f.hole_cbore_diameter * 0.5,
                                                        f.hole_cbore_depth).Shape();
+            auto volume = [](const TopoDS_Shape& s) { GProp_GProps p; BRepGProp::VolumeProperties(s, p); return p.Mass(); };
+            const double v_before = volume(result);
             BRepAlgoAPI_Cut cbc(result, cb);
-            if (cbc.IsDone() && !cbc.Shape().IsNull()) result = cbc.Shape();
+            // Nothing removed: a wider pocket (a nut trap's hexagon) is already there. Keep the shape, no seam edges.
+            bool pocket_there = false;
+            if (cbc.IsDone() && !cbc.Shape().IsNull()) {
+                pocket_there = std::abs(v_before - volume(cbc.Shape())) < 1e-3;
+                if (!pocket_there) result = cbc.Shape();
+            }
             // Stepped sacrificial layers (printed with the ledge facing the bed): two strips as wide as the small bore, crossed, each
             // bridging the big bore's diameter, the lower along x, the upper along y. Clipped to the big bore. They block the small bore
             // by 2 layers; the part is meant to be drilled through after printing.
@@ -3684,13 +3790,16 @@ void CadDocument::apply_feature(TopoDS_Shape& result, bool& have_body,
                 const double D = f.hole_cbore_diameter, w = f.hole_diameter;
                 auto vec = [](const Vec3d& v) { return gp_Dir(v.x(), v.y(), v.z()); };
                 const Vec3d ux = f.plane.x_axis.normalized(), uy = f.plane.y_axis.normalized();
-                TopoDS_Shape disc = BRepPrimAPI_MakeCylinder(gp_Ax2(o, n), D * 0.5, f.hole_cbore_depth).Shape();
+                // In a hexagon the strips must reach the corners (circumradius D/sqrt3) and overlap the walls: a strip that only
+                // touches a flat along a line leaves non-manifold edges.
+                const double R = pocket_there ? D / std::sqrt(3.0) + 0.1 : D * 0.5;
+                TopoDS_Shape disc = BRepPrimAPI_MakeCylinder(gp_Ax2(o, n), R, f.hole_cbore_depth).Shape();
                 for (int k = 0; k < 2; ++k) {
                     const Vec3d lon = k == 0 ? ux : uy;   // strip runs along `lon`
                     const Vec3d lat = Vec3d(n.X(), n.Y(), n.Z()).cross(lon);   // the box's own y axis
                     const double z0 = f.hole_cbore_depth - (2 - k) * lh;           // k=0 lower layer, k=1 upper (against the ledge)
-                    const Vec3d corner = Vec3d(o.X(), o.Y(), o.Z()) - lon * (D * 0.5) - lat * (w * 0.5) + Vec3d(n.X(), n.Y(), n.Z()) * z0;
-                    TopoDS_Shape box = BRepPrimAPI_MakeBox(gp_Ax2(gp_Pnt(corner.x(), corner.y(), corner.z()), n, vec(lon)), D, w, lh).Shape();
+                    const Vec3d corner = Vec3d(o.X(), o.Y(), o.Z()) - lon * R - lat * (w * 0.5) + Vec3d(n.X(), n.Y(), n.Z()) * z0;
+                    TopoDS_Shape box = BRepPrimAPI_MakeBox(gp_Ax2(gp_Pnt(corner.x(), corner.y(), corner.z()), n, vec(lon)), 2 * R, w, lh).Shape();
                     BRepAlgoAPI_Common clip(box, disc);
                     if (!clip.IsDone() || clip.Shape().IsNull()) continue;
                     BRepAlgoAPI_Fuse fz(result, clip.Shape());

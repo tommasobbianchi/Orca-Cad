@@ -436,7 +436,12 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
                     // equal-width button slots (Fix [Fix 2] | OK | X) so the columns line up whether or not a row has a Fix
                     const float bw = ImGui::CalcTextSize("Fix").x + 2.f * ImGui::GetStyle().FramePadding.x + 4.f * em;
                     const bool any2 = std::any_of(ns.begin(), ns.end(), [](const PrintNote& p) { return p.open && !p.fix2_json.empty(); });
-                    const float fw = any2 ? ImGui::CalcTextSize("Round").x + 2.f * ImGui::GetStyle().FramePadding.x + 4.f * em : bw;
+                    float fw = bw;
+                    if (any2)
+                        for (const PrintNote& p : ns)
+                            if (p.open && !p.fix2_json.empty())
+                                for (const std::string* l : { &p.fix_short, &p.fix2_short })
+                                    fw = std::max(fw, ImGui::CalcTextSize(l->c_str()).x + 2.f * ImGui::GetStyle().FramePadding.x + 4.f * em);
                     const int fixslots = any2 ? 2 : 1;
                     const float text_w = std::max(40.f * em, pw - badge_w - 2.f * (bw + ImGui::GetStyle().ItemSpacing.x) - fixslots * (fw + ImGui::GetStyle().ItemSpacing.x) - 36.f * em);
                     ImGui::Dummy(ImVec2(badge_w, row_h));

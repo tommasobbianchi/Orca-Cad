@@ -273,7 +273,8 @@ public:
     // solids into a single shape. Empty/degenerate contours are skipped.
     static TopoDS_Shape make_extrude_regions(
         const std::vector<std::vector<std::vector<Vec2d>>>& regions,
-        const SketchPlane& plane, double length, bool symmetric = false);
+        const SketchPlane& plane, double length, bool symmetric = false,
+        const Vec3d& shear = Vec3d::Zero());   // added to the prism vector (not with symmetric)
 
     // Revolve the closed profile wire about `axis` (world) by angle_deg; a negative angle sweeps
     // the other way (Flip). The profile must lie to one side of the axis (Onshape rule): one that

@@ -175,6 +175,18 @@ import re
 vals = [float(m) for d in dist for m in re.findall(r'"distance"[^0-9-]*([0-9.]+)', d)]
 print("distances:", vals)
 check(any(0.39 <= v <= 0.81 for v in vals), "R4b: wall text depth clamped to 0.4-0.8 mm after the fix")
+check(not kind_notes(safe("analyze_printability", body=0), "text_indent"), "R4: the advice leaves once the text is engraved")
+# the other choice: keep it raised, shallow, undersides at 45 deg
+fresh()
+box(40, 40, 20)
+safe("add_text", text="ORCA", height=8, plane="XZ", body=0, extrude_distance=1.5, boolean="union")
+n = kind_notes(safe("analyze_printability", body=0), "text_indent")
+check(bool(n) and n[0].get("fix2", {}).get("short") == "Raised", "R4: raised wall text offers Cut and Raised")
+r = safe("apply_print_fix", kind="text_indent", body=0, alt=1)
+time.sleep(0.5)
+a = safe("analyze_printability", body=0)
+check("__error__" not in r and r.get("ok") is not False and not kind_notes(a, "text_indent"), "R4: Raised keeps the text proud and the advice leaves (%s)" % (r.get("__error__") or "ok"))
+check(not kind_notes(a, "small_overhang"), "R4: undersides sloped 45 deg are not reported as overhangs (%d)" % len(kind_notes(a, "small_overhang")))
 
 
 # --- R5: knife edge ---
@@ -318,8 +330,39 @@ r = safe("apply_print_fix", kind="shelf_underside", body=0)
 time.sleep(0.5)
 check("__error__" not in r, "R7 fix: apply_print_fix shelf_underside runs (%s)" % (r.get("__error__") or "ok"))
 vol1 = safe("mass_properties", body=0).get("volume")
-check(vol1 - vol0 > 20, "R7 fix: a 1.5 mm chamfer on the concave join ADDS material (gained %.1f mm3)" % (vol1 - vol0))
+check(vol1 - vol0 > 20, "R7 fix: the default fix of this deep shelf ADDS material (gained %.1f mm3)" % (vol1 - vol0))
 
+
+# --- R7 gussets on a deep shelf ---
+fresh()
+box(40, 40, 20)
+safe("primitive", shape="box", at=[30, 0, 10], width=20, depth=40, height=3, boolean="union", body=0)
+n = kind_notes(safe("analyze_printability", body=0), "shelf_underside")
+check(bool(n) and n[0].get("fix", {}).get("short") == "Gusset" and n[0].get("fix2", {}).get("short") == "Chamfer",
+      "R7: a 20 mm deep shelf offers Gusset, with Chamfer as the other choice")
+vol0 = safe("mass_properties", body=0).get("volume")
+r = safe("apply_print_fix", kind="shelf_underside", body=0)
+time.sleep(0.5)
+gain = safe("mass_properties", body=0).get("volume", 0) - vol0
+check("__error__" not in r and 200 < gain < 500, "R7 fix: gussets add thin 45 deg ribs, not a full wedge (gained %.1f mm3)" % gain)
+check(not kind_notes(safe("analyze_printability", body=0), "shelf_underside"), "R7: a gusseted shelf is not reported again")
+
+# --- R2: nut trap with bolt hole and bridge layers ---
+fresh()
+box(30, 30, 15)
+v0 = safe("mass_properties", body=0).get("volume")
+r = safe("nut_trap", designation="M3", x=0, y=0, plane="XY")
+vt = v0 - safe("mass_properties", body=0).get("volume")
+safe("undo")
+r = safe("nut_trap", designation="M3", x=0, y=0, plane="XY", bolt=True)
+vb = v0 - safe("mass_properties", body=0).get("volume")
+check(r.get("ok") and vb > vt + 80, "R2: nut_trap bolt=true also drills the bolt hole (%.1f vs %.1f mm3 removed)" % (vb, vt))
+safe("undo")
+r = safe("nut_trap", designation="M3", x=0, y=0, plane="XY", bolt=True, bridge_layer_h=0.4)
+vs = v0 - safe("mass_properties", body=0).get("volume")
+check(r.get("ok") and 5 < vb - vs < 40, "R2: bridge layers leave two crossed strips on the ledge (%.1f mm3 kept)" % (vb - vs))
+mr = kind_notes(safe("analyze_printability", body=0), "mesh_integrity")
+check(not mr, "R2: the bridged nut trap is watertight (%s)" % (mr[0].get("text") if mr else "ok"))
 
 # --- R2 fix: thread -> insert ---
 fresh()
