@@ -497,6 +497,7 @@ r = safe("apply_print_fix", kind="wall_multiple", body=0)
 time.sleep(0.5)
 v1 = safe("mass_properties", body=0).get("volume")
 check("__error__" not in r and abs(v1 - 20 * 10 * 0.84) < 1.0, "R6 fix: the wall becomes 2 lines = 0.84 mm (volume %.1f, want 168)" % v1)
+check(not kind_notes(safe("analyze_printability", body=0), "thin_wall"), "R6 fix: the fixed 2-line wall is not then called thin")
 
 fresh()
 box(20, 20, 10.07)

@@ -4317,7 +4317,8 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
             const double t = h.distance() + 0.02;
             if (t > 10.0 * line_width) continue;   // a block, not a wall
             ++used; if (t < tmin) { tmin = t; tat = c; tat_n = nu; }
-            if (t < 2.0 * line_width) { ++thin; if (thin_tris.size() < 2000) thin_tris.push_back(int(fidx)); }
+            // exactly 2 lines is solid; float mesh vertices measure it a hair under
+            if (t < 2.0 * line_width - 1e-3) { ++thin; if (thin_tris.size() < 2000) thin_tris.push_back(int(fidx)); }
             const double k = t / line_width, r = std::round(k);
             if (r >= 1 && std::abs(k - r) > 0.25) ++off;
         }
