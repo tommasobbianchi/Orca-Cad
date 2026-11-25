@@ -3534,11 +3534,16 @@ DesignPanel::DesignPanel(wxWindow* parent)
     m_viewport->on_print_fix_requested = [this](int i, int alt) { on_apply_print_fix(i, alt); };
     m_viewport->print_profile_get = [this](const char* n, double d) { return m_doc.variable_value(n, d); };
     m_viewport->print_profile_set = [this](const char* n, const std::string& expr) {
-        const std::string name = n;
-        const auto it = m_doc.variables.find(name);
-        if (expr.empty() ? it == m_doc.variables.end() : (it != m_doc.variables.end() && it->second == expr)) return;   // nothing changes
+        std::vector<std::string> names{n};
+        if (names[0].empty()) names = {"print_nozzle", "print_line_w", "print_layer_h", "print_bed_x", "print_bed_y", "print_bed_z", "print_warp_prone", "print_multiples"};
+        const bool changes = std::any_of(names.begin(), names.end(), [&](const std::string& name) {
+            const auto it = m_doc.variables.find(name);
+            return expr.empty() ? it != m_doc.variables.end() : (it == m_doc.variables.end() || it->second != expr);
+        });
+        if (!changes) return;
         m_doc.checkpoint();   // one undo step per edit
-        if (expr.empty()) m_doc.variables.erase(name); else m_doc.variables[name] = expr;
+        for (const std::string& name : names)
+            if (expr.empty()) m_doc.variables.erase(name); else m_doc.variables[name] = expr;
         bool ok = false;
         try { ok = m_doc.recompute(); } catch (const std::exception&) {}
         if (!ok) { m_doc.undo(); set_status(StatusKind::Error, _L("That value could not be applied")); return; }

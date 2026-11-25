@@ -109,7 +109,7 @@ public:
     std::function<void()>  on_print_check_toggle;   // the toggle turned the check ON: a fresh analysis is wanted
     std::function<void(int, int)> on_print_fix_requested; // a Fix row was clicked in the Print check panel
     std::function<double(const char*, double)>           print_profile_get;   // the Print profile section: a document variable, or the fallback
-    std::function<void(const char*, const std::string&)> print_profile_set;   // ... set from an expression, "" removes it
+    std::function<void(const char*, const std::string&)> print_profile_set;   // ... set from an expression, "" removes it; name "" resets the whole profile
     void set_print_note_state(int i, bool open, bool resolved);   // a side-list row's resolve/dismiss
     void set_print_focus(int i);                                  // ring the pin ~2 s (camera does not move)
     std::function<void()> on_print_notes_changed;

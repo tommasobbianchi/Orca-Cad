@@ -513,10 +513,7 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
                     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.30f, 0.30f, 0.32f, 1.f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.40f, 0.40f, 0.43f, 1.f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.48f, 0.48f, 0.52f, 1.f));
-                    if (ImGui::Button("Reset profile")) {
-                        for (const char* var : {"print_nozzle", "print_line_w", "print_layer_h", "print_bed_x", "print_bed_y", "print_bed_z", "print_warp_prone", "print_multiples"})
-                            profile_set(var, "");
-                    }
+                    if (ImGui::Button("Reset profile")) profile_set("", "");   // all of it, one undo step
                     ImGui::PopStyleColor(3);
                 }
             }
