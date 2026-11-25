@@ -101,7 +101,8 @@ public:
     // The print check's issues, pinned on the part (replaces the previous set; empty clears them).
     // `body_mesh` is the checked body's display mesh (model frame): it feeds the hidden-pin occlusion
     // ray cast and the red-tint triangle fill. It is copied; the doc may rebuild its meshes later.
-    void set_print_notes(std::vector<PrintNote> n, const TriangleMesh* body_mesh = nullptr);
+    void set_print_notes(std::vector<PrintNote> n, const TriangleMesh* body_mesh = nullptr, int body = -1);
+    std::function<Transform3d(int)> print_body_xform;   // the checked body's current display-only Move
     const std::vector<PrintNote>& print_notes() const { return m_print_note_list; }
     // The "Print check" toggle: when off, no pins, tint or side list are drawn and no analysis runs.
     bool print_check_on() const { return m_print_check_on; }
@@ -534,6 +535,7 @@ private:
     DesignQuoteOverlay  m_quotes;
     DesignPrintNotesOverlay m_print_notes;
     std::vector<PrintNote>  m_print_note_list;
+    int                     m_print_body{-1};
     TriangleMesh            m_print_mesh;                  // a copy of the checked body's display mesh
     std::unique_ptr<AABBMesh> m_print_aabb;               // for the occlusion ray cast
     int                     m_print_focus{-1};

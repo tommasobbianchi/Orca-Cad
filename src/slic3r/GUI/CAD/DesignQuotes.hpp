@@ -73,6 +73,7 @@ public:
     // Set by the canvas each frame: the body's display mesh for the red tint and the occlusion ray cast, and the focus ring.
     const indexed_triangle_set* its{nullptr};
     const AABBMesh*            aabb{nullptr};
+    Transform3d                xf{Transform3d::Identity()};   // the checked body's display-only Move: notes and mesh stay in its own frame
     int  focus_index{-1};
     bool focus_active{false};
 

@@ -3522,6 +3522,7 @@ DesignPanel::DesignPanel(wxWindow* parent)
 
     // The Print check toggle and its Fix buttons drive through the panel: the canvas only draws.
     m_viewport->on_print_check_toggle = [this]() { auto_print_check(); };
+    m_viewport->print_body_xform = [this](int b) { return b < int(m_body_xform.size()) ? m_body_xform[b] : Transform3d::Identity(); };
     m_viewport->set_section_target([this](Vec3d& normal, Vec3d& point, std::string& name) {
         wxString what;
         if (!sketch_plane_target(what)) return false;   // the same face-or-plane pick a new sketch lands on
@@ -6528,7 +6529,7 @@ void DesignPanel::on_print_check()
     catch (const std::exception& e) { set_status(StatusKind::Error, wxString::FromUTF8(e.what())); return; }
     if (m_viewport)
         m_viewport->set_print_notes(std::move(pins),
-            b >= 0 && b < int(m_doc.display_body_meshes.size()) ? &m_doc.display_body_meshes[b] : nullptr);
+            b >= 0 && b < int(m_doc.display_body_meshes.size()) ? &m_doc.display_body_meshes[b] : nullptr, b);
     if (clean) set_status(StatusKind::Ok, _L("Print check: nothing to fix for FDM printing as the part now lies on the bed"));
     else       set_status(StatusKind::Warning, wxString::Format(_L("Print check: %s"), wxString::FromUTF8(text)));
 }
@@ -6547,7 +6548,7 @@ void DesignPanel::auto_print_check()
     catch (...) { if (m_viewport) m_viewport->set_print_notes({}); return; }   // a body that cannot be analysed (surface, sheet) is not a problem to report here
     if (m_viewport)
         m_viewport->set_print_notes(std::move(pins),
-            b >= 0 && b < int(m_doc.display_body_meshes.size()) ? &m_doc.display_body_meshes[b] : nullptr);
+            b >= 0 && b < int(m_doc.display_body_meshes.size()) ? &m_doc.display_body_meshes[b] : nullptr, b);
     m_auto_check_ms = (wxGetLocalTimeMillis() - t0).GetValue();
     if (!clean) set_status(StatusKind::Warning, wxString::Format(_L("Print check: %s"), wxString::FromUTF8(text)));
 }

@@ -5169,7 +5169,7 @@ json action_analyze_printability(DesignPanel* panel, const json& params)
     if (DesignCanvas* v = panel->mcp_viewport()) {
         std::vector<PrintNote> pnl;
         build_print_pins(notes, false, &pnl);
-        v->set_print_notes(std::move(pnl), &doc.display_body_meshes[b]);
+        v->set_print_notes(std::move(pnl), &doc.display_body_meshes[b], b);
     }
     return json{{"ok", true}, {"body", b}, {"height_mm", bb.size().z()}, {"footprint_mm", {bb.size().x(), bb.size().y()}},
                 {"bed_contact_mm2", bed}, {"overhang_mm2", over}, {"overhang_pct", area > 0 ? 100.0 * over / area : 0.0},

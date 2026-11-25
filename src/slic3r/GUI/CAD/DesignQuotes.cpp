@@ -295,7 +295,10 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
     if (!notes) return;
     std::vector<PrintNote>& ns = notes();
     if (ns.empty() && !(its && profile_get && profile_set)) return;   // nothing to pin and no checked body to hang the profile on
-    const Projector proj(camera);
+    Projector proj(camera);
+    // A moved body is drawn through xf: project through it too, and bring the eye into the body's frame (xf is rigid) for facing/occlusion.
+    proj.to_clip = proj.to_clip * xf.matrix();
+    proj.eye     = xf.inverse() * proj.eye;
     ImDrawList*     dl = ImGui::GetBackgroundDrawList();
     const float     em = imgui.get_style_scaling();
     Style st;

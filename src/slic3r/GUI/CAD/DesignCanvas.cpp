@@ -233,6 +233,7 @@ DesignCanvas::DesignCanvas(wxWindow* parent)
         if (m_quotes_on) m_quotes.render(imgui, wxGetApp().plater()->get_camera(), m_canvas->get_scale());   // under the bars: they draw after
         m_print_notes.its = m_print_mesh.empty() ? nullptr : &m_print_mesh.its;
         m_print_notes.aabb = m_print_aabb.get();
+        m_print_notes.xf = print_body_xform && m_print_body >= 0 ? print_body_xform(m_print_body) : Transform3d::Identity();
         if (!m_print_notes.profile_get) {
             m_print_notes.profile_get = [this](const char* n, double d) { return print_profile_get ? print_profile_get(n, d) : d; };
             m_print_notes.profile_set = [this](const char* n, const std::string& e) { if (print_profile_set) print_profile_set(n, e); request_repaint(); };
@@ -727,8 +728,9 @@ void DesignCanvas::set_sketch_polygon_edge(bool e)
     m_sketch_tool.set_polygon_edge(e);
 }
 
-void DesignCanvas::set_print_notes(std::vector<PrintNote> n, const TriangleMesh* body_mesh)
+void DesignCanvas::set_print_notes(std::vector<PrintNote> n, const TriangleMesh* body_mesh, int body)
 {
+    m_print_body = body;
     s_print_note_frames = 3;
     m_print_note_list = std::move(n);
     if (body_mesh && !body_mesh->empty()) {
