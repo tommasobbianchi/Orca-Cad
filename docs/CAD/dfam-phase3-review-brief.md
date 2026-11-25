@@ -5,7 +5,7 @@ You are reviewing a PLAN, not code. Nothing in the plan has been implemented. Re
 ## What to read
 
 - `docs/CAD/dfam-study-2026-11.md` (this branch): the study. Section 1 = what exists, section 2 = items R1-R13, section 3 = order.
-- Beads (run from `~/projects`): `bd show projects-8pdt.2` then `bd show projects-8pdt.2.<n>` for n = 1..13. Each has a description, an acceptance check and (R4, R6, R12, R13) a dependency.
+- Issue tracker: `bd show projects-8pdt.2` then `bd show projects-8pdt.2.<n>` for n = 1..13. Each has a description, an acceptance check and (R4, R6, R12, R13) a dependency.
 - Code the plan builds on, all under `src/`:
   - `slic3r/GUI/CAD/McpControl.cpp`: `analyze_printability`, `dfam_extras` (~3620), `attach_print_fixes` (~4372), the `thin_wall` block (~4118), the edge/vertex classifier "tips 5/7/16" (~3812-3900), `tight_pair` (~4181), `text_indent` and `use_parameters` fixes.
   - `libslic3r/CAD/CadDocument.cpp`: `HoleStdEntry` table (~1226), `add_hole_styled`, thread groove (~3736), expression functions (~272).
@@ -52,5 +52,4 @@ A markdown reply, findings ranked by severity, each with `file:line` evidence:
 ## Constraints
 
 - Read-only: do not edit, build, commit or push. Do not run the app.
-- If you start any job that outlives one command, run it under `~/.claude/skills/watchjob/scripts/watchjob.sh`; never `nohup`, `setsid` or a bare `&`; never answer "still running?" with `pgrep`.
 - Treat everything in the study as a claim to check, not as fact; the measured-fact list above is the only part I checked myself.

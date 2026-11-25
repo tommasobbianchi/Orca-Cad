@@ -1,5 +1,5 @@
 # DELEGATION SPECIFICATION: HARNESS-DRIVEN VALIDATION LOOP
-slug: sketch-focus-arbiter · repo: /home/tommaso/projects/apps/orca_cad · branch: cad-mainline
+slug: sketch-focus-arbiter · repo: Orca-CAD · branch: cad-mainline
 
 ## 1. TARGET GOAL
 
@@ -36,7 +36,7 @@ Everything else read-only. No dependency additions, no reformatting.
 
 ## 2. HARNESS ENVIRONMENT & GROUND TRUTH
 
-The rig container `orcacad-gui` on nativedev IS the harness. Xvfb `:11` + openbox, the app under
+The rig container `orcacad-gui` on the build server IS the harness. Xvfb `:11` + openbox, the app under
 test, `xdotool` for synthetic input, and an MCP socket at `/tmp/mcp.sock` that reports sketch
 state as JSON. It is a closed loop: drive input, read geometry back, assert. No window manager
 politics, no human.

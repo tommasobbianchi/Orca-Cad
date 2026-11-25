@@ -10,7 +10,7 @@ reversed), and the negatives are the clean primitives.
     python3 -I scripts/CAD/check-meshfix.py [socket]   # default /tmp/orca-cad-mcp.sock
 Exit 0 = every assertion held; exit 1 when any check failed.
 """
-import json, os, socket, sys, time
+import json, os, socket, sys, tempfile, time
 
 SOCK = sys.argv[1] if len(sys.argv) > 1 else "/tmp/orca-cad-mcp.sock"
 _n = 0
@@ -108,7 +108,7 @@ def write_cube_stl(path, omit=None, reverse=None):
         f.write("endsolid cube\n")
 
 
-os.makedirs("/tmp/claude-1000", exist_ok=True)
+TMP = tempfile.mkdtemp(prefix="meshfix-")
 
 # --- (a) a clean box: no mesh_integrity note, no result key -------------------
 call("new_document")
@@ -133,7 +133,7 @@ check("mesh_integrity" not in extras_of(res), "the bore-box result has no mesh_i
 
 # --- (c) a cube missing one triangle: an open gap ------------------------------
 call("new_document")
-gap_path = "/tmp/claude-1000/open-cube.stl"
+gap_path = os.path.join(TMP, "open-cube.stl")
 write_cube_stl(gap_path, omit=4)   # omit the first top triangle
 r = safe_call("import_mesh", path=gap_path)
 check(r.get("ok") is True and r.get("bodies", 0) >= 1,
@@ -153,7 +153,7 @@ check(any(s.get("kind") == "mesh_repair" for s in res.get("suggestions", [])),
 
 # --- (d) a cube with one triangle's winding reversed ---------------------------
 call("new_document")
-rev_path = "/tmp/claude-1000/reversed-cube.stl"
+rev_path = os.path.join(TMP, "reversed-cube.stl")
 write_cube_stl(rev_path, reverse=4)   # flip the first top triangle
 r = safe_call("import_mesh", path=rev_path)
 check(r.get("ok") is True and r.get("bodies", 0) >= 1,

@@ -10,7 +10,7 @@
 #   scripts/CAD/run-kernel-tests.sh                        # [CadDocument] tags, default volume
 #   scripts/CAD/run-kernel-tests.sh --tags '[CadDocument],[Sketch]'
 #   scripts/CAD/run-kernel-tests.sh --vol wt_mirror        # private build cache (parallel workers)
-#   scripts/CAD/run-kernel-tests.sh --host tommaso@100.103.234.2   # build on a remote host
+#   scripts/CAD/run-kernel-tests.sh --host user@host   # build on a remote host
 #
 # Parallel workers MUST pass a distinct --vol: two builds sharing one cache corrupt
 # each other. A new volume pays one full build; runs after that are incremental.

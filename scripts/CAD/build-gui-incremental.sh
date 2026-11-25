@@ -8,7 +8,7 @@
 #
 # Result: edit -> rebuild in seconds-to-minutes instead of a full Docker rebuild.
 #
-# Usage (run on the build host, e.g. behemoth, from anywhere):
+# Usage (run on the build host, from anywhere):
 #   scripts/CAD/build-gui-incremental.sh
 #   IMAGE=orcacad-deps scripts/CAD/build-gui-incremental.sh
 #

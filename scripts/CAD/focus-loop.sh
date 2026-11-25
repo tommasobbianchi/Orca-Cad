@@ -8,15 +8,15 @@
 #
 # WHY THIS EXISTS. The focus defects in the Design tab were chased for days by hand: build, launch
 # the GUI, drive it with xdotool, read a screenshot, guess, repeat. That needs a person at every
-# step and it is where the days went. This does not: behemoth carries an agent-owned Xvfb :10 with
+# step and it is where the days went. This does not: the build host carries an agent-owned Xvfb :10 with
 # openbox, the app, xdotool and an MCP socket that reports sketch state as JSON, so a turn is
 # sync -> build -> restart -> assert, and the ASSERTION is the verdict, not my reading of a picture.
 #
-# WHY BEHEMOTH AND NOT THE orcacad-gui RIG CONTAINER. The rig was the obvious host and it does not
+# WHY THE BUILD HOST AND NOT THE orcacad-gui RIG CONTAINER. The rig was the obvious host and it does not
 # work for this: its image pins a dependency set 216 non-CAD source files behind cad-mainline
 # (assimp among them), so today's CAD sources call GUI_App::is_auto_close_sketch_loops and
 # MainFrame::ensure_design_panel, which that tree has never heard of. Syncing all of src/ to fix
-# that needs a deps rebuild measured in hours. behemoth already builds this exact tree, already
+# that needs a deps rebuild measured in hours. the build host already builds this exact tree, already
 # runs a WM on :10, and is the machine the user actually runs the product on — so the loop asserts
 # against the shipping artefact rather than a stale twin. Reviving the rig means rebuilding its
 # deps image first; until then it cannot adjudicate anything about this code.
@@ -26,7 +26,7 @@
 # shellcheck disable=SC2029
 set -uo pipefail
 
-HOST="${HOST:-tommaso@100.103.234.2}"
+HOST="${HOST:?set HOST=user@address of the build host}"
 DISP="${DISP:-:10}"
 SRC="${SRC:-\$HOME/projects/orca/orcacad-native/src}"
 TRACE="${TRACE:-/tmp/ux-focus-loop.log}"
@@ -39,7 +39,7 @@ die() { printf 'GATE FAILED: %s\n' "$*" >&2; exit 1; }
 ssh -o ConnectTimeout=10 "$HOST" true || die "cannot reach $HOST"
 
 # ---------------------------------------------------------------- S1 sync
-# Only the CAD paths and the ladders. behemoth's tree is a full cad-mainline checkout kept in step
+# Only the CAD paths and the ladders. the build host's tree is a full cad-mainline checkout kept in step
 # by its own realign; pushing unrelated files from here would make the build host disagree with
 # git for reasons no later session could reconstruct.
 say "S1 sync"
