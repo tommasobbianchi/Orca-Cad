@@ -31,6 +31,15 @@ struct Projector {
     explicit Projector(const Camera& cam)
         : to_clip(cam.get_projection_matrix().matrix() * cam.get_view_matrix().matrix()), vp(cam.get_viewport()), eye(cam.get_position()) {}
 
+    // For a body drawn through a rigid display Move: points stay in the body's own frame, and so does the eye (facing, occlusion).
+    Projector moved(const Transform3d& xf) const
+    {
+        Projector p = *this;
+        p.to_clip = to_clip * xf.matrix();
+        p.eye     = xf.inverse() * eye;
+        return p;
+    }
+
     bool operator()(const Vec3d& w, ImVec2& out) const
     {
         const Eigen::Vector4d clip = to_clip * w.homogeneous();
@@ -104,8 +113,8 @@ void DesignQuoteOverlay::render(ImGuiWrapper& imgui, const Camera& camera, float
     const std::vector<Quotes::Quote>& qs = quotes();
     if (qs.empty()) return;
 
-    const Projector proj(camera);
-    if (std::getenv("ORCA_CAD_UITRACE")) { ImVec2 t; const bool ok = proj(Vec3d(0, 0, 0), t); std::fprintf(stderr, "[UI] quotes n=%zu origin ok=%d (%.0f,%.0f) vp=%d,%d,%d,%d\n", qs.size(), int(ok), double(t.x), double(t.y), proj.vp[0], proj.vp[1], proj.vp[2], proj.vp[3]); }
+    const Projector base(camera);
+    if (std::getenv("ORCA_CAD_UITRACE")) { ImVec2 t; const bool ok = base(Vec3d(0, 0, 0), t); std::fprintf(stderr, "[UI] quotes n=%zu origin ok=%d (%.0f,%.0f) vp=%d,%d,%d,%d\n", qs.size(), int(ok), double(t.x), double(t.y), base.vp[0], base.vp[1], base.vp[2], base.vp[3]); }
     ImDrawList*     dl = ImGui::GetBackgroundDrawList();
     const float     em = imgui.get_style_scaling();
 
@@ -158,6 +167,7 @@ void DesignQuoteOverlay::render(ImGuiWrapper& imgui, const Camera& camera, float
 
     // ---- the overall size: three lines on the body's box, on the sides facing the eye ---------------------------------
     for (const Quotes::Quote& q : qs) {
+        const Projector proj = base.moved(body_xform ? body_xform(q.body) : Transform3d::Identity());
         if (q.kind != Quotes::Kind::Extent) continue;
         const Vec3d lo = q.a, hi = q.b, c = 0.5 * (lo + hi);
         const double diag   = (hi - lo).norm();
@@ -200,6 +210,7 @@ void DesignQuoteOverlay::render(ImGuiWrapper& imgui, const Camera& camera, float
 
     // ---- a hexagonal pocket's side and depth: along the edge itself, set a little inside the pocket ------------------------
     for (const Quotes::Quote& q : qs) {
+        const Projector proj = base.moved(body_xform ? body_xform(q.body) : Transform3d::Identity());
         if (q.kind != Quotes::Kind::Linear) continue;
         const Vec3d o = q.out * q.off, ext = q.out * (q.off * 1.35);
         ImVec2 s0, s1, e0, e1, x0, x1;
@@ -229,6 +240,7 @@ void DesignQuoteOverlay::render(ImGuiWrapper& imgui, const Camera& camera, float
 
     // ---- holes, shafts and rounds: at the end of the cylinder nearer the eye -------------------------------------------
     for (const Quotes::Quote& q : qs) {
+        const Projector proj = base.moved(body_xform ? body_xform(q.body) : Transform3d::Identity());
         if (q.kind == Quotes::Kind::Extent || q.kind == Quotes::Kind::Linear || q.spots.empty()) continue;
         // the instance nearest the eye (a pattern of holes is dimensioned once)
         const Quotes::Spot* spot = &q.spots.front();
@@ -295,10 +307,7 @@ void DesignPrintNotesOverlay::render(ImGuiWrapper& imgui, const Camera& camera)
     if (!notes) return;
     std::vector<PrintNote>& ns = notes();
     if (ns.empty() && !(its && profile_get && profile_set)) return;   // nothing to pin and no checked body to hang the profile on
-    Projector proj(camera);
-    // A moved body is drawn through xf: project through it too, and bring the eye into the body's frame (xf is rigid) for facing/occlusion.
-    proj.to_clip = proj.to_clip * xf.matrix();
-    proj.eye     = xf.inverse() * proj.eye;
+    const Projector proj = Projector(camera).moved(xf);
     ImDrawList*     dl = ImGui::GetBackgroundDrawList();
     const float     em = imgui.get_style_scaling();
     Style st;

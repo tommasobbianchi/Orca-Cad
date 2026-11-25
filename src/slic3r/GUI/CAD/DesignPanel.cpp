@@ -3522,7 +3522,9 @@ DesignPanel::DesignPanel(wxWindow* parent)
 
     // The Print check toggle and its Fix buttons drive through the panel: the canvas only draws.
     m_viewport->on_print_check_toggle = [this]() { auto_print_check(); };
-    m_viewport->print_body_xform = [this](int b) { return b < int(m_body_xform.size()) ? m_body_xform[b] : Transform3d::Identity(); };
+    const auto body_move = [this](int b) { return b < int(m_body_xform.size()) ? m_body_xform[b] : Transform3d::Identity(); };
+    m_viewport->print_body_xform = body_move;
+    m_viewport->quote_overlay().body_xform = body_move;
     m_viewport->set_section_target([this](Vec3d& normal, Vec3d& point, std::string& name) {
         wxString what;
         if (!sketch_plane_target(what)) return false;   // the same face-or-plane pick a new sketch lands on

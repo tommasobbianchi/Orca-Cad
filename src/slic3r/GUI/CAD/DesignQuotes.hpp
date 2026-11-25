@@ -47,6 +47,7 @@ class DesignQuoteOverlay
 public:
     std::function<const std::vector<Quotes::Quote>&()> quotes;   // what to draw this frame
     std::function<void(int feature)>                   edit;     // a quote with a driving feature was clicked
+    std::function<Transform3d(int body)>               body_xform;   // that body's current display-only Move
 
     void render(ImGuiWrapper& imgui, const Camera& camera, float scale);
     bool hovered() const { return m_hovered; }
