@@ -551,6 +551,7 @@ static const std::map<std::string, double CadFeature::*>& bindable_double_fields
         {"cut_offset", &CadFeature::cut_offset},
         {"distance", &CadFeature::distance},
         {"distance2", &CadFeature::distance2},
+        {"shell_thickness", &CadFeature::shell_thickness},
         {"draft_angle", &CadFeature::draft_angle},
         {"dressup_size", &CadFeature::dressup_size},
         {"height", &CadFeature::height},
@@ -1380,6 +1381,18 @@ std::vector<Vec2d> CadDocument::nut_trap_outline(double af, double x, double y, 
     return p;
 }
 
+void CadDocument::follow_print_profile(CadFeature& f) const
+{
+    if (!variables.count("print_layer_h")) return;
+    const double lh = variable_value("print_layer_h", 0.0);
+    auto follow = [&f](const char* field, double value, double want, const char* expr) {
+        if (want > 1e-9 && std::abs(value - want) < 1e-6) f.expr.emplace(field, expr);   // never over a user's expression
+        else if (auto it = f.expr.find(field); it != f.expr.end() && it->second == expr) f.expr.erase(it);
+    };
+    follow("hole_layer_h", f.hole_layer_h, lh, "print_layer_h");
+    follow("hole_bridge_layer_h", f.hole_bridge_layer_h, 2.0 * lh, "2*print_layer_h");
+}
+
 int CadDocument::add_nut_trap(const std::string& designation, double x, double y, double slot, const SketchPlane& plane,
                               int target_body, bool flip, bool bolt_hole, double bridge_layer_h)
 {
@@ -1406,6 +1419,7 @@ int CadDocument::add_nut_trap(const std::string& designation, double x, double y
         const int h = add_hole_styled(bolt_d, 10.0, true, y, hy, hp, 1, af, depth, 0, 0, designation, "Bolt hole " + designation);
         features[size_t(h)].target_body         = target_body;
         features[size_t(h)].hole_bridge_layer_h = bridge_layer_h;
+        follow_print_profile(features[size_t(h)]);
     }
     return ex;
 }

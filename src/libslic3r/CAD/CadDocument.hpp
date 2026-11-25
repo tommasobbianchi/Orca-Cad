@@ -687,6 +687,8 @@ public:
     static std::vector<Vec2d> nut_trap_outline(double af, double x, double y, double slot);
     // Sketch + cut extrude (+ a bolt hole with two crossed sacrificial layers on the ledge when asked). Returns the extrude's
     // index; throws on an unknown size or a bolt size without a clearance. The caller checkpoints and recomputes.
+    // A hole's layer fields that equal the print profile follow it from then on; any other number stays the user's.
+    void follow_print_profile(CadFeature& f) const;
     int add_nut_trap(const std::string& designation, double x, double y, double slot, const SketchPlane& plane,
                      int target_body, bool flip, bool bolt_hole, double bridge_layer_h);
     bool        rename_variable(const std::string& from, const std::string& to, std::string& err);

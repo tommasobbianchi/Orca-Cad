@@ -5651,6 +5651,7 @@ void DesignPanel::on_add_hole()
             hf.hole_style = 1; hf.hole_cbore_diameter = m_hole_cbore_d->GetValue(); hf.hole_cbore_depth = m_hole_cbore_depth->GetValue();
             hf.hole_bridge_layer_h = m_hole_bridge_h->GetValue();
         }
+        m_doc.follow_print_profile(hf);
     }
     // On-face holes drill the body the face belongs to (even after the pick was cleared).
     if (m_hole_on_face && hidx >= 0 && hidx < int(m_doc.features.size())) {
@@ -11435,6 +11436,7 @@ CadFeature DesignPanel::build_candidate(Tool t) const
             f.hole_style = 1; f.hole_cbore_diameter = m_hole_cbore_d->GetValue(); f.hole_cbore_depth = m_hole_cbore_depth->GetValue();
             f.hole_bridge_layer_h = m_hole_bridge_h->GetValue();
         } else { f.hole_style = 0; f.hole_bridge_layer_h = 0; }
+        m_doc.follow_print_profile(f);
         f.hole_x        = m_hole_x->GetValue();
         f.hole_y        = m_hole_y->GetValue();
         if (m_hole_on_face) { f.target_body = m_hole_face_body; attach_to_face(f, m_hole_face_body, m_hole_face, false); }   // preview the right body
@@ -13798,7 +13800,10 @@ void DesignPanel::open_tool(Tool t)
     case Tool::Extrude: m_hdr_extrude->SetLabel(title(_L_CONTEXT("Extrude", "Design"))); break;
     case Tool::Dressup: m_hdr_dressup->SetLabel(title(
                             m_dressup_type->GetSelection() == 0 ? _L("Fillet") : _L("Chamfer"))); break;
-    case Tool::Hole:    m_hdr_hole->SetLabel(title(_L("Hole")));       sync_hole_card(); break;
+    case Tool::Hole:    m_hdr_hole->SetLabel(title(_L("Hole")));       sync_hole_card();
+        if (m_edit_index < 0 && m_doc.variables.count("print_layer_h"))   // a new hole starts on the profile's layer height
+            m_hole_layer_h->SetValue(m_doc.variable_value("print_layer_h", 0.2));
+        break;
     case Tool::Thread:  m_hdr_thread->SetLabel(title(_L("Thread")));   break;
     case Tool::Shell:   m_hdr_shell->SetLabel(title(_L_CONTEXT("Shell", "Design")));     break;
     case Tool::Revolve: m_hdr_revolve->SetLabel(title(_L("Revolve"))); break;

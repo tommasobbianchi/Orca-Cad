@@ -4634,21 +4634,24 @@ static void attach_print_fixes(json& notes, const json& suggestions, const CadDo
             label = "Replace the thread with a " + n.value("insert", std::string("heat-set")) + " insert pocket";
             steps.push_back(json{{"method", "thread_to_insert"}, {"params", {{"feature", n["feature"].get<int>()}}}});
         } else if ((kind == "z_height_multiple" || kind == "wall_multiple") && rot_id) {
-            // One blind extrude whose distance IS the measured height / wall owns the dimension: set it to the whole-layer / whole-line value.
+            // One blind extrude (or, for a wall, shell) whose value IS the measured height / wall owns the dimension: set it to the whole-layer / whole-line value.
             // Two candidates, or none (a wall made by a pocket or a sketch width), and there is no honest single change: advice only.
             const bool wall = kind == "wall_multiple";
             const double cur = wall ? n.value("wall_mm", 0.0) : n.value("height_mm", 0.0);
             const double lw = n.value("line_width_mm", 0.4);
             const double target = wall ? std::max(2.0, std::round(cur / lw)) * lw : n.value("target_mm", 0.0);
             int owner = -1, cnt = 0;
+            const char* field = "distance";
             for (size_t i = 0; i < doc.features.size(); ++i) {
                 const CadFeature& f = doc.features[i];
-                if (f.type == CadFeatureType::Extrude && f.enabled && f.extrude_end == ExtrudeEnd::Blind && f.mode != BooleanMode::Cut && std::abs(f.distance - cur) < 0.02) { owner = int(i); ++cnt; }
+                if (!f.enabled) continue;
+                if (f.type == CadFeatureType::Extrude && f.extrude_end == ExtrudeEnd::Blind && f.mode != BooleanMode::Cut && std::abs(f.distance - cur) < 0.02) { owner = int(i); field = "distance"; ++cnt; }
+                else if (wall && f.type == CadFeatureType::Shell && std::abs(f.shell_thickness - cur) < 0.02) { owner = int(i); field = "shell_thickness"; ++cnt; }
             }
             if (cnt != 1 || !(target > 0) || !(cur > 0)) continue;
             std::ostringstream os; os.imbue(std::locale::classic()); os.precision(6); os << target;
             label = std::string(wall ? "Set the wall to " : "Set the height to ") + os.str() + " mm";
-            steps.push_back(json{{"method", "set_feature_expr"}, {"params", {{"feature", owner}, {"field", "distance"}, {"expr", os.str()}}}});
+            steps.push_back(json{{"method", "set_feature_expr"}, {"params", {{"feature", owner}, {"field", field}, {"expr", os.str()}}}});
         } else if (kind == "hole_allowance") {
             label = "Define print_hole_allow (0.2 mm) and bind the hole diameters to it";
             steps.push_back(json{{"method", "set_variable"}, {"params", {{"name", "print_hole_allow"}, {"expr", "0.2"}}}});
