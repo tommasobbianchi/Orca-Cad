@@ -576,6 +576,20 @@ l2, r2 = bed_text_loss(0.4)
 check("__error__" not in r1 and l1 > 1.0, "R4: bed-face text becomes an engraving (%.1f mm3 at 0.2 mm layers)" % l1)
 check(l1 > 0 and abs(l2 / l1 - 2.0) < 0.15, "R4: the engraving is 2 layers deep: doubling the layer height doubles it (%.1f -> %.1f)" % (l1, l2))
 
+# text placed by picking the bed face: raised goes outward, and the fix engraves it
+fresh()
+box(40, 20, 5)
+bottom = [f["id"] for f in safe("query_topology", body=0).get("faces", []) if f.get("normal", [0, 0, 0])[2] < -0.99]
+v0 = safe("mass_properties", body=0).get("volume", 0)
+safe("set_variable", name="print_layer_h", expr="0.2")
+safe("add_text", text="BED", height=8, face=bottom[0], extrude_distance=1.0, boolean="union")
+v1 = safe("mass_properties", body=0).get("volume", 0)
+check(v1 - v0 > 5, "R4: text on a picked bed face stands out of the part (+%.1f mm3)" % (v1 - v0))
+r = safe("apply_print_fix", kind="text_indent", body=0)
+time.sleep(0.5)
+v2 = safe("mass_properties", body=0).get("volume", 0)
+check("__error__" not in r and 1.0 < v0 - v2 < 40, "R4: the fix engraves face-picked bed text (-%.1f mm3, %s)" % (v0 - v2, r.get("__error__") or "ok"))
+
 # the warp note offers two fixes: mouse ears (fix) and rounding the vertical edges (fix2, alt=1)
 fresh()
 safe("extrude_rect", width=60, height=60, distance=20)

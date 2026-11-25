@@ -687,6 +687,9 @@ public:
     static std::vector<Vec2d> nut_trap_outline(double af, double x, double y, double slot);
     // Sketch + cut extrude (+ a bolt hole with two crossed sacrificial layers on the ledge when asked). Returns the extrude's
     // index; throws on an unknown size or a bolt size without a clearance. The caller checkpoints and recomputes.
+    // The plane of a picked face for text: normal out of the material (SketchPlane::from_face alone ignores the face's
+    // orientation, so on some faces raised text went into the solid) and right-handed, so it reads from outside.
+    static SketchPlane text_plane_on_face(const TopoDS_Face& face);
     // A hole's layer fields that equal the print profile follow it from then on; any other number stays the user's.
     void follow_print_profile(CadFeature& f) const;
     int add_nut_trap(const std::string& designation, double x, double y, double slot, const SketchPlane& plane,

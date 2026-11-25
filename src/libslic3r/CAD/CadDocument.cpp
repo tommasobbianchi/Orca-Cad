@@ -1381,6 +1381,16 @@ std::vector<Vec2d> CadDocument::nut_trap_outline(double af, double x, double y, 
     return p;
 }
 
+SketchPlane CadDocument::text_plane_on_face(const TopoDS_Face& face)
+{
+    SketchPlane p = SketchPlane::from_face(face);
+    if (p.normal.dot(GeometryEngine::face_normal_world(face)) < 0) {
+        p.normal = -p.normal;
+        p.y_axis = p.normal.cross(p.x_axis).normalized();
+    }
+    return p;
+}
+
 void CadDocument::follow_print_profile(CadFeature& f) const
 {
     if (!variables.count("print_layer_h")) return;

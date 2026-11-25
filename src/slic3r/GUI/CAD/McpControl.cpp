@@ -6865,7 +6865,7 @@ json action_add_text(DesignPanel* panel, const json& params)
     bool on_face = false; int face_body = -1;
     int body_i = -1, face_i = -1; TopoDS_Face fc;
     if (face_of_params(params, doc, body_i, face_i, fc)) {
-        pl = SketchPlane::from_face(fc);
+        pl = CadDocument::text_plane_on_face(fc);
         off = pl.project(GeometryEngine::face_centroid_world(fc), pl.normal);
         on_face = true; face_body = body_i;
     } else {

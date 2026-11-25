@@ -4815,7 +4815,7 @@ void DesignPanel::open_text_dialog(int feat)
         } else if (m_sel_solid_face >= 0 && m_sel_solid_body >= 0 && m_sel_solid_body < int(m_doc.bodies.size())) {
             const TopoDS_Face face = GeometryEngine::face_by_index(m_doc.bodies[m_sel_solid_body].shape, m_sel_solid_face);
             if (!face.IsNull()) {
-                m_text_plane     = SketchPlane::from_face(face);
+                m_text_plane     = CadDocument::text_plane_on_face(face);
                 m_text_offset    = m_text_plane.project(GeometryEngine::face_centroid_world(face), m_text_plane.normal);
                 m_text_face_body = m_sel_solid_body;
             } else {
