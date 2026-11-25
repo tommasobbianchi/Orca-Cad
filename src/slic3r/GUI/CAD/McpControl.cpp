@@ -30,6 +30,7 @@
 #include <memory>
 #include <cmath>
 #include <algorithm>
+#include <numeric>
 #include <utility>
 #include <atomic>
 #include <mutex>
@@ -809,7 +810,7 @@ json describe_tools()
         compact_tool("rename_feature", "Rename a feature in the history.", {{"feature", "integer", "feature index"}, {"name", "string", "new name"}}),
         compact_tool("move_feature", "Move a feature to another history position; stops where a dependency (a sketch below its consumer) forbids the next step.", {{"feature", "integer", "feature index"}, {"to", "integer", "destination index"}}),
         compact_tool("thread_to_insert", "Replace an internal metric thread under M6 with a heat-set insert pocket on the same plane and spot; the thread is suppressed, not deleted.", {{"feature", "integer", "feature index of the internal thread"}}),
-        compact_tool("nut_trap", "Hexagonal pocket for a metric nut (ISO 4032 size + print_clear_xy), optionally with a side slot and a bolt hole, cut into the target body from a plane or face.", {{"bolt", "boolean", "also drill the bolt clearance hole through"}, {"bridge_layer_h", "number", "with bolt: thickness of the two crossed sacrificial layers on the ledge; 0 = none"}, {"designation", "string", "M1.6|M2|M2.5|M3|M4|M5|M6|M8|M10|M12|M14|M16|M20|M24|#2-56|#4-40|#6-32|#8-32|#10-24|#10-32|1/4-20|5/16-18|3/8-16"}, {"x", "number", "centre x in the plane"}, {"y", "number", "centre y in the plane"}, {"slot", "number", "mm from the centre along +x to slide the nut in; 0 = none"}, {"plane", "string", "XY|XZ|YZ"}, {"flip", "boolean", "cut the other way"}, {"body", "integer", "default last"}}),
+        compact_tool("nut_trap", "Hexagonal pocket for a metric nut (ISO 4032 size + print_clear_xy), optionally with a side slot and a bolt hole, cut into the target body from a plane or face.", {{"bolt", "boolean", "also drill the bolt clearance hole through"}, {"bridge_layer_h", "number", "with bolt: thickness of the two crossed sacrificial layers on the ledge; 0 = none"}, {"designation", "string", "M1.6|M2|M2.5|M3|M4|M5|M6|M8|M10|M12|M14|M16|M20|M24|#2-56|#4-40|#6-32|#8-32|#10-24|#10-32|1/4-20|5/16-18|3/8-16"}, {"x", "number", "centre x in the plane"}, {"y", "number", "centre y in the plane"}, {"slot", "number", "mm from the centre along +x to slide the nut in; 0 = none"}, {"plane", "string", "XY|XZ|YZ"}, {"face", "integer", "a face id to cut into (x,y from its centre); overrides plane"}, {"flip", "boolean", "cut the other way"}, {"body", "integer", "default last"}}),
         compact_tool("suppress", "Suppress (or restore) a feature; downstream features rebuild without it.", {{"feature", "integer", "feature index"}, {"suppressed", "boolean", "default true"}}),
         compact_tool("rollback", "Roll the history back to just after a feature (later ones are kept but not built); -1 restores the full history.", {{"index", "integer", "feature index or -1"}}),
         compact_tool("save", "Save the project to an absolute .3mf path under $HOME or /tmp. The 3MF holds the design recipe (reopens editable) and the bodies as printable objects; the bodies are sent to the plate first when it is empty (mesh:false never, mesh:true always).", {{"path", "string", ""}, {"mesh", "boolean", "commit the bodies as objects (default: when the plate has none)"}}),
@@ -3917,8 +3918,6 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
                 // Braced at both ends: the side of a gusset (one end on its 45 degree face), or a gap of at most 10 mm between two.
                 const int b1 = braced(pos[size_t(ed.a)]), b2 = braced(pos[size_t(ed.b)]);
                 if (b1 && b2 && (b1 == 2 || b2 == 2 || L <= 10.1)) continue;
-                if (shelf_n++ == 0) shelf_mid = mid;
-                if (shelf_tris.size() < 2000) shelf_tris.push_back(n1.z() < -0.95 ? ed.t1 : ed.t2);
                 const bool first_under = n1.z() < -0.95;
                 joins.push_back({pos[size_t(ed.a)], pos[size_t(ed.b)], first_under ? n2 : n1, first_under ? ed.t1 : ed.t2, first_under ? ed.t2 : ed.t1});
             }
@@ -3956,6 +3955,28 @@ json dfam_extras(const TriangleMesh& m, CadDocument& doc, double ang, double lin
             const std::string text = "The part meets the bed with " + num(double(foot_n)) + " sharp edge(s): the first layers squash outward (elephant foot). Set the slicer's elephant foot compensation, or chamfer the bottom edge 0.2-0.4 mm. Variable print_elefant_comp > 0 silences this";
             add_note("elephant_foot", "suggestion", text, foot_mid, Vec3d(0, 0, -1), foot_tris);
             suggestions.push_back(json{{"kind", "elephant_foot"}, {"edges", foot_n}, {"why", text}});
+        }
+        if (!joins.empty()) {   // an underside with a facing wall across it (pocket ceiling, nut slot) bridges: a gusset there would fill the pocket
+            std::vector<int> flat(F.size());   // flat-face id per triangle
+            std::iota(flat.begin(), flat.end(), 0);
+            auto root = [&](int t) { while (flat[size_t(t)] != t) t = flat[size_t(t)] = flat[size_t(flat[size_t(t)])]; return t; };
+            for (const auto& kv : edges)
+                if (kv.second.n == 2 && tri_normal(kv.second.t1).dot(tri_normal(kv.second.t2)) > 0.999)
+                    flat[size_t(root(kv.second.t1))] = root(kv.second.t2);
+            std::vector<Join> open_joins;
+            for (const Join& j : joins) {
+                const Vec3d dir = (j.b - j.a).normalized();
+                const bool bridged = std::any_of(joins.begin(), joins.end(), [&](const Join& k) {
+                    if (k.out.dot(j.out) > -0.99 || root(k.under) != root(j.under) || (k.a - j.a).dot(j.out) <= 0.0) return false;
+                    const double p = (k.a - j.a).dot(dir), q = (k.b - j.a).dot(dir);   // the facing wall must run alongside
+                    return std::max(p, q) > 0.0 && std::min(p, q) < (j.b - j.a).norm();
+                });
+                if (bridged) continue;
+                open_joins.push_back(j);
+                if (shelf_n++ == 0) shelf_mid = (j.a + j.b) * 0.5;
+                if (shelf_tris.size() < 2000) shelf_tris.push_back(j.under);
+            }
+            joins.swap(open_joins);
         }
         json shelf;   // the pinned join, measured: ends, the way out from the wall, how far the underside reaches, how much wall is below
         if (!joins.empty()) {
@@ -6467,8 +6488,10 @@ json action_nut_trap(DesignPanel* panel, const json& params)
     if (slot < 0 || lh < 0) throw std::runtime_error("slot and bridge_layer_h must be >= 0");
     const bool bolt = params.value("bolt", false);
     if (doc.bodies.empty()) throw std::runtime_error("no body to cut");
-    const SketchPlane pl = plane_from(params, doc);
-    const int target = target_body_arg(params, doc);
+    const SketchPlane pl = hole_plane_from(params, doc);   // `face`: into the body, x,y from the face centre
+    int target = target_body_arg(params, doc);
+    int face_body, face_i; TopoDS_Face fc;
+    if (face_of_params(params, doc, face_body, face_i, fc)) target = face_body;
     doc.checkpoint();
     try {
         const int e = doc.add_nut_trap(desig, params.value("x", 0.0), params.value("y", 0.0), slot, pl, target,

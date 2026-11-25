@@ -590,6 +590,20 @@ time.sleep(0.5)
 v2 = safe("mass_properties", body=0).get("volume", 0)
 check("__error__" not in r and 1.0 < v0 - v2 < 40, "R4: the fix engraves face-picked bed text (-%.1f mm3, %s)" % (v0 - v2, r.get("__error__") or "ok"))
 
+# nut_trap on a picked face cuts into the body from there; a pocket ceiling is not a shelf
+fresh()
+box(40, 40, 15)
+top = [f["id"] for f in safe("query_topology", body=0).get("faces", []) if f.get("normal", [0, 0, 0])[2] > 0.99]
+v0 = safe("mass_properties", body=0).get("volume", 0)
+r = safe("nut_trap", designation="M5", face=top[0], x=0, y=0, slot=30)
+a = safe("analyze_printability", body=0)
+check(r.get("ok") is True and v0 - safe("mass_properties", body=0).get("volume", 0) > 100 and a.get("overhang_area_mm2", a.get("overhang_mm2", 0)) < 1
+      and not kind_notes(a, "shelf_underside"), "R2: nut_trap on the top face is open upward, no overhang (%s)" % (r.get("__error__") or "ok"))
+fresh()
+box(40, 40, 15)
+safe("nut_trap", designation="M5", x=0, y=0, slot=30)   # from the bed face: the slot has a ceiling between two walls
+check(not kind_notes(safe("analyze_printability", body=0), "shelf_underside"), "R7: a pocket ceiling between two walls is not a shelf (no gussets in a nut slot)")
+
 # the warp note offers two fixes: mouse ears (fix) and rounding the vertical edges (fix2, alt=1)
 fresh()
 safe("extrude_rect", width=60, height=60, distance=20)
