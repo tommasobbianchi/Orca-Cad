@@ -1274,10 +1274,10 @@ static const InsertEntry kInsertTable[] = {
     // #10-24 and #10-32 0.213 / 0.312 / 0.437, 1/4-20 0.323 / 0.375 / 0.500.
     {"#2-56", 2.72, 3.18, 4.75}, {"#4-40", 3.28, 4.75, 6.35}, {"#6-32", 4.22, 6.35, 7.93}, {"#8-32", 4.98, 6.35, 9.53},
     {"#10-24", 5.41, 7.93, 11.10}, {"#10-32", 5.41, 7.93, 11.10}, {"1/4-20", 8.20, 9.53, 12.70},
-    // The common short assortment-kit inserts, named by outer diameter (box labels read thread x length x OD). Hole = OD - 0.6,
-    // the best fit of a printed coupon (0.4 nozzle, 2026-11-25; modelled holes OD-0.6/-0.4/-0.2, the smallest won in every row,
-    // so a smaller one was not ruled out). Lengths are the box's.
-    {"M2 OD3.2", 2.6, 2.5, 4}, {"M2.5 OD3.5", 2.9, 4, 5}, {"M3 OD5", 4.4, 4, 6}, {"M4 OD6", 5.4, 4, 8}, {"M5 OD7", 6.4, 6, 10}, {"M6 OD8", 7.4, 8, 8},
+    // The common short assortment-kit inserts, named by outer diameter (box labels read thread x length x OD). Hole = OD - 0.7,
+    // the best fit of two printed coupons (0.4 nozzle, 2026-11-25): OD-0.6 beat -0.4/-0.2, then, in PLA-CF at 0.16 mm layers,
+    // OD-0.7 beat -0.8/-0.6. Another material or printer may want another value. Lengths are the box's.
+    {"M2 OD3.2", 2.5, 2.5, 4}, {"M2.5 OD3.5", 2.8, 4, 5}, {"M3 OD5", 4.3, 4, 6}, {"M4 OD6", 5.3, 4, 8}, {"M5 OD7", 6.3, 6, 10}, {"M6 OD8", 7.3, 8, 8},
 };
 
 bool CadDocument::insert_pocket_for_thread(double major_d, std::string& designation, double& hole_d)
