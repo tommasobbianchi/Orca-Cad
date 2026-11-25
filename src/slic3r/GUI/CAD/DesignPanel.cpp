@@ -8887,9 +8887,41 @@ void DesignPanel::end_body_move(bool keep)
         feed_bodies();           // re-render the reverted placement
     }
     m_viewport->clear_move_gizmo();
+    const int moved = m_move_body;
     m_move_body = -1;
     show_move_card(false);
     update_action_bar();
+    if (keep) bake_body_move(moved, m_move_prev);
+}
+
+// A Move or Place on Face drags the body on screen only. Whatever is built next (extrude, boolean, cut) works on the document,
+// so the finished motion goes into the recipe as an ordinary, undoable Transform feature.
+void DesignPanel::bake_body_move(int b, const Transform3d& from)
+{
+    if (b < 0 || b >= int(m_doc.bodies.size()) || b >= int(m_body_xform.size()) || b >= int(m_doc.display_body_meshes.size())) return;
+    const Transform3d to = m_body_xform[b];
+    if (to.isApprox(from)) return;
+    const Transform3d d = to * from.inverse();   // this gesture's motion, in document space (rigid)
+    const Vec3d       c = m_doc.display_body_meshes[b].bounding_box().center();
+    const Eigen::AngleAxisd aa(Eigen::Matrix3d(d.linear()));
+    Vec3d  axis  = aa.axis();
+    double angle = aa.angle() * 180.0 / M_PI;
+    int    k     = 0;
+    axis.cwiseAbs().maxCoeff(&k);   // dominant component positive: a one-ring turn reads as X, Y or Z with its true sign
+    if (axis[k] < 0) { axis = -axis; angle = -angle; }
+    m_body_xform[b] = from;
+    m_doc.checkpoint();   // undo boundary: the move
+    m_feature_counter++;
+    m_doc.add_transform(b, d * c - c, axis, c, angle, false, feature_name(_L("Transform")));
+    if (!recompute_guarded(_L("Rebuilding model…"))) {
+        const std::string why = m_doc.error;
+        m_doc.undo();
+        m_body_xform[b] = to;
+        feed_bodies();
+        set_status(StatusKind::Error, wxString::Format(_L("The model could not be rebuilt: %s"), kernel_error_text(why)));
+    } else
+        set_status_ok();
+    refresh_tree();
 }
 
 // Transform card (add mode): arm the same move gizmo on the card's body so the geometry-first
@@ -8984,7 +9016,7 @@ bool DesignPanel::place_on_face()
     probe.transform(x);
     x = Transform3d(Eigen::Translation3d(0.0, 0.0, -probe.bounding_box().min.z())) * x;
     m_body_xform[b] = x;
-    set_status_ok();   // rebuild display/pick meshes, re-point picking; resets face selection
+    bake_body_move(b, old_x);   // a Transform feature: rebuilds and re-points picking, which resets the face selection
     set_status(StatusKind::Info, _L("Placed on face — body laid flat on the bed"));
     return true;
 }

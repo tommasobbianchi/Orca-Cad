@@ -1266,6 +1266,7 @@ private:
     void on_move_body();                  // start the move gizmo on the selected body
     bool body_move_pending() const { return m_move_body >= 0; }   // the Move button's session is open
     void end_body_move(bool keep);        // leave it: keep the dragged pose, or put the body back
+    void bake_body_move(int body, const Transform3d& from);   // the motion since `from` becomes a Transform feature
     void arm_transform_gizmo();           // arm the move gizmo on the Transform card's body (add mode only)
     void on_set_body_color();             // Color tool: pick a per-body display colour override
     // Zoom to selection: frame one thing along the current view, as the canvas's Fit button frames
